@@ -580,6 +580,11 @@ include(gmxManageCP2K)
 include(gmxManageNNPot)
 
 ########################################################################
+# Process metatensor settings
+########################################################################
+include(gmxManageMetatensor)
+
+########################################################################
 #Process shared/static library settings
 ########################################################################
 include(gmxManageSharedLibraries)
@@ -630,7 +635,7 @@ if (GMX_HWLOC)
     if (HWLOC_FIND_QUIETLY_AFTER_FIRST_RUN)
         set(HWLOC_FIND_QUIETLY TRUE)
     endif()
-    find_package(HWLOC 1.5) 
+    find_package(HWLOC 1.5)
 
     if (HWLOC_FOUND)
         if (HWLOC_LIBRARIES MATCHES ".a$")
@@ -716,7 +721,7 @@ if(GMX_GPU)
     elseif(${_gmx_gpu_uppercase} STREQUAL "HIP")
         include(gmxManageHip)
     elseif(${_gmx_gpu_uppercase} STREQUAL "OPENCL")
-        message(STATUS "GPU support with OpenCL is deprecated. It is still fully supported (and " 
+        message(STATUS "GPU support with OpenCL is deprecated. It is still fully supported (and "
             "recommended for Apple GPUs). Please use CUDA for running on NVIDIA GPUs and "
             "SYCL for running on Intel and AMD GPUs.")
         include(gmxManageOpenCL)
