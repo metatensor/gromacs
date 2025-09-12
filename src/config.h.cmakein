@@ -476,16 +476,14 @@
 /* Define if we are building with Colvars */
 #cmakedefine01 GMX_HAVE_COLVARS
 
-<<<<<<< HEAD
 /* Define if we are building with Torch */
 #cmakedefine01 GMX_TORCH
 
 /* Define if we are building with an external FMM implementation */
 #cmakedefine01 GMX_USE_EXT_FMM
-=======
+
 /* Define if we are building with Metatensor */
 #cmakedefine01 GMX_METATENSOR
->>>>>>> 044139ef29 (Intitial scaffolding of metatensor interface)
 
 /* Build using clang analyzer */
 #cmakedefine01 GMX_CLANG_ANALYZER
