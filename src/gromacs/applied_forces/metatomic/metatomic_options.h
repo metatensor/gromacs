@@ -31,6 +31,15 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief
+ * Declares the options for Metatomic MDModule class,
+ * set during pre-processing in the .mdp-file.
+ *
+ * \author Metatensor developers <https://github.com/metatensor>
+ * \ingroup module_applied_forces
+ */
+#pragma once
 
 #include <string>
 
@@ -45,7 +54,8 @@ class IKeyValueTreeTransformRules;
 class KeyValueTreeObjectBuilder;
 
 //! TODO
-struct MetatomicParameters {
+struct MetatomicParameters
+{
     //! Is the metatomic force provider enabled?
     bool active = false;
 

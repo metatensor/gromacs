@@ -31,15 +31,22 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief
+ * Implements the options for NNPot MDModule class.
+ *
+ * \author Metatensor developers <https://github.com/metatensor>
+ * \ingroup module_applied_forces
+ */
 #include "gmxpre.h"
+
+#include "metatomic_options.h"
 
 #include "gromacs/options/basicoptions.h"
 #include "gromacs/options/optionsection.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 #include "gromacs/utility/keyvaluetreetransform.h"
 #include "gromacs/utility/strconvert.h"
-
-#include "metatomic_options.h"
 
 namespace gmx
 {
@@ -50,8 +57,8 @@ static const std::string METATOMIC_MODULE_NAME = "metatomic";
  * \note Changing this strings will break .tpr backwards compatibility
  */
 
-static const std::string ACTIVE_TAG               = "active";
-static const std::string INPUT_GROUP_TAG          = "input_group";
+static const std::string ACTIVE_TAG      = "active";
+static const std::string INPUT_GROUP_TAG = "input_group";
 
 static const std::string MODEL_PATH_TAG           = "model";
 static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
@@ -73,8 +80,8 @@ static const std::string DEVICE_TAG               = "device";
  */
 template<class ToType, class TransformWithFunctionType>
 void MetatomicMdpTransformFromString(IKeyValueTreeTransformRules* rules,
-                                 TransformWithFunctionType    transformationFunction,
-                                 const std::string&           optionTag)
+                                     TransformWithFunctionType    transformationFunction,
+                                     const std::string&           optionTag)
 {
     rules->addRule()
             .from<std::string>("/" + METATOMIC_MODULE_NAME + "-" + optionTag)
@@ -120,13 +127,16 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
         builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + INPUT_GROUP_TAG, params_.inputGroup);
 
         builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + MODEL_PATH_TAG, params_.modelPath);
-        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + EXTENSIONS_DIRECTORY_TAG, params_.extensionsDirectory);
+        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + EXTENSIONS_DIRECTORY_TAG,
+                                       params_.extensionsDirectory);
         builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + DEVICE_TAG, params_.device);
-        builder->addValue<bool>(METATOMIC_MODULE_NAME + "-" + CHECK_CONSISTENCY_TAG, params_.checkConsistency);
+        builder->addValue<bool>(METATOMIC_MODULE_NAME + "-" + CHECK_CONSISTENCY_TAG,
+                                params_.checkConsistency);
     }
 }
 
-const MetatomicParameters& MetatomicOptions::parameters() {
+const MetatomicParameters& MetatomicOptions::parameters()
+{
     return params_;
 }
 

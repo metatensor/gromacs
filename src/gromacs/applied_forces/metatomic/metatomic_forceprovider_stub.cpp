@@ -31,6 +31,14 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief
+ * Stub implementation of the Metatomic Force Provider class.
+ * Compiled in case Libtorch/Metatomic backend is not linked.
+ *
+ * \author Metatensor developers <https://github.com/metatensor>
+ * \ingroup module_applied_forces
+ */
 
 #include "gmxpre.h"
 
@@ -45,16 +53,19 @@ namespace gmx
 
 CLANG_DIAGNOSTIC_IGNORE("-Wmissing-noreturn")
 
-MetatomicForceProvider::MetatomicForceProvider(const MetatomicParameters& /*params*/) {
-    GMX_THROW(InternalError(
-        "This version of GROMACS can not use metatomic atomistic models. "
-        "Please reconfigure with `-DGMX_METATOMIC=ON` to enable this interface"
-    ));
+MetatomicForceProvider::MetatomicForceProvider(const MetatomicParameters& /*params*/)
+{
+    GMX_THROW(
+            InternalError("This version of GROMACS can not use metatomic atomistic models. "
+                          "Please reconfigure with `-DGMX_METATOMIC=ON` to enable this interface"));
 }
 
 MetatomicForceProvider::~MetatomicForceProvider() {}
 
-void MetatomicForceProvider::calculateForces(const ForceProviderInput& /*inputs*/, ForceProviderOutput* /*outputs*/) {}
+void MetatomicForceProvider::calculateForces(const ForceProviderInput& /*inputs*/,
+                                             ForceProviderOutput* /*outputs*/)
+{
+}
 
 CLANG_DIAGNOSTIC_RESET
 

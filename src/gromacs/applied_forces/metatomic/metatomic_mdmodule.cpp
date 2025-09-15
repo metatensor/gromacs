@@ -31,6 +31,13 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief
+ * Implements Metatomic MDModule class
+ *
+ * \author Metatensor developers <https://github.com/metatensor>
+ * \ingroup module_applied_forces
+ */
 
 
 #include "gmxpre.h"
@@ -85,27 +92,22 @@ public:
             return;
         }
 
-        const auto setInputGroupIndicesFunction = [this](const IndexGroupsAndNames& indexGroupsAndNames) {
-            options_.setInputGroupIndices(indexGroupsAndNames);
-        };
+        const auto setInputGroupIndicesFunction = [this](const IndexGroupsAndNames& indexGroupsAndNames)
+        { options_.setInputGroupIndices(indexGroupsAndNames); };
         notifiers->preProcessingNotifier_.subscribe(setInputGroupIndicesFunction);
 
-        const auto modifyTopologyFunction = [this](gmx_mtop_t* top) {
-            options_.modifyTopology(top);
-        };
+        const auto modifyTopologyFunction = [this](gmx_mtop_t* top) { options_.modifyTopology(top); };
         notifiers->preProcessingNotifier_.subscribe(modifyTopologyFunction);
 
-        const auto writeParamsToKvtFunction = [this](KeyValueTreeObjectBuilder kvt) {
-            options_.writeParamsToKvt(kvt);
-        };
+        const auto writeParamsToKvtFunction = [this](KeyValueTreeObjectBuilder kvt)
+        { options_.writeParamsToKvt(kvt); };
         notifiers->preProcessingNotifier_.subscribe(writeParamsToKvtFunction);
 
-        const auto setLoggerFunction = [this](const MDLogger& logger) {
-            options_.setLogger(logger);
-        };
+        const auto setLoggerFunction = [this](const MDLogger& logger) { options_.setLogger(logger); };
         notifiers->preProcessingNotifier_.subscribe(setLoggerFunction);
 
-        const auto setWarningFunction = [this](WarningHandler* wi) { options_.setWarningHandler(wi); };
+        const auto setWarningFunction = [this](WarningHandler* wi)
+        { options_.setWarningHandler(wi); };
         notifiers->preProcessingNotifier_.subscribe(setWarningFunction);
     }
 
@@ -134,20 +136,18 @@ public:
             return;
         }
 
-        const auto readParamsFromKvtFunction = [this](const KeyValueTreeObject& kvt) {
-            options_.readParamsFromKvt(kvt);
-        };
+        const auto readParamsFromKvtFunction = [this](const KeyValueTreeObject& kvt)
+        { options_.readParamsFromKvt(kvt); };
         notifiers->simulationSetupNotifier_.subscribe(readParamsFromKvtFunction);
 
-        const auto setLocalAtomSetFunction = [this](LocalAtomSetManager* localAtomSetManager) {
+        const auto setLocalAtomSetFunction = [this](LocalAtomSetManager* localAtomSetManager)
+        {
             LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().metatomicIndices_);
             options_.setLocalAtomSet(atomSet);
         };
         notifiers->simulationSetupNotifier_.subscribe(setLocalAtomSetFunction);
 
-        const auto setTopologyFunction = [this](const gmx_mtop_t& top) {
-            options_.setTopology(top);
-        };
+        const auto setTopologyFunction = [this](const gmx_mtop_t& top) { options_.setTopology(top); };
         notifiers->simulationSetupNotifier_.subscribe(setTopologyFunction);
 
         const auto setPbcTypeFunction = [this](const PbcType& pbc) { options_.setPbcType(pbc); };
@@ -156,16 +156,12 @@ public:
         const auto setCommFunction = [this](const MpiComm& mpiComm) { options_.setComm(mpiComm); };
         notifiers->simulationSetupNotifier_.subscribe(setCommFunction);
 
-        const auto setLoggerFunction = [this](const MDLogger& logger) {
-            options_.setLogger(logger);
-        };
+        const auto setLoggerFunction = [this](const MDLogger& logger) { options_.setLogger(logger); };
         notifiers->simulationSetupNotifier_.subscribe(setLoggerFunction);
 
         // Request that GROMACS adds an energy term for our potential to the .edr file
-        const auto requestEnergyOutput = [](MDModulesEnergyOutputToMetatomicRequestChecker*
-                                                    energyOutputRequest) {
-            energyOutputRequest->energyOutputToMetatomic_ = true;
-        };
+        const auto requestEnergyOutput = [](MDModulesEnergyOutputToMetatomicRequestChecker* energyOutputRequest)
+        { energyOutputRequest->energyOutputToMetatomic_ = true; };
         notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
     }
 
@@ -185,9 +181,8 @@ public:
         }
 
         // After domain decomposition, the force provider needs to know which atoms are local.
-        const auto notifyDDFunction = [this](const MDModulesAtomsRedistributedSignal& /*signal*/) {
-            force_provider_->updateLocalAtoms();
-        };
+        const auto notifyDDFunction = [this](const MDModulesAtomsRedistributedSignal& /*signal*/)
+        { force_provider_->updateLocalAtoms(); };
         notifiers->simulationRunNotifier_.subscribe(notifyDDFunction);
     }
 
@@ -203,7 +198,7 @@ public:
     }
 
     IMdpOptionProvider* mdpOptionProvider() override { return &options_; }
-    IMDOutputProvider* outputProvider() override { return nullptr; }
+    IMDOutputProvider*  outputProvider() override { return nullptr; }
 
 private:
     MetatomicOptions options_;

@@ -31,9 +31,14 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
-
-#ifndef METATOMIC_MDMODULE_H
-#define METATOMIC_MDMODULE_H
+/*! \internal \file
+ * \brief
+ * Declares factory structure for Metatomic MDModule class
+ *
+ * \author Metatensor developers <https://github.com/metatensor>
+ * \ingroup module_applied_forces
+ */
+#pragma once
 
 #include <memory>
 #include <string>
@@ -54,10 +59,8 @@ struct MetatomicModuleInfo
      * TODO
      */
     static std::unique_ptr<IMDModule> create();
-    static const std::string name_;
+    static const std::string          name_;
 };
 
 
 } // namespace gmx
-
-#endif

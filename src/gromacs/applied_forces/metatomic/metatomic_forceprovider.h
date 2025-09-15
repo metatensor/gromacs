@@ -31,7 +31,15 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
+/*! \internal \file
+ * \brief
+ * Declares the Metatomic Force Provider class
+ *
+ * \author Metatensor developers <https://github.com/metatensor>
+ * \ingroup module_applied_forces
+ */
 
+#pragma once
 
 #include "gromacs/mdtypes/iforceprovider.h"
 
@@ -58,8 +66,8 @@ public:
 
 private:
     const MetatomicParameters& params_;
-    const MDLogger&             logger_;
-    const MpiComm&              mpiComm_;
+    const MDLogger&            logger_;
+    const MpiComm&             mpiComm_;
 };
 
 } // namespace gmx

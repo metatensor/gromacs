@@ -31,7 +31,13 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
-
+/*! \internal \file
+ * \brief
+ * Implements the Metatomic Force Provider class
+ *
+ * \author Metatensor developers <https://github.com/metatensor>
+ * \ingroup module_applied_forces
+ */
 #include "gmxpre.h"
 
 #include "metatomic_forceprovider.h"
@@ -326,10 +332,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
 
 metatomic_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic_torch::NeighborListOptions request,
-                                                                        long          nAtoms,
-                                                                        const double* positions,
-                                                                        const double* box,
-                                                                        bool          periodic)
+                                                                      long          nAtoms,
+                                                                      const double* positions,
+                                                                      const double* box,
+                                                                      bool          periodic)
 {
     auto cutoff = request->engine_cutoff(params_.lengthUnit_);
 
