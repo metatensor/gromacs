@@ -49,17 +49,18 @@ namespace gmx
 class IMDModule;
 
 /*! \internal
-    \brief Information about the NNPot module.
+    \brief Information about the Metatomic module.
  *
- * Provides name and method to create a neural network (NN) potential module.
+ * Provides name and method to create a metatomic potential module.
  */
 struct MetatomicModuleInfo
 {
     /*! \brief
-     * TODO
+     * Creates a module for applying forces derived from a metatomic potential.
      */
     static std::unique_ptr<IMDModule> create();
-    static const std::string          name_;
+    //! The name of the module
+    static constexpr std::string_view sc_name = "metatomic";
 };
 
 

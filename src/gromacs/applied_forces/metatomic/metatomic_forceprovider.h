@@ -63,6 +63,7 @@ public:
     /*! TODO
      */
     void calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs) override;
+    void updateLocalAtoms();
 
 private:
     const MetatomicParameters& params_;

@@ -45,7 +45,7 @@
 #include "gromacs/applied_forces/densityfitting/densityfitting.h"
 #include "gromacs/applied_forces/electricfield.h"
 #include "gromacs/applied_forces/nnpot/nnpot.h"
-#include "gromacs/applied_forces/metatomic/metatomic.h"
+#include "gromacs/applied_forces/metatomic/metatomic_mdmodule.h"
 #include "gromacs/applied_forces/plumed/plumedMDModule.h"
 #include "gromacs/applied_forces/qmmm/qmmm.h"
 #include "gromacs/fmm/fmm_mdmodule.h"

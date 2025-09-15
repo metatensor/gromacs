@@ -142,7 +142,7 @@ public:
 
         const auto setLocalAtomSetFunction = [this](LocalAtomSetManager* localAtomSetManager)
         {
-            LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().metatomicIndices_);
+            LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().metatomicIndices);
             options_.setLocalAtomSet(atomSet);
         };
         notifiers->simulationSetupNotifier_.subscribe(setLocalAtomSetFunction);
@@ -160,7 +160,8 @@ public:
         notifiers->simulationSetupNotifier_.subscribe(setLoggerFunction);
 
         // Request that GROMACS adds an energy term for our potential to the .edr file
-        const auto requestEnergyOutput = [](MDModulesEnergyOutputToMetatomicPotRequestChecker* energyOutputRequest)
+        const auto requestEnergyOutput =
+                [](MDModulesEnergyOutputToMetatomicPotRequestChecker* energyOutputRequest)
         { energyOutputRequest->energyOutputToMetatomicPot_ = true; };
         notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
     }
@@ -193,7 +194,8 @@ public:
             return;
         }
 
-        force_provider_ = std::make_unique<MetatomicForceProvider>(options_);
+        force_provider_ = std::make_unique<MetatomicForceProvider>(
+                options_.parameters(), options_.logger(), options_.mpiComm());
         forceProviders->addForceProvider(force_provider_.get(), "Metatomic");
     }
 
@@ -212,8 +214,5 @@ std::unique_ptr<IMDModule> MetatomicModuleInfo::create()
 {
     return std::make_unique<MetatomicMDModule>();
 }
-
-// The name must match the one used in the .mdp file options (`metatomic-active`).
-const std::string MetatomicModuleInfo::name_ = "metatomic";
 
 } // end namespace gmx

@@ -46,14 +46,16 @@
 #include "gromacs/utility/exceptions.h"
 
 #include "metatomic_forceprovider.h"
-#include "metatomic_options.h"
 
 namespace gmx
 {
 
 CLANG_DIAGNOSTIC_IGNORE("-Wmissing-noreturn")
 
-MetatomicForceProvider::MetatomicForceProvider(const MetatomicParameters& /*params*/)
+MetatomicForceProvider::MetatomicForceProvider(const MetatomicParameters& params,
+                                               const MDLogger&            logger,
+                                               const MpiComm&             mpiComm) :
+    params_(params), logger_(logger), mpiComm_(mpiComm)
 {
     GMX_THROW(
             InternalError("This version of GROMACS can not use metatomic atomistic models. "

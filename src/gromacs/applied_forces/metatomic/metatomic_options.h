@@ -41,17 +41,31 @@
  */
 #pragma once
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "gromacs/mdtypes/imdpoptionprovider.h"
+#include "gromacs/topology/atoms.h"
+#include "gromacs/utility/vectypes.h"
+
+// some forward declarations
+struct gmx_mtop_t;
+class WarningHandler;
+enum class PbcType;
+
 
 namespace gmx
 {
-
 class MDLogger;
 class IOptionsContainerWithSections;
 class IKeyValueTreeTransformRules;
 class KeyValueTreeObjectBuilder;
+class KeyValueTreeObject;
+class IndexGroupsAndNames;
+class LocalAtomSet;
+class MpiComm;
+
 
 //! TODO
 struct MetatomicParameters
@@ -74,6 +88,12 @@ struct MetatomicParameters
     //! stores atom group name for which metatomic should compute the energy
     //! (default whole System)
     std::string inputGroup = "System";
+
+    std::vector<Index>            metatomicIndices;
+    std::unique_ptr<LocalAtomSet> localAtomSet_;
+    t_atoms                       atoms_;
+    int                           numAtoms_;
+    std::unique_ptr<PbcType>      pbcType_;
 };
 
 class MetatomicOptions final : public IMdpOptionProvider
@@ -83,27 +103,28 @@ public:
     void initMdpOptions(IOptionsContainerWithSections* options) override;
     void buildMdpOutput(KeyValueTreeObjectBuilder* builder) const override;
 
-    // //! modify topology of the system during preprocessing
-    // void modifyTopology(gmx_mtop_t*) const;
+    bool isActive() const;
+    void setInputGroupIndices(const IndexGroupsAndNames&);
+    void modifyTopology(gmx_mtop_t*);
+    void writeParamsToKvt(KeyValueTreeObjectBuilder);
+    void readParamsFromKvt(const KeyValueTreeObject&);
+    void setLogger(const MDLogger&);
+    void setWarningHandler(WarningHandler*);
+    void setTopology(const gmx_mtop_t&);
+    void setLocalAtomSet(const LocalAtomSet&);
+    void setPbcType(const PbcType&);
+    void setComm(const MpiComm&);
 
-    // //! set topology of the system during simulation setup
-    // void setTopology(const gmx_mtop_t&);
-
-    // //! set communication record during simulation setup
-    // void setCommRec(const t_commrec&);
-
-    // //! Store the paramers that are not mdp options in the tpr file
-    // // This is needed to retain data from preprocessing to simulation setup
-    // void writeParamsToKvt(KeyValueTreeObjectBuilder);
-
-    // //! Set the internal parameters that are stored in the tpr file
-    // void readParamsFromKvt(const KeyValueTreeObject&);
-
-    //! TODO
     const MetatomicParameters& parameters();
+    const MDLogger&            logger() const;
+    const MpiComm&             mpiComm() const;
+
 
 private:
     MetatomicParameters params_;
+    const MDLogger*     logger_  = nullptr;
+    const MpiComm*      mpiComm_ = nullptr;
+    WarningHandler*     wi_      = nullptr;
 };
 
 } // namespace gmx
