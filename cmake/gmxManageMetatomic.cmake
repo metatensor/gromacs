@@ -39,39 +39,45 @@ option(GMX_METATOMIC "Enable interface to metatomic atomistic models" OFF)
 # endif()
 
 if(GMX_METATOMIC)
-    # For the initial development, we just build the metatensor library as part
-    # of the gromacs build process. Later we'll add an option to use
-    # pre-installed versions of the libraries
-
     include(FetchContent)
 
-    set(URL_METATENSOR_BASE "https://github.com/metatensor/metatensor/releases/download")
+    find_package(metatensor-core)
 
-    set(METATENSOR_CORE_VERSION "0.1.17")
-    FetchContent_Declare(metatensor
-        URL ${URL_METATENSOR_BASE}/metatensor-core-v${METATENSOR_CORE_VERSION}/metatensor-core-cxx-${METATENSOR_CORE_VERSION}.tar.gz
-        URL_HASH SHA256=42119e11908239915ccc187d7ca65449b461f1d4b5af4d6df1fb613d687da76a
+    if(NOT metatensor-core_FOUND)
+        message(STATUS "metatensor-core not found, fetching from git...")
+        FetchContent_Declare(metatensor-core
+            GIT_REPOSITORY "https://github.com/metatensor/metatensor.git"
+            GIT_TAG "metatensor-core-v0.1.17"
+        )
+        FetchContent_MakeAvailable(metatensor-core)
+    endif()
+
+    find_package(metatensor-torch)
+
+    if(NOT metatensor-torch_FOUND)
+        message(STATUS "metatensor-torch not found, fetching from git...")
+        FetchContent_Declare(metatensor-torch
+            GIT_REPOSITORY "https://github.com/metatensor/metatensor.git"
+            GIT_TAG "metatensor-torch-v0.8.0"
+        )
+        FetchContent_MakeAvailable(metatensor-torch)
+    endif()
+
+    find_package(metatomic-torch)
+
+    if(NOT metatomic-torch_FOUND)
+        message(STATUS "metatomic-torch not found, fetching from git...")
+        FetchContent_Declare(metatomic-torch
+            GIT_REPOSITORY "https://github.com/metatensor/metatomic.git"
+            GIT_TAG "metatomic-torch-v0.1.4"
+        )
+        FetchContent_MakeAvailable(metatomic-torch)
+    endif()
+
+    list(APPEND GMX_COMMON_LIBRARIES
+        metatensor-core
+        metatensor-torch
+        metatomic-torch
     )
 
-    message(STATUS "Fetching metatensor v${METATENSOR_CORE_VERSION} from github")
-    FetchContent_MakeAvailable(metatensor)
-
-    set(METATENSOR_TORCH_VERSION "0.8.0")
-    FetchContent_Declare(metatensor_torch
-        URL ${URL_METATENSOR_BASE}/metatensor-torch-v${METATENSOR_TORCH_VERSION}/metatensor-torch-cxx-${METATENSOR_TORCH_VERSION}.tar.gz
-        URL_HASH SHA256=61d383ce958deafe0e3916088185527680c9118588722b17ec5c39cfbaa6da55
-    )
-
-    message(STATUS "Fetching metatensor_torch v${METATENSOR_TORCH_VERSION} from github")
-    FetchContent_MakeAvailable(metatensor_torch)
-
-    # Consider maybe using URLs for this too
-    FetchContent_Declare(metatomic-torch
-        GIT_REPOSITORY "https://github.com/metatensor/metatomic.git"
-        GIT_TAG "metatomic-torch-v0.1.4"
-    )
-    message(STATUS "Fetching metatomic-torch v0.1.4 from git")
-    FetchContent_MakeAvailable(metatomic-torch)
-
-    list(APPEND GMX_COMMON_LIBRARIES metatensor metatensor_torch metatomic_torch)
 endif()
