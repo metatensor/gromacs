@@ -580,9 +580,9 @@ include(gmxManageCP2K)
 include(gmxManageNNPot)
 
 ########################################################################
-# Process metatensor settings
+# Process metatomic settings
 ########################################################################
-include(gmxManageMetatensor)
+include(gmxManageMetatomic)
 
 ########################################################################
 #Process shared/static library settings
