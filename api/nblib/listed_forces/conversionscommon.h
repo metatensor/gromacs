@@ -156,6 +156,7 @@ using GmxToNblibMapping =
                    Unimplemented,            //    F_DENSITYFITTING,
                    Unimplemented,            //    F_EQM,
                    Unimplemented,            //    F_ENNPOT,
+                   Unimplemented,            //    F_EMETATOMICPOT,
                    Unimplemented,            //    F_EPOT,
                    Unimplemented,            //    F_EKIN,
                    Unimplemented,            //    F_ETOT,
