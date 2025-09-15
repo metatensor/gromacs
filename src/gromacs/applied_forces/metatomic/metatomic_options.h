@@ -60,7 +60,7 @@ struct MetatomicParameters
     bool active = false;
 
     //! path to the exported metatomic model file
-    std::string modelPath;
+    std::string modelPath_;
     //! path to a directory where extensions will be present at MD time
     std::string extensionsDirectory;
     //! should metatomic run additional checks on the models inputs & outputs?

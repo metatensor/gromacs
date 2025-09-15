@@ -288,10 +288,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
 
         // Run the model
-        auto ivalue_output = model_.forward({ std::vector<metatomic_torch::System>{ system },
-                                              eval_options_,
-                                              /*check_consistency=*/false });
-        auto dict_output   = ivalue_output.toGenericDict();
+        auto ivalue_output = model_.forward(
+                { std::vector<metatomic_torch::System>{ system }, eval_options_, params_.checkConsistency });
+        auto dict_output = ivalue_output.toGenericDict();
         auto output_map = dict_output.at("energy").toCustomClass<metatomic_torch::TensorMapHolder>();
 
         // Extract energy and compute forces via autograd
