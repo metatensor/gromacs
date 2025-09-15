@@ -35,12 +35,16 @@
 
 #include "gmxpre.h"
 
+#include "metatensor_mdmodule.h"
+
+#include "gromacs/domdec/localatomset.h"
+#include "gromacs/domdec/localatomsetmanager.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/imdmodule.h"
+#include "gromacs/utility/keyvaluetreebuilder.h"
 
-#include "metatensor_mdmodule.h"
-#include "metatensor_options.h"
 #include "metatensor_forceprovider.h"
+#include "metatensor_options.h"
 
 namespace gmx
 {
@@ -60,30 +64,142 @@ public:
 
     /*! \brief Requests to be notified during preprocessing.
      *
-     * TODO
+     * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
+     *
+     * The Metatensor module subscribes to the following notifications:
+     * - The atom groups and their names from the index file (to specify the ML atoms)
+     * by taking a const IndexGroupsAndNames& as a parameter.
+     * - The system topology, which might be modified (e.g., to remove classical interactions).
+     * by taking a gmx_mtop_t* as a parameter.
+     * - Writing the module parameters to the KVT for storage in the .tpr file
+     * by taking a KeyValueTreeObjectBuilder as a parameter.
+     * - Accessing the MDLogger to log messages
+     * by taking a const MDLogger& as a parameter.
+     * - Accessing the WarningHandler to output warnings
+     * by taking a WarningHandler* as a parameter.
      */
-    void subscribeToPreProcessingNotifications(MDModulesNotifiers* notifier) override
+    void subscribeToPreProcessingNotifications(MDModulesNotifiers* notifiers) override
     {
-        // TODO
+        if (!options_.isActive())
+        {
+            return;
+        }
+
+        const auto setInputGroupIndicesFunction = [this](const IndexGroupsAndNames& indexGroupsAndNames) {
+            options_.setInputGroupIndices(indexGroupsAndNames);
+        };
+        notifiers->preProcessingNotifier_.subscribe(setInputGroupIndicesFunction);
+
+        const auto modifyTopologyFunction = [this](gmx_mtop_t* top) {
+            options_.modifyTopology(top);
+        };
+        notifiers->preProcessingNotifier_.subscribe(modifyTopologyFunction);
+
+        const auto writeParamsToKvtFunction = [this](KeyValueTreeObjectBuilder kvt) {
+            options_.writeParamsToKvt(kvt);
+        };
+        notifiers->preProcessingNotifier_.subscribe(writeParamsToKvtFunction);
+
+        const auto setLoggerFunction = [this](const MDLogger& logger) {
+            options_.setLogger(logger);
+        };
+        notifiers->preProcessingNotifier_.subscribe(setLoggerFunction);
+
+        const auto setWarningFunction = [this](WarningHandler* wi) { options_.setWarningHandler(wi); };
+        notifiers->preProcessingNotifier_.subscribe(setWarningFunction);
     }
 
     /*! \brief Requests to be notified during simulation setup.
      *
-     * TODO
+     * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
+     *
+     * The Metatensor module subscribes to the following notifications:
+     * - Reading the module parameters from the KVT
+     * by taking a const KeyValueTreeObject& as a parameter.
+     * - The local atom set manager to construct a local atom set for the ML atoms.
+     * by taking a LocalAtomSetManager* as a parameter.
+     * - The system topology
+     * by taking a const gmx_mtop_t& as a parameter.
+     * - The PBC type
+     * by taking a PbcType as a parameter.
+     * - The MPI communicator
+     * by taking a const MpiComm& as a parameter.
+     * - The MDLogger to log messages
+     * by taking a const MDLogger& as a parameter.
      */
-    void subscribeToSimulationSetupNotifications(MDModulesNotifiers* notifier) override
+    void subscribeToSimulationSetupNotifications(MDModulesNotifiers* notifiers) override
     {
-        // TODO
+        if (!options_.isActive())
+        {
+            return;
+        }
+
+        const auto readParamsFromKvtFunction = [this](const KeyValueTreeObject& kvt) {
+            options_.readParamsFromKvt(kvt);
+        };
+        notifiers->simulationSetupNotifier_.subscribe(readParamsFromKvtFunction);
+
+        const auto setLocalAtomSetFunction = [this](LocalAtomSetManager* localAtomSetManager) {
+            LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().metatensorIndices_);
+            options_.setLocalAtomSet(atomSet);
+        };
+        notifiers->simulationSetupNotifier_.subscribe(setLocalAtomSetFunction);
+
+        const auto setTopologyFunction = [this](const gmx_mtop_t& top) {
+            options_.setTopology(top);
+        };
+        notifiers->simulationSetupNotifier_.subscribe(setTopologyFunction);
+
+        const auto setPbcTypeFunction = [this](const PbcType& pbc) { options_.setPbcType(pbc); };
+        notifiers->simulationSetupNotifier_.subscribe(setPbcTypeFunction);
+
+        const auto setCommFunction = [this](const MpiComm& mpiComm) { options_.setComm(mpiComm); };
+        notifiers->simulationSetupNotifier_.subscribe(setCommFunction);
+
+        const auto setLoggerFunction = [this](const MDLogger& logger) {
+            options_.setLogger(logger);
+        };
+        notifiers->simulationSetupNotifier_.subscribe(setLoggerFunction);
+
+        // Request that GROMACS adds an energy term for our potential to the .edr file
+        const auto requestEnergyOutput = [](MDModulesEnergyOutputToMetatensorRequestChecker*
+                                                    energyOutputRequest) {
+            energyOutputRequest->energyOutputToMetatensor_ = true;
+        };
+        notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
+    }
+
+    /*! \brief Requests to be notified during the simulation.
+     *
+     * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
+     *
+     * The Metatensor module subscribes to the following notifications:
+     * - Atom redistribution due to domain decomposition
+     * by taking a const MDModulesAtomsRedistributedSignal as a parameter.
+     */
+    void subscribeToSimulationRunNotifications(MDModulesNotifiers* notifiers) override
+    {
+        if (!options_.isActive())
+        {
+            return;
+        }
+
+        // After domain decomposition, the force provider needs to know which atoms are local.
+        const auto notifyDDFunction = [this](const MDModulesAtomsRedistributedSignal& /*signal*/) {
+            force_provider_->updateLocalAtoms();
+        };
+        notifiers->simulationRunNotifier_.subscribe(notifyDDFunction);
     }
 
     void initForceProviders(ForceProviders* forceProviders) override
     {
-        if (!options_.parameters().active) {
+        if (!options_.isActive())
+        {
             return;
         }
 
-        force_provider_ = std::make_unique<MetatensorForceProvider>(options_.parameters());
-        forceProviders->addForceProvider(force_provider_.get());
+        force_provider_ = std::make_unique<MetatensorForceProvider>(options_);
+        forceProviders->addForceProvider(force_provider_.get(), "Metatensor");
     }
 
     IMdpOptionProvider* mdpOptionProvider() override { return &options_; }
@@ -95,13 +211,14 @@ private:
     std::unique_ptr<MetatensorForceProvider> force_provider_;
 };
 
-} // end namespace
+} // end anonymous namespace
 
 std::unique_ptr<IMDModule> MetatensorModuleInfo::create()
 {
     return std::make_unique<MetatensorMDModule>();
 }
 
+// The name must match the one used in the .mdp file options (`metatensor-active`).
 const std::string MetatensorModuleInfo::name_ = "metatensor";
 
 } // end namespace gmx

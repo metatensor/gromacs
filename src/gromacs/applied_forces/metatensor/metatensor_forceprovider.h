@@ -41,6 +41,7 @@ namespace gmx
 struct MetatensorParameters;
 
 class MDLogger;
+class MpiComm;
 
 /*! \brief \internal
  * TODO
@@ -48,14 +49,17 @@ class MDLogger;
 class MetatensorForceProvider final : public IForceProvider
 {
 public:
-    MetatensorForceProvider(const MetatensorParameters& parameters);
+    MetatensorForceProvider(const MetatensorParameters&, const MDLogger&, const MpiComm&);
     ~MetatensorForceProvider();
 
     /*! TODO
      */
     void calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs) override;
-private:
 
+private:
+    const MetatensorParameters& params_;
+    const MDLogger&             logger_;
+    const MpiComm&              mpiComm_;
 };
 
 } // namespace gmx
