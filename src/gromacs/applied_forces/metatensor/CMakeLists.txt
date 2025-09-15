@@ -39,6 +39,7 @@ gmx_add_libgromacs_sources(
 )
 
 if (GMX_METATENSOR)
+    find_package(metatensor)
     gmx_add_libgromacs_sources(
         metatensor_forceprovider.cpp
     )
