@@ -38,6 +38,7 @@
  * \author Metatensor developers <https://github.com/metatensor>
  * \ingroup module_applied_forces
  */
+// TODO(rg): Figure out how to insert the model into the .tpr file
 #include "gmxpre.h"
 
 #include "metatomic_options.h"
