@@ -32,30 +32,34 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 
-#include "gmxpre.h"
 
-#include "gromacs/utility/basedefinitions.h"
-#include "gromacs/utility/exceptions.h"
-
-#include "metatensor_forceprovider.h"
-#include "metatensor_options.h"
+#include "gromacs/mdtypes/iforceprovider.h"
 
 namespace gmx
 {
 
-CLANG_DIAGNOSTIC_IGNORE("-Wmissing-noreturn")
+struct MetatomicParameters;
 
-MetatensorForceProvider::MetatensorForceProvider(const MetatensorParameters& /*params*/) {
-    GMX_THROW(InternalError(
-        "This version of GROMACS can not use metatensor atomistic models. "
-        "Please reconfigure with `-DGMX_METATENSOR=ON` to enable this interface"
-    ));
-}
+class MDLogger;
+class MpiComm;
 
-MetatensorForceProvider::~MetatensorForceProvider() {}
+/*! \brief \internal
+ * TODO
+ */
+class MetatomicForceProvider final : public IForceProvider
+{
+public:
+    MetatomicForceProvider(const MetatomicParameters&, const MDLogger&, const MpiComm&);
+    ~MetatomicForceProvider();
 
-void MetatensorForceProvider::calculateForces(const ForceProviderInput& /*inputs*/, ForceProviderOutput* /*outputs*/) {}
+    /*! TODO
+     */
+    void calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs) override;
 
-CLANG_DIAGNOSTIC_RESET
+private:
+    const MetatomicParameters& params_;
+    const MDLogger&             logger_;
+    const MpiComm&              mpiComm_;
+};
 
 } // namespace gmx

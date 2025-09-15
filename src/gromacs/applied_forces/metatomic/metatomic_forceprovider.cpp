@@ -34,14 +34,15 @@
 
 #include "gmxpre.h"
 
-#include "metatensor_forceprovider.h"
+#include "metatomic_forceprovider.h"
 
 #include <vesin.h>
 
 #include <filesystem>
 #include <metatensor.hpp>
+#include <metatomic.hpp>
 
-#include <metatensor/torch.hpp>
+#include <metatomic/torch.hpp>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdtypes/enerdata.h"
@@ -52,12 +53,12 @@
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
 
-#include "metatensor_options.h"
+#include "metatomic_options.h"
 
 namespace gmx
 {
 
-MetatensorForceProvider::MetatensorForceProvider(const MetatensorOptions& options) :
+MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options) :
     params_(options.parameters()), logger_(options.logger()), mpiComm_(options.mpiComm()), device_(torch::kCPU)
 {
     // All setup that involves file I/O or GPU initialization should only be done on the main rank.
@@ -66,11 +67,11 @@ MetatensorForceProvider::MetatensorForceProvider(const MetatensorOptions& option
         return;
     }
 
-    GMX_LOG(logger_.info) << "Initializing MetatensorForceProvider...";
+    GMX_LOG(logger_.info) << "Initializing MetatomicForceProvider...";
 
     if (!std::filesystem::exists(params_.modelPath_))
     {
-        GMX_THROW(FileIOError("Metatensor model file does not exist: " + params_.modelPath_));
+        GMX_THROW(FileIOError("Metatomic model file does not exist: " + params_.modelPath_));
     }
 
     // 1. Load the model
@@ -82,22 +83,22 @@ MetatensorForceProvider::MetatensorForceProvider(const MetatensorOptions& option
 
     try
     {
-        GMX_LOG(logger_.info) << "Loading metatensor model from: " << params_.modelPath_;
-        model_ = metatensor_torch::load_atomistic_model(params_.modelPath_, extensions_directory);
+        GMX_LOG(logger_.info) << "Loading metatomic model from: " << params_.modelPath_;
+        model_ = metatomic_torch::load_atomistic_model(params_.modelPath_, extensions_directory);
     }
     catch (const std::exception& e)
     {
-        GMX_THROW(APIError("Failed to load metatensor model: " + std::string(e.what())));
+        GMX_THROW(APIError("Failed to load metatomic model: " + std::string(e.what())));
     }
 
     // 2. Query model capabilities
     capabilities_ =
-            model_.run_method("capabilities").toCustomClass<metatensor_torch::ModelCapabilitiesHolder>();
+            model_.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
     auto requests_ivalue = model_.run_method("requested_neighbor_lists");
     for (const auto& request_ivalue : requests_ivalue.toList())
     {
         nl_requests_.push_back(
-                request_ivalue.get().toCustomClass<metatensor_torch::NeighborListOptionsHolder>());
+                request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>());
     }
 
     // 3. Determine device
@@ -161,36 +162,36 @@ MetatensorForceProvider::MetatensorForceProvider(const MetatensorOptions& option
     GMX_LOG(logger_.info) << "Using dtype: " << capabilities_->dtype();
 
     // 5. Set up evaluation options
-    eval_options_ = torch::make_intrusive<metatensor_torch::ModelEvaluationOptionsHolder>();
+    eval_options_ = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
     eval_options_->set_length_unit(params_.lengthUnit_);
 
     auto outputs = capabilities_->outputs();
     if (!outputs.contains("energy"))
     {
-        GMX_THROW(APIError("Metatensor model must provide an 'energy' output."));
+        GMX_THROW(APIError("Metatomic model must provide an 'energy' output."));
     }
 
-    auto requested_output      = torch::make_intrusive<metatensor_torch::ModelOutputHolder>();
+    auto requested_output      = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
     requested_output->per_atom = false;
     requested_output->explicit_gradients = {}; // Use autograd for forces
 
     eval_options_->outputs.insert("energy", requested_output);
 
     // Initialize data vectors
-    const int n_atoms = params_.metatensorIndices_.size();
+    const int n_atoms = params_.metatomicIndices_.size();
     positions_.resize(n_atoms);
     atomNumbers_.resize(n_atoms);
     idxLookup_.resize(n_atoms);
 
-    GMX_LOG(logger_.info) << "MetatensorForceProvider initialization complete.";
+    GMX_LOG(logger_.info) << "MetatomicForceProvider initialization complete.";
 }
 
-MetatensorForceProvider::~MetatensorForceProvider() = default;
+MetatomicForceProvider::~MetatomicForceProvider() = default;
 
 
-void MetatensorForceProvider::updateLocalAtoms()
+void MetatomicForceProvider::updateLocalAtoms()
 {
-    const int n_atoms = params_.metatensorIndices_.size();
+    const int n_atoms = params_.metatomicIndices_.size();
     idxLookup_.assign(n_atoms, -1);
     atomNumbers_.assign(n_atoms, 0);
 
@@ -200,7 +201,7 @@ void MetatensorForceProvider::updateLocalAtoms()
         const int localIndex  = localAtomSet->localIndex()[i];
         const int globalIndex = localAtomSet->globalIndex()[localAtomSet->collectiveIndex()[i]];
 
-        // Find the index within the metatensor group
+        // Find the index within the metatomic group
         const auto it = params_.globalToMetaIndexMap_.find(globalIndex);
         if (it != params_.globalToMetaIndexMap_.end())
         {
@@ -218,9 +219,9 @@ void MetatensorForceProvider::updateLocalAtoms()
     }
 }
 
-void MetatensorForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPositions)
+void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPositions)
 {
-    const int n_atoms = params_.metatensorIndices_.size();
+    const int n_atoms = params_.metatomicIndices_.size();
     positions_.assign(n_atoms, RVec{ 0.0, 0.0, 0.0 });
 
     for (int i = 0; i < n_atoms; ++i)
@@ -232,16 +233,16 @@ void MetatensorForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPos
         }
     }
 
-    // All ranks need the complete, contiguous list of positions for the metatensor group.
+    // All ranks need the complete, contiguous list of positions for the metatomic group.
     if (mpiComm_.isParallel())
     {
         mpiComm_.sumReduce(3 * n_atoms, positions_.data()->as_vec());
     }
 }
 
-void MetatensorForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
+void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
-    const int n_atoms = params_.metatensorIndices_.size();
+    const int n_atoms = params_.metatomicIndices_.size();
 
     // 1. Gather all required data so it is available on every rank
     gatherAtomPositions(inputs.x_);
@@ -268,7 +269,7 @@ void MetatensorForceProvider::calculateForces(const ForceProviderInput& inputs, 
         auto torch_pbc   = pbc_norms.abs() > 1e-9;
         bool is_periodic = torch::all(torch_pbc).item<bool>();
 
-        auto system = torch::make_intrusive<metatensor_torch::SystemHolder>(
+        auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 torch_types, torch_positions, torch_cell, torch_pbc);
 
         // Compute and add neighbor lists
@@ -276,23 +277,23 @@ void MetatensorForceProvider::calculateForces(const ForceProviderInput& inputs, 
         {
             auto neighbors =
                     computeNeighbors(request, n_atoms, positions_.data()->data(), box_, is_periodic);
-            metatensor_torch::register_autograd_neighbors(system, neighbors, false);
+            metatomic_torch::register_autograd_neighbors(system, neighbors, false);
             system->add_neighbor_list(request, neighbors);
         }
 
         // Run the model
-        auto ivalue_output = model_.forward({ std::vector<metatensor_torch::System>{ system },
+        auto ivalue_output = model_.forward({ std::vector<metatomic_torch::System>{ system },
                                               eval_options_,
                                               /*check_consistency=*/false });
         auto dict_output   = ivalue_output.toGenericDict();
-        auto output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
+        auto output_map = dict_output.at("energy").toCustomClass<metatomic_torch::TensorMapHolder>();
 
         // Extract energy and compute forces via autograd
-        auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
+        auto energy_block  = metatomic_torch::TensorMapHolder::block_by_id(output_map, 0);
         auto energy_tensor = energy_block->values();
 
         // Set energy output
-        outputs->enerd_.term[F_METATENSOR] = energy_tensor.item<real>();
+        outputs->enerd_.term[F_METATOMIC] = energy_tensor.item<real>();
 
         // Compute gradients
         energy_tensor.backward();
@@ -324,7 +325,7 @@ void MetatensorForceProvider::calculateForces(const ForceProviderInput& inputs, 
 }
 
 
-metatensor_torch::TensorBlock MetatensorForceProvider::computeNeighbors(metatensor_torch::NeighborListOptions request,
+metatomic_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic_torch::NeighborListOptions request,
                                                                         long          nAtoms,
                                                                         const double* positions,
                                                                         const double* box,
@@ -389,20 +390,20 @@ metatensor_torch::TensorBlock MetatensorForceProvider::computeNeighbors(metatens
                                          deleter,
                                          torch::TensorOptions().dtype(torch::kFloat64));
 
-    auto neighbor_samples = metatensor_torch::LabelsHolder::create(
+    auto neighbor_samples = metatomic_torch::LabelsHolder::create(
             { "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c" },
             pair_samples_values.to(device_));
 
-    auto neighbor_component = metatensor_torch::LabelsHolder::create(
+    auto neighbor_component = metatomic_torch::LabelsHolder::create(
             "xyz",
             torch::tensor({ 0, 1, 2 }, torch::TensorOptions().dtype(torch::kInt32).device(device_))
                     .reshape({ 3, 1 }));
 
-    auto neighbor_properties = metatensor_torch::LabelsHolder::create(
+    auto neighbor_properties = metatomic_torch::LabelsHolder::create(
             "distance",
             torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device_)));
 
-    return metatensor_torch::TensorBlockHolder::create(
+    return metatomic_torch::TensorBlockHolder::create(
             pair_vectors.to(dtype_).to(device_), neighbor_samples, { neighbor_component }, neighbor_properties);
 }
 

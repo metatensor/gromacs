@@ -35,7 +35,7 @@
 
 #include "gmxpre.h"
 
-#include "metatensor_mdmodule.h"
+#include "metatomic_mdmodule.h"
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/domdec/localatomsetmanager.h"
@@ -43,8 +43,8 @@
 #include "gromacs/mdtypes/imdmodule.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 
-#include "metatensor_forceprovider.h"
-#include "metatensor_options.h"
+#include "metatomic_forceprovider.h"
+#include "metatomic_options.h"
 
 namespace gmx
 {
@@ -53,20 +53,20 @@ namespace
 {
 
 /*! \internal
- * \brief Metatensor Module
+ * \brief Metatomic Module
  *
- * Class that implements the metatensor MDModule.
+ * Class that implements the metatomic MDModule.
  */
-class MetatensorMDModule final : public IMDModule
+class MetatomicMDModule final : public IMDModule
 {
 public:
-    explicit MetatensorMDModule() = default;
+    explicit MetatomicMDModule() = default;
 
     /*! \brief Requests to be notified during preprocessing.
      *
      * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
      *
-     * The Metatensor module subscribes to the following notifications:
+     * The Metatomic module subscribes to the following notifications:
      * - The atom groups and their names from the index file (to specify the ML atoms)
      * by taking a const IndexGroupsAndNames& as a parameter.
      * - The system topology, which might be modified (e.g., to remove classical interactions).
@@ -113,7 +113,7 @@ public:
      *
      * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
      *
-     * The Metatensor module subscribes to the following notifications:
+     * The Metatomic module subscribes to the following notifications:
      * - Reading the module parameters from the KVT
      * by taking a const KeyValueTreeObject& as a parameter.
      * - The local atom set manager to construct a local atom set for the ML atoms.
@@ -140,7 +140,7 @@ public:
         notifiers->simulationSetupNotifier_.subscribe(readParamsFromKvtFunction);
 
         const auto setLocalAtomSetFunction = [this](LocalAtomSetManager* localAtomSetManager) {
-            LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().metatensorIndices_);
+            LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().metatomicIndices_);
             options_.setLocalAtomSet(atomSet);
         };
         notifiers->simulationSetupNotifier_.subscribe(setLocalAtomSetFunction);
@@ -162,9 +162,9 @@ public:
         notifiers->simulationSetupNotifier_.subscribe(setLoggerFunction);
 
         // Request that GROMACS adds an energy term for our potential to the .edr file
-        const auto requestEnergyOutput = [](MDModulesEnergyOutputToMetatensorRequestChecker*
+        const auto requestEnergyOutput = [](MDModulesEnergyOutputToMetatomicRequestChecker*
                                                     energyOutputRequest) {
-            energyOutputRequest->energyOutputToMetatensor_ = true;
+            energyOutputRequest->energyOutputToMetatomic_ = true;
         };
         notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
     }
@@ -173,7 +173,7 @@ public:
      *
      * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
      *
-     * The Metatensor module subscribes to the following notifications:
+     * The Metatomic module subscribes to the following notifications:
      * - Atom redistribution due to domain decomposition
      * by taking a const MDModulesAtomsRedistributedSignal as a parameter.
      */
@@ -198,27 +198,27 @@ public:
             return;
         }
 
-        force_provider_ = std::make_unique<MetatensorForceProvider>(options_);
-        forceProviders->addForceProvider(force_provider_.get(), "Metatensor");
+        force_provider_ = std::make_unique<MetatomicForceProvider>(options_);
+        forceProviders->addForceProvider(force_provider_.get(), "Metatomic");
     }
 
     IMdpOptionProvider* mdpOptionProvider() override { return &options_; }
     IMDOutputProvider* outputProvider() override { return nullptr; }
 
 private:
-    MetatensorOptions options_;
+    MetatomicOptions options_;
 
-    std::unique_ptr<MetatensorForceProvider> force_provider_;
+    std::unique_ptr<MetatomicForceProvider> force_provider_;
 };
 
 } // end anonymous namespace
 
-std::unique_ptr<IMDModule> MetatensorModuleInfo::create()
+std::unique_ptr<IMDModule> MetatomicModuleInfo::create()
 {
-    return std::make_unique<MetatensorMDModule>();
+    return std::make_unique<MetatomicMDModule>();
 }
 
-// The name must match the one used in the .mdp file options (`metatensor-active`).
-const std::string MetatensorModuleInfo::name_ = "metatensor";
+// The name must match the one used in the .mdp file options (`metatomic-active`).
+const std::string MetatomicModuleInfo::name_ = "metatomic";
 
 } // end namespace gmx

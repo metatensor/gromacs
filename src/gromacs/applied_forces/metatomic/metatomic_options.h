@@ -45,15 +45,15 @@ class IKeyValueTreeTransformRules;
 class KeyValueTreeObjectBuilder;
 
 //! TODO
-struct MetatensorParameters {
-    //! Is the metatensor force provider enabled?
+struct MetatomicParameters {
+    //! Is the metatomic force provider enabled?
     bool active = false;
 
-    //! path to the exported metatensor model file
+    //! path to the exported metatomic model file
     std::string modelPath;
     //! path to a directory where extensions will be present at MD time
     std::string extensionsDirectory;
-    //! should metatensor run additional checks on the models inputs & outputs?
+    //! should metatomic run additional checks on the models inputs & outputs?
     bool checkConsistency = true;
     //! Torch device to use to run the model. If left empty, this is defined
     //! based on the model declared preferences
@@ -61,12 +61,12 @@ struct MetatensorParameters {
 
     // TODO: how should we translate atomic types?
 
-    //! stores atom group name for which metatensor should compute the energy
+    //! stores atom group name for which metatomic should compute the energy
     //! (default whole System)
     std::string inputGroup = "System";
 };
 
-class MetatensorOptions final : public IMdpOptionProvider
+class MetatomicOptions final : public IMdpOptionProvider
 {
 public:
     void initMdpTransform(IKeyValueTreeTransformRules* rules) override;
@@ -90,10 +90,10 @@ public:
     // void readParamsFromKvt(const KeyValueTreeObject&);
 
     //! TODO
-    const MetatensorParameters& parameters();
+    const MetatomicParameters& parameters();
 
 private:
-    MetatensorParameters params_;
+    MetatomicParameters params_;
 };
 
 } // namespace gmx

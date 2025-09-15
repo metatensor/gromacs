@@ -39,12 +39,12 @@
 #include "gromacs/utility/keyvaluetreetransform.h"
 #include "gromacs/utility/strconvert.h"
 
-#include "metatensor_options.h"
+#include "metatomic_options.h"
 
 namespace gmx
 {
 
-static const std::string METATENSOR_MODULE_NAME = "metatensor";
+static const std::string METATOMIC_MODULE_NAME = "metatomic";
 
 /*! \brief Following Tags denotes names of parameters from .mdp file
  * \note Changing this strings will break .tpr backwards compatibility
@@ -69,34 +69,34 @@ static const std::string DEVICE_TAG               = "device";
  * \param[in] rules KVT transformation rules
  * \param[in] transformationFunction the function to transform the flat kvt tree
  * \param[in] optionTag string tag that describes the mdp option, appended to the
- *                      default string for the metatensor options
+ *                      default string for the metatomic options
  */
 template<class ToType, class TransformWithFunctionType>
-void MetatensorMdpTransformFromString(IKeyValueTreeTransformRules* rules,
+void MetatomicMdpTransformFromString(IKeyValueTreeTransformRules* rules,
                                  TransformWithFunctionType    transformationFunction,
                                  const std::string&           optionTag)
 {
     rules->addRule()
-            .from<std::string>("/" + METATENSOR_MODULE_NAME + "-" + optionTag)
-            .to<ToType>("/" + METATENSOR_MODULE_NAME + "/" + optionTag)
+            .from<std::string>("/" + METATOMIC_MODULE_NAME + "-" + optionTag)
+            .to<ToType>("/" + METATOMIC_MODULE_NAME + "/" + optionTag)
             .transformWith(transformationFunction);
 }
 
-void MetatensorOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
+void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
 {
     const auto& stringIdentityTransform = [](std::string s) { return s; };
-    MetatensorMdpTransformFromString<bool>(rules, &fromStdString<bool>, ACTIVE_TAG);
-    MetatensorMdpTransformFromString<std::string>(rules, stringIdentityTransform, INPUT_GROUP_TAG);
+    MetatomicMdpTransformFromString<bool>(rules, &fromStdString<bool>, ACTIVE_TAG);
+    MetatomicMdpTransformFromString<std::string>(rules, stringIdentityTransform, INPUT_GROUP_TAG);
 
-    MetatensorMdpTransformFromString<std::string>(rules, stringIdentityTransform, MODEL_PATH_TAG);
-    MetatensorMdpTransformFromString<std::string>(rules, stringIdentityTransform, EXTENSIONS_DIRECTORY_TAG);
-    MetatensorMdpTransformFromString<bool>(rules, &fromStdString<bool>, CHECK_CONSISTENCY_TAG);
-    MetatensorMdpTransformFromString<std::string>(rules, stringIdentityTransform, DEVICE_TAG);
+    MetatomicMdpTransformFromString<std::string>(rules, stringIdentityTransform, MODEL_PATH_TAG);
+    MetatomicMdpTransformFromString<std::string>(rules, stringIdentityTransform, EXTENSIONS_DIRECTORY_TAG);
+    MetatomicMdpTransformFromString<bool>(rules, &fromStdString<bool>, CHECK_CONSISTENCY_TAG);
+    MetatomicMdpTransformFromString<std::string>(rules, stringIdentityTransform, DEVICE_TAG);
 }
 
-void MetatensorOptions::initMdpOptions(IOptionsContainerWithSections* options)
+void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
 {
-    auto section = options->addSection(OptionSection(METATENSOR_MODULE_NAME.c_str()));
+    auto section = options->addSection(OptionSection(METATOMIC_MODULE_NAME.c_str()));
     section.addOption(BooleanOption(ACTIVE_TAG.c_str()).store(&params_.active));
     section.addOption(StringOption(INPUT_GROUP_TAG.c_str()).store(&params_.inputGroup));
 
@@ -106,27 +106,27 @@ void MetatensorOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(BooleanOption(CHECK_CONSISTENCY_TAG.c_str()).store(&params_.checkConsistency));
 }
 
-void MetatensorOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
+void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
 {
     // new empty line before writing mdp values
-    builder->addValue<std::string>("comment-" + METATENSOR_MODULE_NAME + "empty-line", "");
+    builder->addValue<std::string>("comment-" + METATOMIC_MODULE_NAME + "empty-line", "");
 
-    builder->addValue<std::string>("comment-" + METATENSOR_MODULE_NAME + "-module",
-                                   "; Machine learning potential using metatensor");
-    builder->addValue<bool>(METATENSOR_MODULE_NAME + "-" + ACTIVE_TAG, params_.active);
+    builder->addValue<std::string>("comment-" + METATOMIC_MODULE_NAME + "-module",
+                                   "; Machine learning potential using metatomic");
+    builder->addValue<bool>(METATOMIC_MODULE_NAME + "-" + ACTIVE_TAG, params_.active);
 
     if (params_.active)
     {
-        builder->addValue<std::string>(METATENSOR_MODULE_NAME + "-" + INPUT_GROUP_TAG, params_.inputGroup);
+        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + INPUT_GROUP_TAG, params_.inputGroup);
 
-        builder->addValue<std::string>(METATENSOR_MODULE_NAME + "-" + MODEL_PATH_TAG, params_.modelPath);
-        builder->addValue<std::string>(METATENSOR_MODULE_NAME + "-" + EXTENSIONS_DIRECTORY_TAG, params_.extensionsDirectory);
-        builder->addValue<std::string>(METATENSOR_MODULE_NAME + "-" + DEVICE_TAG, params_.device);
-        builder->addValue<bool>(METATENSOR_MODULE_NAME + "-" + CHECK_CONSISTENCY_TAG, params_.checkConsistency);
+        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + MODEL_PATH_TAG, params_.modelPath);
+        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + EXTENSIONS_DIRECTORY_TAG, params_.extensionsDirectory);
+        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + DEVICE_TAG, params_.device);
+        builder->addValue<bool>(METATOMIC_MODULE_NAME + "-" + CHECK_CONSISTENCY_TAG, params_.checkConsistency);
     }
 }
 
-const MetatensorParameters& MetatensorOptions::parameters() {
+const MetatomicParameters& MetatomicOptions::parameters() {
     return params_;
 }
 

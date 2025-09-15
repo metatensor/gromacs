@@ -34,18 +34,17 @@
 include(CheckLinkerFlag)
 
 gmx_add_libgromacs_sources(
-    metatensor_options.cpp
-    metatensor_mdmodule.cpp
+    metatomic_options.cpp
+    metatomic_mdmodule.cpp
 )
 
-if (GMX_METATENSOR)
-    find_package(metatensor)
+if (GMX_METATOMIC)
     gmx_add_libgromacs_sources(
-        metatensor_forceprovider.cpp
+        metatomic_forceprovider.cpp
     )
 else()
     gmx_add_libgromacs_sources(
-        metatensor_forceprovider_stub.cpp
+        metatomic_forceprovider_stub.cpp
     )
 endif()
 

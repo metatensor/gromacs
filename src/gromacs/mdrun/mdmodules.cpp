@@ -45,7 +45,7 @@
 #include "gromacs/applied_forces/densityfitting/densityfitting.h"
 #include "gromacs/applied_forces/electricfield.h"
 #include "gromacs/applied_forces/nnpot/nnpot.h"
-#include "gromacs/applied_forces/metatensor/metatensor.h"
+#include "gromacs/applied_forces/metatomic/metatomic.h"
 #include "gromacs/applied_forces/plumed/plumedMDModule.h"
 #include "gromacs/applied_forces/qmmm/qmmm.h"
 #include "gromacs/fmm/fmm_mdmodule.h"
@@ -87,7 +87,7 @@ public:
         modules_[std::string(PlumedModuleInfo::sc_name)]  = PlumedModuleInfo::create();
         modules_[std::string(NNPotModuleInfo::sc_name)]   = NNPotModuleInfo::create();
         modules_[std::string(FmmModuleInfo::sc_name)]     = FmmModuleInfo::create();
-        modules_[std::string(MetatensorModuleInfo::sc_name)]     = MetatensorModuleInfo::create();
+        modules_[std::string(MetatomicModuleInfo::sc_name)]     = MetatomicModuleInfo::create();
     }
 
     void makeModuleOptions(Options* options) const

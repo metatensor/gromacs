@@ -32,8 +32,8 @@
  * the research papers on the package. Check out https://www.gromacs.org.
  */
 
-#ifndef METATENSOR_MDMODULE_H
-#define METATENSOR_MDMODULE_H
+#ifndef METATOMIC_MDMODULE_H
+#define METATOMIC_MDMODULE_H
 
 #include <memory>
 #include <string>
@@ -48,7 +48,7 @@ class IMDModule;
  *
  * Provides name and method to create a neural network (NN) potential module.
  */
-struct MetatensorModuleInfo
+struct MetatomicModuleInfo
 {
     /*! \brief
      * TODO
