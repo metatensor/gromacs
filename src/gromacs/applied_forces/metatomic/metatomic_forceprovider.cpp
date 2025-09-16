@@ -45,10 +45,8 @@
 #include <vesin.h>
 
 #include <filesystem>
-#include <metatensor.hpp>
-#include <metatomic.hpp>
-
-#include <metatomic/torch.hpp>
+#include "metatensor/torch.hpp"
+#include "metatomic/torch.hpp"
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdtypes/enerdata.h"
