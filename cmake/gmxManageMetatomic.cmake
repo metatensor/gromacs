@@ -54,28 +54,6 @@ if(GMX_METATOMIC)
     # of cmake generator expression from `metatensor_torch`
     find_package(Torch REQUIRED)
 
-    # The caffe2::mkl target contains MKL_INCLUDE_DIR in it's
-    # INTERFACE_INCLUDE_DIRECTORIES even if MKL was not found, causing a build
-    # failure with "Imported target "torch" includes non-existent path" down the
-    # line. This code removes the missing path from INTERFACE_INCLUDE_DIRECTORIES,
-    # allowing the build to continue further.
-    if (TARGET caffe2::mkl)
-        get_target_property(CAFFE2_MKL_INCLUDE_DIRECTORIES caffe2::mkl INTERFACE_INCLUDE_DIRECTORIES)
-        set(MKL_INCLUDE_DIR_NOTFOUND "")
-        foreach(_include_dir_ ${CAFFE2_MKL_INCLUDE_DIRECTORIES})
-            if ("${_include_dir_}" MATCHES "MKL_INCLUDE_DIR-NOTFOUND")
-                set(MKL_INCLUDE_DIR_NOTFOUND "${_include_dir_}")
-            endif()
-        endforeach()
-
-        if (NOT "${MKL_INCLUDE_DIR_NOTFOUND}" STREQUAL "")
-            list(REMOVE_ITEM CAFFE2_MKL_INCLUDE_DIRECTORIES "${MKL_INCLUDE_DIR_NOTFOUND}")
-        endif()
-        set_target_properties(caffe2::mkl PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${CAFFE2_MKL_INCLUDE_DIRECTORIES}"
-        )
-    endif()
-
     ################ definition of metatensor and metatomic targets ################
 
     set(METATENSOR_CORE_VERSION "0.1.17")
