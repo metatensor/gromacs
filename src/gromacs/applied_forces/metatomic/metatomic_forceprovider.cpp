@@ -45,6 +45,7 @@
 #include <vesin.h>
 
 #include <filesystem>
+#include "metatensor.hpp"
 #include "metatensor/torch.hpp"
 #include "metatomic/torch.hpp"
 
