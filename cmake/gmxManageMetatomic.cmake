@@ -147,6 +147,7 @@ if(GMX_METATOMIC)
 
     list(APPEND GMX_COMMON_LIBRARIES
         vesin
+        metatensor
         metatomic_torch
         metatensor_torch
     )
