@@ -87,6 +87,15 @@ if(GMX_METATOMIC)
     set(METATOMIC_TORCH_VERSION "0.1.4")
     set(METATOMIC_TORCH_SHA256 "385ec8b8515d674b6a9f093f724792b2469e7ea2365ca596f574b64e38494f94")
 
+    set(VESIN_VERSION "0.3.7")
+    set(VESIN_GIT_TAG "d0036631d52b75dca9352d80f028a6383335d6d2")
+
+    set(DOWNLOAD_VESIN_DEFAULT ON)
+    find_package(vesin QUIET ${VESIN_VERSION})
+    if (vesin_FOUND)
+        set(DOWNLOAD_VESIN_DEFAULT OFF)
+    endif()
+
     set(DOWNLOAD_METATENSOR_DEFAULT ON)
     find_package(metatensor_torch QUIET ${METATENSOR_TORCH_VERSION})
     if (metatensor_torch_FOUND)
@@ -143,7 +152,23 @@ if(GMX_METATOMIC)
         find_package(metatomic_torch REQUIRED ${METATOMIC_TORCH_VERSION})
     endif()
 
+    if (DOWNLOAD_VESIN)
+        include(FetchContent)
+
+        FetchContent_Declare(
+            vesin
+            GIT_REPOSITORY https://github.com/Luthaf/vesin.git
+            GIT_TAG ${VESIN_GIT_TAG}
+        )
+
+        FetchContent_MakeAvailable(vesin)
+    else()
+        # make sure to fail the configuration if cmake can not find vesin
+        find_package(vesin REQUIRED ${VESIN_VERSION})
+    endif()
+
     list(APPEND GMX_COMMON_LIBRARIES
+        vesin
         metatomic_torch
         metatensor_torch
     )
