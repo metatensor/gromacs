@@ -90,7 +90,8 @@ struct MetatomicParameters
     std::string inputGroup = "System";
 
     std::vector<Index>            metatomicIndices;
-    std::unique_ptr<LocalAtomSet> localAtomSet_;
+    std::unique_ptr<LocalAtomSet> mtaAtoms_;
+    std::unique_ptr<LocalAtomSet> gmxMMAtoms_;
     t_atoms                       atoms_;
     int                           numAtoms_;
     std::unique_ptr<PbcType>      pbcType_;
@@ -99,6 +100,8 @@ struct MetatomicParameters
 class MetatomicOptions final : public IMdpOptionProvider
 {
 public:
+    MetatomicParameters params_;
+    // ^---------- lol
     void initMdpTransform(IKeyValueTreeTransformRules* rules) override;
     void initMdpOptions(IOptionsContainerWithSections* options) override;
     void buildMdpOutput(KeyValueTreeObjectBuilder* builder) const override;
@@ -121,10 +124,9 @@ public:
 
 
 private:
-    MetatomicParameters params_;
-    const MDLogger*     logger_  = nullptr;
-    const MpiComm*      mpiComm_ = nullptr;
-    WarningHandler*     wi_      = nullptr;
+    const MDLogger* logger_  = nullptr;
+    const MpiComm*  mpiComm_ = nullptr;
+    WarningHandler* wi_      = nullptr;
 };
 
 } // namespace gmx

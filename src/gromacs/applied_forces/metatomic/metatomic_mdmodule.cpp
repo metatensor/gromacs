@@ -195,7 +195,7 @@ public:
         }
 
         force_provider_ = std::make_unique<MetatomicForceProvider>(
-                options_.parameters(), options_.logger(), options_.mpiComm());
+                options_, options_.logger(), options_.mpiComm());
         forceProviders->addForceProvider(force_provider_.get(), "Metatomic");
     }
 

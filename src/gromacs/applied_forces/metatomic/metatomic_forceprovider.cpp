@@ -44,11 +44,13 @@
 
 #include <vesin.h>
 
-#include <filesystem>
-#include "metatensor.hpp"
-#include "metatensor/torch.hpp"
-#include "metatomic/torch.hpp"
+#include <cstdint>
 
+#include <filesystem>
+
+#ifndef DIM
+#    define DIM 3
+#endif
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/mdtypes/forceoutput.h"
@@ -58,38 +60,30 @@
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
 
-#include "metatomic_options.h"
-
 namespace gmx
 {
 
-MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options) :
-    params_(options.parameters()), logger_(options.logger()), mpiComm_(options.mpiComm()), device_(torch::kCPU)
+MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
+                                               const MDLogger&         logger,
+                                               const MpiComm&          mpiComm) :
+    options_(options), logger_(logger), mpiComm_(mpiComm), device_(torch::Device(torch::kCPU))
 {
     // All setup that involves file I/O or GPU initialization should only be done on the main rank.
     if (!mpiComm_.isMainRank())
     {
         return;
     }
+    GMX_LOG(logger_.info).asParagraph().appendText("Initializing MetatomicForceProvider...");
 
-    GMX_LOG(logger_.info) << "Initializing MetatomicForceProvider...";
-
-    if (!std::filesystem::exists(params_.modelPath_))
+    if (!std::filesystem::exists(options_.params_.modelPath_))
     {
-        GMX_THROW(FileIOError("Metatomic model file does not exist: " + params_.modelPath_));
+        GMX_THROW(FileIOError("Metatomic model file does not exist: " + options_.params_.modelPath_));
     }
 
     // 1. Load the model
-    torch::optional<std::string> extensions_directory = torch::nullopt;
-    if (!params_.extensionsPath_.empty())
-    {
-        extensions_directory = params_.extensionsPath_;
-    }
-
     try
     {
-        GMX_LOG(logger_.info) << "Loading metatomic model from: " << params_.modelPath_;
-        model_ = metatomic_torch::load_atomistic_model(params_.modelPath_, extensions_directory);
+        model_ = metatomic_torch::load_atomistic_model(options_.params_.modelPath_, nullptr);
     }
     catch (const std::exception& e)
     {
@@ -106,49 +100,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options) 
                 request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>());
     }
 
-    // 3. Determine device
-    std::string targetDevice = params_.device_;
-    if (targetDevice == "auto")
-    {
-        if (torch::cuda::is_available() && capabilities_->is_supported_device("cuda"))
-        {
-            targetDevice = "cuda";
-        }
-        else
-        {
-            targetDevice = "cpu";
-        }
-    }
-
-    if (targetDevice == "cuda")
-    {
-        if (torch::cuda::is_available() && capabilities_->is_supported_device("cuda"))
-        {
-            device_ = torch::kCUDA;
-        }
-        else
-        {
-            GMX_THROW(
-                    APIError("Requested device 'cuda' is not supported by the model or not "
-                             "available in PyTorch."));
-        }
-    }
-    else if (targetDevice == "cpu")
-    {
-        if (capabilities_->is_supported_device("cpu"))
-        {
-            device_ = torch::kCPU;
-        }
-        else
-        {
-            GMX_THROW(APIError("Requested device 'cpu' is not supported by the model."));
-        }
-    }
-    else
-    {
-        GMX_THROW(InvalidInputError("Unsupported device requested: " + targetDevice));
-    }
-    GMX_LOG(logger_.info) << "Using device: " << device_.str();
+    // 3. TODO(rg): determine device
     model_.to(device_);
 
     // 4. Set data type
@@ -164,11 +116,10 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options) 
     {
         GMX_THROW(APIError("Unsupported dtype from model: " + capabilities_->dtype()));
     }
-    GMX_LOG(logger_.info) << "Using dtype: " << capabilities_->dtype();
 
     // 5. Set up evaluation options
-    eval_options_ = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
-    eval_options_->set_length_unit(params_.lengthUnit_);
+    evaluations_options_ = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
+    evaluations_options_->set_length_unit("nm");
 
     auto outputs = capabilities_->outputs();
     if (!outputs.contains("energy"))
@@ -180,53 +131,24 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options) 
     requested_output->per_atom = false;
     requested_output->explicit_gradients = {}; // Use autograd for forces
 
-    eval_options_->outputs.insert("energy", requested_output);
+    evaluations_options_->outputs.insert("energy", requested_output);
 
     // Initialize data vectors
-    const int n_atoms = params_.metatomicIndices_.size();
+    const int n_atoms = options_.params_.metatomicIndices.size();
     positions_.resize(n_atoms);
     atomNumbers_.resize(n_atoms);
     idxLookup_.resize(n_atoms);
 
-    GMX_LOG(logger_.info) << "MetatomicForceProvider initialization complete.";
+    GMX_LOG(logger_.info)
+            .asParagraph()
+            .appendText("MetatomicForceProvider initialization complete.");
 }
 
 MetatomicForceProvider::~MetatomicForceProvider() = default;
 
-
-void MetatomicForceProvider::updateLocalAtoms()
-{
-    const int n_atoms = params_.metatomicIndices_.size();
-    idxLookup_.assign(n_atoms, -1);
-    atomNumbers_.assign(n_atoms, 0);
-
-    const auto* localAtomSet = params_.localAtomSet_.get();
-    for (size_t i = 0; i < localAtomSet->numAtomsLocal(); ++i)
-    {
-        const int localIndex  = localAtomSet->localIndex()[i];
-        const int globalIndex = localAtomSet->globalIndex()[localAtomSet->collectiveIndex()[i]];
-
-        // Find the index within the metatomic group
-        const auto it = params_.globalToMetaIndexMap_.find(globalIndex);
-        if (it != params_.globalToMetaIndexMap_.end())
-        {
-            const int metaIndex   = it->second;
-            idxLookup_[metaIndex] = localIndex;
-            // The actual atom number from the topology
-            atomNumbers_[metaIndex] = params_.atoms_.atom[globalIndex].atomnumber;
-        }
-    }
-
-    // All ranks need the complete list of atomic numbers.
-    if (mpiComm_.isParallel())
-    {
-        mpiComm_.sumReduce(atomNumbers_);
-    }
-}
-
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPositions)
 {
-    const int n_atoms = params_.metatomicIndices_.size();
+    const int n_atoms = options_.params_.metatomicIndices.size();
     positions_.assign(n_atoms, RVec{ 0.0, 0.0, 0.0 });
 
     for (int i = 0; i < n_atoms; ++i)
@@ -245,12 +167,60 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPosi
     }
 }
 
+
+void MetatomicForceProvider::gatherAtomNumbersIndices()
+{
+    // this might not be the most efficient solution, since we are throwing away most of the
+    // vectors here in case of NNP/MM
+
+    // create lookup table for local atom indices needed for hybrid ML/MM
+    // -1 is used as a flag for atoms that are not local / not in the input
+    // used to distribute forces to correct local indices as the NN input tensor does not contain all atoms
+    idxLookup_.assign(options_.params_.numAtoms_, -1);
+    atomNumbers_.assign(options_.params_.numAtoms_, 0);
+    // TODO(rg): lookup how and where this is populated in nnpAtoms
+    options_.params_.mtaAtoms_ = std::make_unique<LocalAtomSet>(localInputAtomSet);
+
+    int lIdx, gIdx;
+    for (size_t i = 0; i < options_.params_.nnpAtoms_->numAtomsLocal(); i++)
+    {
+        lIdx = options_.params_.nnpAtoms_->localIndex()[i];
+        gIdx = options_.params_.nnpAtoms_->globalIndex()[options_.params_.nnpAtoms_->collectiveIndex()[i]];
+        // TODO: make sure that atom number indexing is correct
+        atomNumbers_[gIdx] = options_.params_.atoms_.atom[gIdx].atomnumber;
+        idxLookup_[gIdx]   = lIdx;
+    }
+
+    // distribute atom numbers to all ranks
+    if (mpiComm_.isParallel())
+    {
+        mpiComm_.sumReduce(atomNumbers_);
+    }
+
+    // remove unused elements in atomNumbers_, and idxLookup
+    auto atIt  = atomNumbers_.begin();
+    auto idxIt = idxLookup_.begin();
+    while (atIt != atomNumbers_.end() && idxIt != idxLookup_.end())
+    {
+        if (*atIt == 0)
+        {
+            atIt  = atomNumbers_.erase(atIt);
+            idxIt = idxLookup_.erase(idxIt);
+        }
+        else
+        {
+            ++atIt;
+            ++idxIt;
+        }
+    }
+}
+
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
-    const int n_atoms = params_.metatomicIndices_.size();
+    const int n_atoms = options_.params_.metatomicIndices.size();
 
     // 1. Gather all required data so it is available on every rank
-    gatherAtomPositions(inputs.x_);
+    this->gatherAtomPositions(inputs.x_);
     copy_mat(inputs.box_, box_);
 
     torch::Tensor forceTensor = torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(dtype_));
@@ -258,21 +228,22 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     // 2. Perform model evaluation on the main rank only
     if (mpiComm_.isMainRank())
     {
-        auto tensor_options = torch::TensorOptions().dtype(dtype_).device(device_);
 
+        auto f64_options = torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU);
+
+        auto coerced_positions = makeArrayRef(positions_);
         auto torch_positions =
-                torch::from_blob(positions_.data(), { n_atoms, 3 }, RVec::getTorchOptions())
-                        .to(tensor_options)
+                torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, f64_options)
+                        .to(this->dtype_)
+                        .to(this->device_)
                         .set_requires_grad(true);
 
-        auto torch_cell = torch::from_blob(box_, { 3, 3 }, RVec::getTorchOptions()).to(tensor_options);
+        auto torch_cell = torch::from_blob(&box_, { 3, 3 }, f64_options);
 
-        auto torch_types =
-                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(device_);
-
-        auto pbc_norms   = torch::norm(torch_cell, 2, /*dim=*/1);
-        auto torch_pbc   = pbc_norms.abs() > 1e-9;
-        bool is_periodic = torch::all(torch_pbc).item<bool>();
+        auto          cell_norms = torch::norm(torch_cell, 2, /*dim=*/1);
+        auto          torch_pbc  = cell_norms.abs() > 1e-9;
+        torch::Tensor pbcTensor =
+                torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool));
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 torch_types, torch_positions, torch_cell, torch_pbc);
@@ -280,24 +251,26 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         // Compute and add neighbor lists
         for (const auto& request : nl_requests_)
         {
-            auto neighbors =
-                    computeNeighbors(request, n_atoms, positions_.data()->data(), box_, is_periodic);
+            auto neighbors = computeNeighbors(
+                    request, n_atoms, coerced_positions.data()->as_vec(), box_, /*periodic?*/ true);
             metatomic_torch::register_autograd_neighbors(system, neighbors, false);
             system->add_neighbor_list(request, neighbors);
         }
 
         // Run the model
-        auto ivalue_output = model_.forward(
-                { std::vector<metatomic_torch::System>{ system }, eval_options_, params_.checkConsistency });
-        auto dict_output = ivalue_output.toGenericDict();
-        auto output_map = dict_output.at("energy").toCustomClass<metatomic_torch::TensorMapHolder>();
+        auto ivalue_output = model_.forward({ std::vector<metatomic_torch::System>{ system },
+                                              evaluations_options_,
+                                              options_.params_.checkConsistency });
+        auto dict_output   = ivalue_output.toGenericDict();
+        auto output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
 
         // Extract energy and compute forces via autograd
-        auto energy_block  = metatomic_torch::TensorMapHolder::block_by_id(output_map, 0);
+        auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
         auto energy_tensor = energy_block->values();
 
         // Set energy output
-        outputs->enerd_.term[F_METATOMIC] = energy_tensor.item<real>();
+        auto energyTensor                     = energy_tensor.to(torch::kFloat32).to(torch::kCPU);
+        outputs->enerd_.term[F_EMETATOMICPOT] = (energyTensor.template item<real>());
 
         // Compute gradients
         energy_tensor.backward();
@@ -308,11 +281,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     // 3. Distribute forces from main rank to all other ranks
     if (mpiComm_.isParallel())
     {
-        mpiComm_.sumReduce(3 * n_atoms, static_cast<real*>(forceTensor.data_ptr()));
+        mpiComm_.sumReduce(3 * n_atoms, static_cast<double*>(forceTensor.data_ptr()));
     }
 
     // 4. Each rank accumulates forces for its local atoms
-    auto forceAccessor = forceTensor.accessor<real, 2>();
+    auto forceAccessor = forceTensor.accessor<double, 2>();
     for (int i = 0; i < n_atoms; ++i)
     {
         const int localIndex = idxLookup_[i];
@@ -329,13 +302,13 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 }
 
 
-metatomic_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic_torch::NeighborListOptions request,
-                                                                      long          nAtoms,
-                                                                      const double* positions,
-                                                                      const double* box,
-                                                                      bool          periodic)
+metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic_torch::NeighborListOptions request,
+                                                                       long          n_atoms,
+                                                                       const double* positions,
+                                                                       const double* box,
+                                                                       bool          periodic)
 {
-    auto cutoff = request->engine_cutoff(params_.lengthUnit_);
+    auto cutoff = request->engine_cutoff("nm");
 
     VesinOptions options;
     options.cutoff           = cutoff;
@@ -349,7 +322,7 @@ metatomic_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic_
 
     const char* error_message = nullptr;
     int         status        = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions),
-                                 static_cast<size_t>(nAtoms),
+                                 static_cast<size_t>(n_atoms),
                                  reinterpret_cast<const double (*)[3]>(box),
                                  periodic,
                                  VesinCPU,
@@ -407,7 +380,7 @@ metatomic_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic_
             "distance",
             torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device_)));
 
-    return metatomic_torch::TensorBlockHolder::create(
+    return metatensor_torch::TensorBlockHolder::create(
             pair_vectors.to(dtype_).to(device_), neighbor_samples, { neighbor_component }, neighbor_properties);
 }
 
