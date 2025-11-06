@@ -83,7 +83,13 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // 1. Load the model
     try
     {
-        model_ = metatomic_torch::load_atomistic_model(options_.params_.modelPath_, nullptr);
+        torch::optional<std::string> extensions_directory = torch::nullopt;
+        if (!options_.params_.extensionsDirectory.empty())
+        {
+            extensions_directory = options_.params_.extensionsDirectory;
+        }
+
+        model_ = metatomic_torch::load_atomistic_model(options_.params_.modelPath_, extensions_directory);
     }
     catch (const std::exception& e)
     {
