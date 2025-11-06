@@ -43,7 +43,7 @@
 #include "gromacs/topology/topology.h"
 #include "gromacs/utility/logger.h"
 
-#include "Metatomictopologypreprocessor.h"
+#include "metatomic_topologypreprocessor.h"
 
 namespace gmx
 {

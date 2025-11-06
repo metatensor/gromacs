@@ -36,6 +36,7 @@ include(CheckLinkerFlag)
 gmx_add_libgromacs_sources(
     metatomic_options.cpp
     metatomic_mdmodule.cpp
+    metatomic_topologypreprocessor.cpp
 )
 
 if (GMX_METATOMIC)
