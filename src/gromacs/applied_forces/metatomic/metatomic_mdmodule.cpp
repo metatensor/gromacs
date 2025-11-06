@@ -142,8 +142,11 @@ public:
 
         const auto setLocalAtomSetFunction = [this](LocalAtomSetManager* localAtomSetManager)
         {
-            LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().metatomicIndices);
-            options_.setLocalAtomSet(atomSet);
+            // TODO(rg): why are these separate functions, they just create unique pointers..
+            LocalAtomSet atomSet1 = localAtomSetManager->add(options_.parameters().mtaIndices_);
+            options_.setLocalInputAtomSet(atomSet1);
+            LocalAtomSet atomSet2 = localAtomSetManager->add(options_.parameters().mmIndices_);
+            options_.setLocalgmxMMAtomSet(atomSet2);
         };
         notifiers->simulationSetupNotifier_.subscribe(setLocalAtomSetFunction);
 

@@ -89,7 +89,8 @@ struct MetatomicParameters
     //! (default whole System)
     std::string inputGroup = "System";
 
-    std::vector<Index>            metatomicIndices;
+    std::vector<Index>            mtaIndices_;
+    std::vector<Index>            mmIndices_;
     std::unique_ptr<LocalAtomSet> mtaAtoms_;
     std::unique_ptr<LocalAtomSet> gmxMMAtoms_;
     t_atoms                       atoms_;
@@ -114,9 +115,13 @@ public:
     void setLogger(const MDLogger&);
     void setWarningHandler(WarningHandler*);
     void setTopology(const gmx_mtop_t&);
-    void setLocalAtomSet(const LocalAtomSet&);
     void setPbcType(const PbcType&);
     void setComm(const MpiComm&);
+    //! set local atom set for Metatomic input during simulation setup
+    void setLocalInputAtomSet(const LocalAtomSet&);
+
+    //! set local MM atom set during simulation setup
+    void setLocalgmxMMAtomSet(const LocalAtomSet&);
 
     const MetatomicParameters& parameters();
     const MDLogger&            logger() const;

@@ -134,7 +134,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     evaluations_options_->outputs.insert("energy", requested_output);
 
     // Initialize data vectors
-    const int n_atoms = options_.params_.metatomicIndices.size();
+    const int n_atoms = options_.params_.mtaIndices_.size();
     positions_.resize(n_atoms);
     atomNumbers_.resize(n_atoms);
     idxLookup_.resize(n_atoms);
@@ -148,7 +148,7 @@ MetatomicForceProvider::~MetatomicForceProvider() = default;
 
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPositions)
 {
-    const int n_atoms = options_.params_.metatomicIndices.size();
+    const int n_atoms = options_.params_.mtaIndices_.size();
     positions_.assign(n_atoms, RVec{ 0.0, 0.0, 0.0 });
 
     for (int i = 0; i < n_atoms; ++i)
@@ -178,14 +178,12 @@ void MetatomicForceProvider::gatherAtomNumbersIndices()
     // used to distribute forces to correct local indices as the NN input tensor does not contain all atoms
     idxLookup_.assign(options_.params_.numAtoms_, -1);
     atomNumbers_.assign(options_.params_.numAtoms_, 0);
-    // TODO(rg): lookup how and where this is populated in nnpAtoms
-    options_.params_.mtaAtoms_ = std::make_unique<LocalAtomSet>(localInputAtomSet);
 
     int lIdx, gIdx;
-    for (size_t i = 0; i < options_.params_.nnpAtoms_->numAtomsLocal(); i++)
+    for (size_t i = 0; i < options_.params_.mtaAtoms_->numAtomsLocal(); i++)
     {
-        lIdx = options_.params_.nnpAtoms_->localIndex()[i];
-        gIdx = options_.params_.nnpAtoms_->globalIndex()[options_.params_.nnpAtoms_->collectiveIndex()[i]];
+        lIdx = options_.params_.mtaAtoms_->localIndex()[i];
+        gIdx = options_.params_.mtaAtoms_->globalIndex()[options_.params_.mtaAtoms_->collectiveIndex()[i]];
         // TODO: make sure that atom number indexing is correct
         atomNumbers_[gIdx] = options_.params_.atoms_.atom[gIdx].atomnumber;
         idxLookup_[gIdx]   = lIdx;
@@ -217,7 +215,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices()
 
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
-    const int n_atoms = options_.params_.metatomicIndices.size();
+    const int n_atoms = options_.params_.mtaIndices_.size();
 
     // 1. Gather all required data so it is available on every rank
     this->gatherAtomPositions(inputs.x_);
@@ -244,6 +242,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto          torch_pbc  = cell_norms.abs() > 1e-9;
         torch::Tensor pbcTensor =
                 torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool));
+        auto torch_types =
+                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(this->device_);
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 torch_types, torch_positions, torch_cell, torch_pbc);
@@ -258,19 +258,34 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
 
         // Run the model
-        auto ivalue_output = model_.forward({ std::vector<metatomic_torch::System>{ system },
-                                              evaluations_options_,
-                                              options_.params_.checkConsistency });
-        auto dict_output   = ivalue_output.toGenericDict();
-        auto output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
+        metatensor_torch::TensorMap output_map;
+        try
+        {
+            auto ivalue_output = this->model_.forward({
+                    std::vector<metatomic_torch::System>{ system },
+                    evaluations_options_,
+                    this->check_consistency_,
+            });
+            auto dict_output   = ivalue_output.toGenericDict();
+            output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
+        }
+        catch (const std::exception& e)
+        {
+            throw std::runtime_error("[MetatomicPotential] Model evaluation failed");
+        }
 
         // Extract energy and compute forces via autograd
         auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
-        auto energy_tensor = energy_block->values();
+        auto energy_tensor = energy_block->values(); // This should be a [1, 1] tensor
+
+        if (energy_tensor.sizes().vec() != std::vector<int64_t>{ 1, 1 })
+        {
+            throw std::runtime_error("Model did not return a single scalar energy value.");
+        }
+        double energy = energy_tensor.item<double>();
 
         // Set energy output
-        auto energyTensor                     = energy_tensor.to(torch::kFloat32).to(torch::kCPU);
-        outputs->enerd_.term[F_EMETATOMICPOT] = (energyTensor.template item<real>());
+        outputs->enerd_.term[F_EMETATOMICPOT] = energy;
 
         // Compute gradients
         energy_tensor.backward();
@@ -316,20 +331,21 @@ metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic
     options.return_shifts    = true;
     options.return_distances = false;
     options.return_vectors   = true;
+    bool periodic_array[3]   = { periodic, periodic, periodic };
 
     VesinNeighborList* vesin_neighbor_list = new VesinNeighborList();
-    memset(vesin_neighbor_list, 0, sizeof(VesinNeighborList));
 
-    const char* error_message = nullptr;
     VesinDevice cpu{ VesinCPU, 0 };
-    int         status = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions),
+    const char* error_message = nullptr;
+    int         status        = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions),
                                  static_cast<size_t>(n_atoms),
                                  reinterpret_cast<const double (*)[3]>(box),
-                                 periodic,
+                                 periodic_array,
                                  cpu,
                                  options,
                                  vesin_neighbor_list,
                                  &error_message);
+
 
     if (status != EXIT_SUCCESS)
     {
@@ -368,21 +384,25 @@ metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic
                                          deleter,
                                          torch::TensorOptions().dtype(torch::kFloat64));
 
-    auto neighbor_samples = metatomic_torch::LabelsHolder::create(
-            { "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c" },
+    auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+            std::vector<std::string>{
+                    "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c" },
             pair_samples_values.to(device_));
 
-    auto neighbor_component = metatomic_torch::LabelsHolder::create(
-            "xyz",
+    auto neighbor_component = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+            std::vector<std::string>{ "xyz" },
             torch::tensor({ 0, 1, 2 }, torch::TensorOptions().dtype(torch::kInt32).device(device_))
                     .reshape({ 3, 1 }));
 
-    auto neighbor_properties = metatomic_torch::LabelsHolder::create(
-            "distance",
+    auto neighbor_properties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+            std::vector<std::string>{ "distance" },
             torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device_)));
 
-    return metatensor_torch::TensorBlockHolder::create(
-            pair_vectors.to(dtype_).to(device_), neighbor_samples, { neighbor_component }, neighbor_properties);
+    return torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
+            pair_vectors.to(torch::kFloat32).to(this->device_),
+            neighbor_samples,
+            std::vector<metatensor_torch::Labels>{ neighbor_component },
+            neighbor_properties);
 }
 
 

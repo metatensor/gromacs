@@ -162,9 +162,9 @@ void MetatomicOptions::setInputGroupIndices(const IndexGroupsAndNames& indexGrou
     {
         return;
     }
-    params_.metatomicIndices = indexGroupsAndNames.indices(params_.inputGroup);
+    params_.mtaIndices_ = indexGroupsAndNames.indices(params_.inputGroup);
 
-    if (params_.metatomicIndices.empty())
+    if (params_.mtaIndices_.empty())
     {
         GMX_THROW(InconsistentInputError(formatString(
                 "Group %s defining metatomic potential input atoms should not be empty.",
@@ -179,7 +179,7 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
         return;
     }
 
-    MetatomicTopologyPreprocessor topPrep(params_.metatomicIndices);
+    MetatomicTopologyPreprocessor topPrep(params_.mtaIndices_);
     topPrep.preprocess(top, logger(), wi_);
 }
 
@@ -192,7 +192,7 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
 
     auto GroupIndexAdder =
             treeBuilder.addUniformArray<std::int64_t>(METATOMIC_MODULE_NAME + "-" + INPUT_GROUP_TAG);
-    for (const auto& indexValue : params_.metatomicIndices)
+    for (const auto& indexValue : params_.mtaIndices_)
     {
         GroupIndexAdder.addValue(indexValue);
     }
@@ -214,10 +214,10 @@ void MetatomicOptions::readParamsFromKvt(const KeyValueTreeObject& tree)
     }
 
     auto kvtIndexArray = tree[key].asArray().values();
-    params_.metatomicIndices.resize(kvtIndexArray.size());
+    params_.mtaIndices_.resize(kvtIndexArray.size());
     std::transform(std::begin(kvtIndexArray),
                    std::end(kvtIndexArray),
-                   std::begin(params_.metatomicIndices),
+                   std::begin(params_.mtaIndices_),
                    [](const KeyValueTreeValue& val) { return val.cast<std::int64_t>(); });
 }
 
@@ -237,12 +237,6 @@ void MetatomicOptions::setTopology(const gmx_mtop_t& top)
     params_.atoms_    = gmx_mtop_global_atoms(top);
     params_.numAtoms_ = params_.atoms_.nr;
 }
-
-void MetatomicOptions::setLocalAtomSet(const LocalAtomSet& localAtomSet)
-{
-    params_.localAtomSet_ = std::make_unique<LocalAtomSet>(localAtomSet);
-}
-
 
 void MetatomicOptions::setPbcType(const PbcType& pbcType)
 {
@@ -265,6 +259,17 @@ const MpiComm& MetatomicOptions::mpiComm() const
 {
     GMX_RELEASE_ASSERT(mpiComm_, "MPI communicator not set for MetatomicOptions.");
     return *mpiComm_;
+}
+
+
+void MetatomicOptions::setLocalInputAtomSet(const LocalAtomSet& localInputAtomSet)
+{
+    params_.mtaAtoms_ = std::make_unique<LocalAtomSet>(localInputAtomSet);
+}
+
+void MetatomicOptions::setLocalgmxMMAtomSet(const LocalAtomSet& localMMAtomSet)
+{
+    params_.gmxMMAtoms_ = std::make_unique<LocalAtomSet>(localMMAtomSet);
 }
 
 
