@@ -66,7 +66,11 @@ namespace gmx
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                                const MDLogger&         logger,
                                                const MpiComm&          mpiComm) :
-    options_(options), logger_(logger), mpiComm_(mpiComm), device_(torch::Device(torch::kCPU))
+    options_(options),
+    logger_(logger),
+    mpiComm_(mpiComm),
+    device_(torch::Device(torch::kCPU)),
+    box_{ { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 } }
 {
     // All setup that involves file I/O or GPU initialization should only be done on the main rank.
     if (!mpiComm_.isMainRank())
@@ -233,32 +237,32 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     if (mpiComm_.isMainRank())
     {
 
-        auto f64_options = torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU);
+        auto dtype_options = torch::TensorOptions().dtype(dtype_).device(torch::kCPU);
 
         auto coerced_positions = makeArrayRef(positions_);
         auto torch_positions =
-                torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, f64_options)
+                torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, dtype_options)
                         .to(this->dtype_)
                         .to(this->device_)
                         .set_requires_grad(true);
 
-        auto torch_cell = torch::from_blob(&box_, { 3, 3 }, f64_options);
+        auto torch_cell = torch::from_blob(&box_, { 3, 3 }, dtype_options);
 
-        auto          cell_norms = torch::norm(torch_cell, 2, /*dim=*/1);
-        auto          torch_pbc  = cell_norms.abs() > 1e-9;
-        torch::Tensor pbcTensor =
-                torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool));
+        auto cell_norms = torch::norm(torch_cell, 2, /*dim=*/1);
+        auto torch_pbc  = torch::tensor(std::vector<uint8_t>{ 1, 1, 1 },
+                                       torch::TensorOptions().dtype(torch::kBool).device(this->device_));
         auto torch_types =
                 torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(this->device_);
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 torch_types, torch_positions, torch_cell, torch_pbc);
 
+        bool periodic = torch::all(torch_pbc).item<bool>();
         // Compute and add neighbor lists
         for (const auto& request : nl_requests_)
         {
             auto neighbors = computeNeighbors(
-                    request, n_atoms, coerced_positions.data()->as_vec(), box_, /*periodic?*/ true);
+                    request, n_atoms, coerced_positions.data()->as_vec(), box_, periodic);
             metatomic_torch::register_autograd_neighbors(system, neighbors, false);
             system->add_neighbor_list(request, neighbors);
         }
@@ -337,16 +341,43 @@ metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic
     options.return_shifts    = true;
     options.return_distances = false;
     options.return_vectors   = true;
-    bool periodic_array[3]   = { periodic, periodic, periodic };
 
     VesinNeighborList* vesin_neighbor_list = new VesinNeighborList();
 
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            std::cerr << box[i][j] << " ";
+        }
+        std::cerr << "\n";
+    }
+    // .............................. gromacs likes floats, vesin does not
+    double double_box[3][3];
+
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            double_box[i][j] = static_cast<double>(box[i][j]);
+        }
+    }
+
+    const size_t        total_elements = static_cast<size_t>(n_atoms) * 3;
+    std::vector<double> double_positions(total_elements);
+
+    for (size_t i = 0; i < total_elements; i++)
+    {
+        double_positions[i] = static_cast<double>(positions[i]);
+    }
+    const double* positions_ptr = double_positions.data();
+
     VesinDevice cpu{ VesinCPU, 0 };
     const char* error_message = nullptr;
-    int         status        = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions),
+    int         status = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions_ptr),
                                  static_cast<size_t>(n_atoms),
-                                 reinterpret_cast<const double (*)[3]>(box),
-                                 periodic_array,
+                                 double_box,
+                                 &periodic,
                                  cpu,
                                  options,
                                  vesin_neighbor_list,
