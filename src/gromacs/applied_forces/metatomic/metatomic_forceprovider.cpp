@@ -419,7 +419,7 @@ metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic
     auto pair_vectors = torch::from_blob(vesin_neighbor_list->vectors,
                                          { n_pairs, 3, 1 },
                                          deleter,
-                                         torch::TensorOptions().dtype(torch::kFloat64));
+                                         torch::TensorOptions().dtype(this->dtype_));
 
     auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
             std::vector<std::string>{
@@ -436,7 +436,7 @@ metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic
             torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device_)));
 
     return torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
-            pair_vectors.to(torch::kFloat32).to(this->device_),
+            pair_vectors.to(this->dtype_).to(this->device_),
             neighbor_samples,
             std::vector<metatensor_torch::Labels>{ neighbor_component },
             neighbor_properties);
