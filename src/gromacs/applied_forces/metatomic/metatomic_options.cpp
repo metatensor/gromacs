@@ -46,6 +46,7 @@
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/fileio/warninp.h"
 #include "gromacs/options/basicoptions.h"
+#include "gromacs/mdtypes/imdpoptionprovider_helpers.h"
 #include "gromacs/options/optionsection.h"
 #include "gromacs/selection/indexutil.h"
 #include "gromacs/topology/mtop_util.h"
@@ -77,17 +78,10 @@ static const std::string DEVICE_TAG               = "device";
 
 /*! \brief \internal Helper to declare mdp transform rules.
  *
- * Enforces uniform mdp options that are always prepended with the correct
- * string for the NNPot mdp options.
- *
- * \tparam ToType type to be transformed to
- * \tparam TransformWithFunctionType type of transformation function to be used
- *
- * \param[in] rules KVT transformation rules
- * \param[in] transformationFunction the function to transform the flat kvt tree
- * \param[in] optionTag string tag that describes the mdp option, appended to the
- * default string for the metatomic options
+ * This local helper function is no longer needed, as we now use
+ * the common addMdpTransformFromString from mdpopenumutil.h
  */
+/*
 template<class ToType, class TransformWithFunctionType>
 void MetatomicMdpTransformFromString(IKeyValueTreeTransformRules* rules,
                                      TransformWithFunctionType    transformationFunction,
@@ -98,17 +92,23 @@ void MetatomicMdpTransformFromString(IKeyValueTreeTransformRules* rules,
             .to<ToType>("/" + METATOMIC_MODULE_NAME + "/" + optionTag)
             .transformWith(transformationFunction);
 }
+*/
 
 void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
 {
     const auto& stringIdentityTransform = [](std::string s) { return s; };
-    MetatomicMdpTransformFromString<bool>(rules, &fromStdString<bool>, ACTIVE_TAG);
-    MetatomicMdpTransformFromString<std::string>(rules, stringIdentityTransform, INPUT_GROUP_TAG);
+    // Use the common helper function instead of the local one
+    addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ACTIVE_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, INPUT_GROUP_TAG);
 
-    MetatomicMdpTransformFromString<std::string>(rules, stringIdentityTransform, MODEL_PATH_TAG);
-    MetatomicMdpTransformFromString<std::string>(rules, stringIdentityTransform, EXTENSIONS_DIRECTORY_TAG);
-    MetatomicMdpTransformFromString<bool>(rules, &fromStdString<bool>, CHECK_CONSISTENCY_TAG);
-    MetatomicMdpTransformFromString<std::string>(rules, stringIdentityTransform, DEVICE_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_PATH_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, EXTENSIONS_DIRECTORY_TAG);
+    addMdpTransformFromString<bool>(
+            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG);
+    addMdpTransformFromString<std::string>(rules, stringIdentityTransform, METATOMIC_MODULE_NAME, DEVICE_TAG);
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -126,22 +126,25 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
 {
     // new empty line before writing mdp values
-    builder->addValue<std::string>("comment-" + METATOMIC_MODULE_NAME + "empty-line", "");
+    // Use helper functions for MDP output
+    addMdpOutputComment(builder, METATOMIC_MODULE_NAME, "empty-line", "");
 
-    builder->addValue<std::string>("comment-" + METATOMIC_MODULE_NAME + "-module",
-                                   "; Machine learning potential using metatomic");
-    builder->addValue<bool>(METATOMIC_MODULE_NAME + "-" + ACTIVE_TAG, params_.active);
+    addMdpOutputComment(builder,
+                        METATOMIC_MODULE_NAME,
+                        "module",
+                        "; Machine learning potential using metatomic");
+    addMdpOutputValue(builder, METATOMIC_MODULE_NAME, ACTIVE_TAG, params_.active);
 
     if (params_.active)
     {
-        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + INPUT_GROUP_TAG, params_.inputGroup);
+        addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, INPUT_GROUP_TAG, params_.inputGroup);
 
-        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + MODEL_PATH_TAG, params_.modelPath_);
-        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + EXTENSIONS_DIRECTORY_TAG,
-                                       params_.extensionsDirectory);
-        builder->addValue<std::string>(METATOMIC_MODULE_NAME + "-" + DEVICE_TAG, params_.device);
-        builder->addValue<bool>(METATOMIC_MODULE_NAME + "-" + CHECK_CONSISTENCY_TAG,
-                                params_.checkConsistency);
+        addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, MODEL_PATH_TAG, params_.modelPath_);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, EXTENSIONS_DIRECTORY_TAG, params_.extensionsDirectory);
+        addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, DEVICE_TAG, params_.device);
+        addMdpOutputValue<bool>(
+                builder, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG, params_.checkConsistency);
     }
 }
 
