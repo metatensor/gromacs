@@ -343,15 +343,6 @@ metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic
     options.return_vectors   = true;
 
     VesinNeighborList* vesin_neighbor_list = new VesinNeighborList();
-
-    for (int i = 0; i < 3; i++)
-    {
-        for (int j = 0; j < 3; j++)
-        {
-            std::cerr << box[i][j] << " ";
-        }
-        std::cerr << "\n";
-    }
     // .............................. gromacs likes floats, vesin does not
     double double_box[3][3];
 
