@@ -303,10 +303,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
 
 metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic_torch::NeighborListOptions request,
-                                                                       long          n_atoms,
-                                                                       const double* positions,
-                                                                       const double* box,
-                                                                       bool          periodic)
+                                                                       long         n_atoms,
+                                                                       const float* positions,
+                                                                       const matrix box,
+                                                                       bool         periodic)
 {
     auto cutoff = request->engine_cutoff("nm");
 
@@ -321,11 +321,12 @@ metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic
     memset(vesin_neighbor_list, 0, sizeof(VesinNeighborList));
 
     const char* error_message = nullptr;
-    int         status        = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions),
+    VesinDevice cpu{ VesinCPU, 0 };
+    int         status = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions),
                                  static_cast<size_t>(n_atoms),
                                  reinterpret_cast<const double (*)[3]>(box),
                                  periodic,
-                                 VesinCPU,
+                                 cpu,
                                  options,
                                  vesin_neighbor_list,
                                  &error_message);

@@ -82,8 +82,8 @@ public:
 
     metatensor_torch::TensorBlock computeNeighbors(metatomic_torch::NeighborListOptions request,
                                                    long                                 n_atoms,
-                                                   const double*                        positions,
-                                                   const double*                        box,
+                                                   const float*                         positions,
+                                                   const matrix                         box,
                                                    bool                                 periodic);
 
 private:
