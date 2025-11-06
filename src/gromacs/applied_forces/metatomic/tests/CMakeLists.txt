@@ -31,11 +31,10 @@
 # To help us fund GROMACS development, we humbly ask that you cite
 # the research papers on the package. Check out https://www.gromacs.org.
 
-# gmx_add_unit_test(NNPotAppliedForcesUnitTest nnpot_applied_forces-test
-#     CPP_SOURCE_FILES
-#         nnpot.cpp
-#         nnpotforceprovider.cpp
-#         nnpotoptions.cpp
-# )
+gmx_add_unit_test(MTAAppliedForcesUnitTest mta_applied_forces-test
+    CPP_SOURCE_FILES
+        # metatomic_forceprovider.cpp
+        metatomic_options.cpp
+)
 
-# target_link_libraries(nnpot_applied_forces-test PRIVATE applied_forces math topology)
+target_link_libraries(mta_applied_forces-test PRIVATE applied_forces math topology)

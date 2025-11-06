@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="referencedata.xsl"?>
+<ReferenceData>
+  <Bool Name="active">false</Bool>
+  <String Name="modelFileName">model.pt</String>
+  <String Name="input_group">System</String>
+  <String Name="model"></String>
+  <String Name="extensions"></String>
+  <String Name="check_consistency"></String>
+  <String Name="device"></String>
+</ReferenceData>
