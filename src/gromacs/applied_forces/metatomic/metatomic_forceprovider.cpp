@@ -265,57 +265,24 @@ MetatomicForceProvider::~MetatomicForceProvider() = default;
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPositions)
 {
     const int n_atoms = static_cast<int>(options_.params_.mtaIndices_.size());
+    // Start with a zeroed vector on all ranks
     positions_.assign(n_atoms, RVec{ 0.0, 0.0, 0.0 });
 
+    // Each rank fills in the positions for its local atoms
     for (int i = 0; i < n_atoms; ++i)
     {
-        // If idxLookup_[i] is not -1, this atom is local to this rank
-        if (idxLookup_[i] != -1)
+        if (idxLookup_[i] != -1) // local
         {
             positions_[i] = globalPositions[idxLookup_[i]];
         }
     }
 
-    // All ranks need the complete, contiguous list of positions for the metatomic group.
+    // All ranks need the complete, contiguous list of positions.
     if (mpiComm_.isParallel())
     {
-        // Flatten into a double or float buffer depending on dtype_
-        const size_t total = static_cast<size_t>(n_atoms) * 3;
-        if (dtype_ == torch::kFloat64)
-        {
-            std::vector<double> flat(total, 0.0);
-            for (int i = 0; i < n_atoms; ++i)
-            {
-                flat[3 * i + 0] = static_cast<double>(positions_[i][0]);
-                flat[3 * i + 1] = static_cast<double>(positions_[i][1]);
-                flat[3 * i + 2] = static_cast<double>(positions_[i][2]);
-            }
-            mpiComm_.sumReduce(flat);
-            // unpack back to positions_ (optional; code that reads positions_ expects them set)
-            for (int i = 0; i < n_atoms; ++i)
-            {
-                positions_[i][0] = static_cast<float>(flat[3 * i + 0]);
-                positions_[i][1] = static_cast<float>(flat[3 * i + 1]);
-                positions_[i][2] = static_cast<float>(flat[3 * i + 2]);
-            }
-        }
-        else
-        {
-            std::vector<float> flat(total, 0.0f);
-            for (int i = 0; i < n_atoms; ++i)
-            {
-                flat[3 * i + 0] = static_cast<float>(positions_[i][0]);
-                flat[3 * i + 1] = static_cast<float>(positions_[i][1]);
-                flat[3 * i + 2] = static_cast<float>(positions_[i][2]);
-            }
-            mpiComm_.sumReduce(flat);
-            for (int i = 0; i < n_atoms; ++i)
-            {
-                positions_[i][0] = static_cast<double>(flat[3 * i + 0]);
-                positions_[i][1] = static_cast<double>(flat[3 * i + 1]);
-                positions_[i][2] = static_cast<double>(flat[3 * i + 2]);
-            }
-        }
+        real*        data_ptr = reinterpret_cast<real*>(positions_.data());
+        const size_t n_reals  = static_cast<size_t>(n_atoms) * 3;
+        mpiComm_.sumReduce(gmx::ArrayRef<real>(data_ptr, data_ptr + n_reals));
     }
 }
 
@@ -324,91 +291,98 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 {
     const int n_atoms = static_cast<int>(options_.params_.mtaIndices_.size());
 
-    // Gather all required data so it is available on every rank
+    // Gather positions
     this->gatherAtomPositions(inputs.x_);
     copy_mat(inputs.box_, box_);
     torch::Tensor forceTensor;
 
-    // Prepare a host-side buffer for forces. We will fill it on main rank and then sumReduce it.
+    auto gromacs_scalar_type = torch::kFloat32;
+    if (std::is_same_v<real, double>)
+    {
+        gromacs_scalar_type = torch::kFloat64;
+    }
+    // This blob_options is for reading GROMACS memory
+    auto blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
+
+    if (mpiComm_.isMainRank())
+    {
+        auto coerced_positions = makeArrayRef(positions_);
+
+        auto torch_positions =
+                torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, blob_options)
+                        .to(this->dtype_)
+                        .to(this->device_)
+                        .set_requires_grad(true);
+
+        auto torch_cell =
+                torch::from_blob(&box_, { 3, 3 }, blob_options).to(this->dtype_).to(this->device_);
+
+        auto torch_pbc = torch::tensor(std::vector<uint8_t>{ 1, 1, 1 },
+                                       torch::TensorOptions().dtype(torch::kBool).device(this->device_));
+        auto torch_types =
+                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(this->device_);
+
+        auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
+                torch_types, torch_positions, torch_cell, torch_pbc);
+
+        bool periodic = torch::all(torch_pbc).item<bool>();
+        // Compute and add neighbor lists
+        for (const auto& request : nl_requests_)
+        {
+            auto neighbors = computeNeighbors(
+                    request, n_atoms, coerced_positions.data()->as_vec(), box_, periodic);
+            metatomic_torch::register_autograd_neighbors(system, neighbors, false);
+            system->add_neighbor_list(request, neighbors);
+        }
+
+        // Run the model
+        metatensor_torch::TensorMap output_map;
+        try
+        {
+            auto ivalue_output = this->model_.forward({
+                    std::vector<metatomic_torch::System>{ system },
+                    evaluations_options_,
+                    this->check_consistency_,
+            });
+            auto dict_output   = ivalue_output.toGenericDict();
+            output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
+        }
+        catch (const std::exception& e)
+        {
+            GMX_THROW(APIError("[MetatomicPotential] Model evaluation failed: "s + e.what()));
+        }
+
+        // Extract energy
+        auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
+        auto energy_tensor = energy_block->values();
+
+        if (energy_tensor.sizes().vec() != std::vector<int64_t>{ 1, 1 })
+        {
+            GMX_THROW(APIError("Model did not return a single scalar energy value."s));
+        }
+
+        // Set energy output (GROMACS sums this over ranks)
+        outputs->enerd_.term[F_EMETATOMICPOT] = energy_tensor.item<double>();
+
+        // Compute gradients
+        energy_tensor.backward();
+        auto grad = system->positions().grad();
+
+        // Populate the outer-scoped tensor
+        forceTensor = -grad.to(torch::kCPU).to(dtype_);
+    } // --- End of main rank block ---
+
+
+    // Broadcast forces and scatter
     const size_t total = static_cast<size_t>(n_atoms) * 3;
     MPI_Comm     comm  = mpiComm_.comm();
 
-    // Container that will hold final forces on all ranks after the collective.
-    // We choose float or double according to dtype_.
     if (dtype_ == torch::kFloat64)
     {
         std::vector<double> global_force(total, 0.0);
-        // main rank computes forces into a tensor, then we'll copy into global_force and sumReduce
         if (mpiComm_.isMainRank())
         {
-            // Build torch inputs and run model on main rank
-            auto dtype_options = torch::TensorOptions().dtype(dtype_).device(torch::kCPU);
-
-            auto coerced_positions = makeArrayRef(positions_);
-            auto torch_positions =
-                    torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, dtype_options)
-                            .to(this->dtype_)
-                            .to(this->device_)
-                            .set_requires_grad(true);
-
-            auto torch_cell = torch::from_blob(&box_, { 3, 3 }, dtype_options);
-
-            auto cell_norms = torch::norm(torch_cell, 2, /*dim=*/1);
-            auto torch_pbc =
-                    torch::tensor(std::vector<uint8_t>{ 1, 1, 1 },
-                                  torch::TensorOptions().dtype(torch::kBool).device(this->device_));
-            auto torch_types =
-                    torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(this->device_);
-
-            auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
-                    torch_types, torch_positions, torch_cell, torch_pbc);
-
-            bool periodic = torch::all(torch_pbc).item<bool>();
-            // Compute and add neighbor lists
-            for (const auto& request : nl_requests_)
-            {
-                auto neighbors = computeNeighbors(
-                        request, n_atoms, coerced_positions.data()->as_vec(), box_, periodic);
-                metatomic_torch::register_autograd_neighbors(system, neighbors, false);
-                system->add_neighbor_list(request, neighbors);
-            }
-
-            // Run the model
-            metatensor_torch::TensorMap output_map;
-            try
-            {
-                auto ivalue_output = this->model_.forward({
-                        std::vector<metatomic_torch::System>{ system },
-                        evaluations_options_,
-                        this->check_consistency_,
-                });
-                auto dict_output   = ivalue_output.toGenericDict();
-                output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
-            }
-            catch (const std::exception& e)
-            {
-                GMX_THROW(APIError("[MetatomicPotential] Model evaluation failed"s));
-            }
-
-            // Extract energy and compute forces via autograd
-            auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
-            auto energy_tensor = energy_block->values(); // This should be a [1, 1] tensor
-
-            if (energy_tensor.sizes().vec() != std::vector<int64_t>{ 1, 1 })
-            {
-                GMX_THROW(APIError("Model did not return a single scalar energy value."s));
-            }
-
-            // Set energy output
-            outputs->enerd_.term[F_EMETATOMICPOT] = energy_tensor.item<double>();
-
-            // Compute gradients
-            energy_tensor.backward();
-            auto grad = system->positions().grad();
-
-            forceTensor = -grad.to(torch::kCPU).to(dtype_);
-
-            // Copy into host double buffer
+            // Use the correct accessor for the model's dtype
             auto accessor = forceTensor.accessor<double, 2>();
             for (int i = 0; i < n_atoms; ++i)
             {
@@ -416,100 +390,31 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 global_force[3 * i + 1] = accessor[i][1];
                 global_force[3 * i + 2] = accessor[i][2];
             }
-        } // main rank block
+        }
 
-        // All ranks participate in this collective. After this call, global_force contains the final forces.
         if (mpiComm_.isParallel())
         {
             nblock_abc(mpiComm_.isMainRank(), comm, total, &global_force);
         }
 
-        // 4. Each rank accumulates forces for its local atoms
+        // Scatter (double -> double)
         for (int i = 0; i < n_atoms; ++i)
         {
             const int localIndex = idxLookup_[i];
-            if (localIndex != -1) // This atom is local to the current rank
+            if (localIndex != -1)
             {
-                for (int m = 0; m < DIM; ++m)
-                {
-                    outputs->forceWithVirial_.force_[localIndex][m] += global_force[3 * i + m];
-                }
+                outputs->forceWithVirial_.force_[localIndex][0] += global_force[3 * i + 0];
+                outputs->forceWithVirial_.force_[localIndex][1] += global_force[3 * i + 1];
+                outputs->forceWithVirial_.force_[localIndex][2] += global_force[3 * i + 2];
             }
         }
     }
-    else // float32 case
+    else if (dtype_ == torch::kFloat32)
     {
-        std::vector<float> global_force(static_cast<size_t>(total), 0.0f);
+        std::vector<float> global_force(total, 0.0f);
         if (mpiComm_.isMainRank())
         {
-            auto dtype_options = torch::TensorOptions().dtype(dtype_).device(torch::kCPU);
-
-            auto coerced_positions = makeArrayRef(positions_);
-            auto torch_positions =
-                    torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, dtype_options)
-                            .to(this->dtype_)
-                            .to(this->device_)
-                            .set_requires_grad(true);
-
-            auto torch_cell = torch::from_blob(&box_, { 3, 3 }, dtype_options);
-
-            auto cell_norms = torch::norm(torch_cell, 2, /*dim=*/1);
-            auto torch_pbc =
-                    torch::tensor(std::vector<uint8_t>{ 1, 1, 1 },
-                                  torch::TensorOptions().dtype(torch::kBool).device(this->device_));
-            auto torch_types =
-                    torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(this->device_);
-
-            auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
-                    torch_types, torch_positions, torch_cell, torch_pbc);
-
-            bool periodic = torch::all(torch_pbc).item<bool>();
-            // Compute and add neighbor lists
-            for (const auto& request : nl_requests_)
-            {
-                auto neighbors = computeNeighbors(
-                        request, n_atoms, coerced_positions.data()->as_vec(), box_, periodic);
-                metatomic_torch::register_autograd_neighbors(system, neighbors, false);
-                system->add_neighbor_list(request, neighbors);
-            }
-
-            // Run the model
-            metatensor_torch::TensorMap output_map;
-            try
-            {
-                auto ivalue_output = this->model_.forward({
-                        std::vector<metatomic_torch::System>{ system },
-                        evaluations_options_,
-                        this->check_consistency_,
-                });
-                auto dict_output   = ivalue_output.toGenericDict();
-                output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
-            }
-            catch (const std::exception& e)
-            {
-                throw std::runtime_error("[MetatomicPotential] Model evaluation failed");
-            }
-
-            // Extract energy and compute forces via autograd
-            auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
-            auto energy_tensor = energy_block->values(); // This should be a [1, 1] tensor
-
-            if (energy_tensor.sizes().vec() != std::vector<int64_t>{ 1, 1 })
-            {
-                throw std::runtime_error("Model did not return a single scalar energy value.");
-            }
-            double energy = energy_tensor.item<double>();
-
-            // Set energy output
-            outputs->enerd_.term[F_EMETATOMICPOT] = energy;
-
-            // Compute gradients
-            energy_tensor.backward();
-            auto grad = system->positions().grad();
-
-            auto forceTensor = -grad.to(torch::kCPU).to(dtype_);
-
-            // Copy into host float buffer
+            // Use the correct accessor for the model's dtype
             auto accessor = forceTensor.accessor<float, 2>();
             for (int i = 0; i < n_atoms; ++i)
             {
@@ -517,29 +422,32 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 global_force[3 * i + 1] = accessor[i][1];
                 global_force[3 * i + 2] = accessor[i][2];
             }
-        } // main rank float block
+        }
 
-        // All ranks participate in this collective. After this call, global_force contains the final forces.
         if (mpiComm_.isParallel())
         {
             nblock_abc(mpiComm_.isMainRank(), comm, total, &global_force);
         }
 
-        // 4. Each rank accumulates forces for its local atoms
+        // Scatter (float -> double)
         for (int i = 0; i < n_atoms; ++i)
         {
             const int localIndex = idxLookup_[i];
-            if (localIndex != -1) // This atom is local to the current rank
+            if (localIndex != -1)
             {
-                for (int m = 0; m < DIM; ++m)
-                {
-                    outputs->forceWithVirial_.force_[localIndex][m] +=
-                            static_cast<float>(global_force[3 * i + m]);
-                }
+                outputs->forceWithVirial_.force_[localIndex][0] +=
+                        static_cast<double>(global_force[3 * i + 0]);
+                outputs->forceWithVirial_.force_[localIndex][1] +=
+                        static_cast<double>(global_force[3 * i + 1]);
+                outputs->forceWithVirial_.force_[localIndex][2] +=
+                        static_cast<double>(global_force[3 * i + 2]);
             }
         }
-    } // dtype branching
-
+    }
+    else
+    {
+            GMX_THROW(APIError("Unsupported dtype, only float32 and float64 are supported for now");
+    }
     // TODO(rg): Virial calculation. For now, GROMACS will (incorrectly) calculate it from forces if
     // needed. This is the same behavior as nnpot
 }
@@ -628,7 +536,8 @@ metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic
     auto pair_vectors = torch::from_blob(vesin_neighbor_list->vectors,
                                          { n_pairs, 3, 1 },
                                          deleter,
-                                         torch::TensorOptions().dtype(this->dtype_));
+                                         torch::TensorOptions().dtype(torch::kFloat64));
+    pair_vectors.to(this->dtype_);
 
     auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
             std::vector<std::string>{
