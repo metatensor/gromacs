@@ -52,6 +52,7 @@
 #    define DIM 3
 #endif
 #include "gromacs/domdec/localatomset.h"
+#include "gromacs/mdlib/broadcaststructs.h"
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/mdtypes/forceoutput.h"
 #include "gromacs/utility/arrayref.h"
@@ -60,6 +61,7 @@
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
 
+using namespace std::string_literals; // For ""s
 namespace gmx
 {
 
@@ -183,23 +185,21 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // "Broadcast" the static atom numbers to all ranks: all ranks must call this.
     if (mpiComm_.isParallel())
     {
-        mpiComm_.sumReduce(atomNumbers_);
+        // resize/allocate on non-main ranks and broadcast raw bytes of vector
+        nblock_abc(mpiComm_.isMainRank(), mpiComm_.comm(), static_cast<std::size_t>(n_atoms), &atomNumbers_);
     }
 
     // Broadcast dtype info (so all ranks know whether the model uses float32 or float64).
-    // We'll encode 0 = float64, 1 = float32
+    // 0 = float64, 1 = float32
     int dtype_code_local = 0;
     if (mpiComm_.isMainRank())
     {
         dtype_code_local = (dtype_ == torch::kFloat32) ? 1 : 0;
     }
+    // comm() may be MPI_COMM_NULL for SingleRank so..
     if (mpiComm_.isParallel())
     {
-        std::vector<int> dtype_code_vec(1, dtype_code_local);
-        mpiComm_.sumReduce(dtype_code_vec);
-        int dtype_sum = dtype_code_vec[0];
-        // since non-main ranks had 0, dtype_sum equals main's code
-        dtype_code_local = dtype_sum;
+        block_bc(mpiComm_.comm(), dtype_code_local);
     }
     // Set dtype_ on all ranks
     dtype_ = (dtype_code_local == 1) ? torch::kFloat32 : torch::kFloat64;
@@ -324,12 +324,14 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 {
     const int n_atoms = static_cast<int>(options_.params_.mtaIndices_.size());
 
-    // 1. Gather all required data so it is available on every rank
+    // Gather all required data so it is available on every rank
     this->gatherAtomPositions(inputs.x_);
     copy_mat(inputs.box_, box_);
+    torch::Tensor forceTensor;
 
     // Prepare a host-side buffer for forces. We will fill it on main rank and then sumReduce it.
     const size_t total = static_cast<size_t>(n_atoms) * 3;
+    MPI_Comm     comm  = mpiComm_.comm();
 
     // Container that will hold final forces on all ranks after the collective.
     // We choose float or double according to dtype_.
@@ -385,7 +387,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
             catch (const std::exception& e)
             {
-                throw std::runtime_error("[MetatomicPotential] Model evaluation failed");
+                GMX_THROW(APIError("[MetatomicPotential] Model evaluation failed"s));
             }
 
             // Extract energy and compute forces via autograd
@@ -394,18 +396,17 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
             if (energy_tensor.sizes().vec() != std::vector<int64_t>{ 1, 1 })
             {
-                throw std::runtime_error("Model did not return a single scalar energy value.");
+                GMX_THROW(APIError("Model did not return a single scalar energy value."s));
             }
-            double energy = energy_tensor.item<double>();
 
             // Set energy output
-            outputs->enerd_.term[F_EMETATOMICPOT] = energy;
+            outputs->enerd_.term[F_EMETATOMICPOT] = energy_tensor.item<double>();
 
             // Compute gradients
             energy_tensor.backward();
             auto grad = system->positions().grad();
 
-            auto forceTensor = -grad.to(torch::kCPU).to(dtype_);
+            forceTensor = -grad.to(torch::kCPU).to(dtype_);
 
             // Copy into host double buffer
             auto accessor = forceTensor.accessor<double, 2>();
@@ -420,7 +421,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         // All ranks participate in this collective. After this call, global_force contains the final forces.
         if (mpiComm_.isParallel())
         {
-            mpiComm_.sumReduce(global_force);
+            nblock_abc(mpiComm_.isMainRank(), comm, total, &global_force);
         }
 
         // 4. Each rank accumulates forces for its local atoms
@@ -521,7 +522,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         // All ranks participate in this collective. After this call, global_force contains the final forces.
         if (mpiComm_.isParallel())
         {
-            mpiComm_.sumReduce(global_force);
+            nblock_abc(mpiComm_.isMainRank(), comm, total, &global_force);
         }
 
         // 4. Each rank accumulates forces for its local atoms
@@ -533,7 +534,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 for (int m = 0; m < DIM; ++m)
                 {
                     outputs->forceWithVirial_.force_[localIndex][m] +=
-                            static_cast<double>(global_force[3 * i + m]);
+                            static_cast<float>(global_force[3 * i + m]);
                 }
             }
         }
