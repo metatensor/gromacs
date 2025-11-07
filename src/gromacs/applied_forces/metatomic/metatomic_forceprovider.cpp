@@ -72,11 +72,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     device_(torch::Device(torch::kCPU)),
     box_{ { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 } }
 {
-    // All setup that involves file I/O or GPU initialization should only be done on the main rank.
-    if (!mpiComm_.isMainRank())
-    {
-        return;
-    }
     GMX_LOG(logger_.info).asParagraph().appendText("Initializing MetatomicForceProvider...");
 
     if (!std::filesystem::exists(options_.params_.modelPath_))
@@ -143,15 +138,95 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     evaluations_options_->outputs.insert("energy", requested_output);
 
-    // Initialize data vectors
-    const int n_atoms = options_.params_.mtaIndices_.size();
+    // Initialize ML atom group data structures
+    const auto& mtaIndices = options_.params_.mtaIndices_;
+    const int   n_atoms    = mtaIndices.size();
+
+    // Resize vectors that will be used on all ranks.
     positions_.resize(n_atoms);
     atomNumbers_.resize(n_atoms);
-    idxLookup_.resize(n_atoms);
+    idxLookup_.resize(n_atoms); // filled by gatherAtomNumbersIndices
+
+    // Atom numbers are static. We will populate them on the main rank
+    // and "broadcast" using sumReduce.
+
+    // For sumReduce to work as a broadcast, all non-main
+    // ranks MUST have their vectors zeroed out first.
+    std::fill(atomNumbers_.begin(), atomNumbers_.end(), 0);
+
+    // Now, only the main rank populates its version of the data.
+    if (mpiComm_.isMainRank())
+    {
+        for (int i = 0; i < n_atoms; ++i)
+        {
+            const int gIdx = mtaIndices[i];
+
+            if (gIdx >= options_.params_.numAtoms_)
+            {
+                GMX_THROW(APIError("Metatomic atom index " + std::to_string(gIdx) + " is out of bounds for topology numAtoms="
+                                   + std::to_string(options_.params_.numAtoms_)));
+            }
+            atomNumbers_[i] = options_.params_.atoms_.atom[gIdx].atomnumber;
+        }
+    }
+
+    // "Broadcast" the static atom numbers to all ranks
+    if (mpiComm_.isParallel())
+    {
+        mpiComm_.sumReduce(atomNumbers_);
+    }
+
+    // Initialize the lookup table. It will be populated correctly
+    // by the first call from the SimulationRunNotifier.
+    std::fill(idxLookup_.begin(), idxLookup_.end(), -1);
 
     GMX_LOG(logger_.info)
             .asParagraph()
             .appendText("MetatomicForceProvider initialization complete.");
+}
+
+void MetatomicForceProvider::gatherAtomNumbersIndices()
+{
+    // This function is called on domain decomposition.
+    // Its ONLY job is to update the `idxLookup_` map, which maps
+    // the contiguous ML atom index (0..n_atoms-1) to the
+    // sparse GROMACS local index.
+    //
+    // `atomNumbers_` is static and was set/broadcast in the constructor.
+
+    const auto& mtaIndices = options_.params_.mtaIndices_;
+    const int   n_atoms    = mtaIndices.size();
+
+    // Reset the lookup table to -1 (sentinel for "not local")
+    std::fill(idxLookup_.begin(), idxLookup_.end(), -1);
+
+    // Build a reverse lookup map for efficiently finding ML atoms.
+    // Map: (Global GROMACS Index) -> (ML Group Index, 0..n_atoms-1)
+    std::unordered_map<int, int> globalToMlIndex;
+    globalToMlIndex.reserve(n_atoms);
+    for (int i = 0; i < n_atoms; ++i)
+    {
+        globalToMlIndex[mtaIndices[i]] = i;
+    }
+
+    // Iterate over this rank's LOCAL atoms and populate the lookup table if a
+    // local atom is part of our ML group.
+    const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
+    for (size_t i = 0; i < mtaAtoms->numAtomsLocal(); ++i)
+    {
+        const int lIdx = mtaAtoms->localIndex()[i];
+        const int gIdx = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
+
+        // Check if this local atom is one of our ML atoms
+        if (auto it = globalToMlIndex.find(gIdx); it != globalToMlIndex.end())
+        {
+            const int mlIdx   = it->second; // This is the index (0..n_atoms-1)
+            idxLookup_[mlIdx] = lIdx;
+        }
+    }
+
+    // Done. No MPI is needed. `gatherAtomPositions` will now correctly
+    // use this rank-local `idxLookup_` to contribute its positions.
 }
 
 MetatomicForceProvider::~MetatomicForceProvider() = default;
@@ -177,51 +252,6 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPosi
     }
 }
 
-
-void MetatomicForceProvider::gatherAtomNumbersIndices()
-{
-    // this might not be the most efficient solution, since we are throwing away most of the
-    // vectors here in case of NNP/MM
-
-    // create lookup table for local atom indices needed for hybrid ML/MM
-    // -1 is used as a flag for atoms that are not local / not in the input
-    // used to distribute forces to correct local indices as the NN input tensor does not contain all atoms
-    idxLookup_.assign(options_.params_.numAtoms_, -1);
-    atomNumbers_.assign(options_.params_.numAtoms_, 0);
-
-    int lIdx, gIdx;
-    for (size_t i = 0; i < options_.params_.mtaAtoms_->numAtomsLocal(); i++)
-    {
-        lIdx = options_.params_.mtaAtoms_->localIndex()[i];
-        gIdx = options_.params_.mtaAtoms_->globalIndex()[options_.params_.mtaAtoms_->collectiveIndex()[i]];
-        // TODO: make sure that atom number indexing is correct
-        atomNumbers_[gIdx] = options_.params_.atoms_.atom[gIdx].atomnumber;
-        idxLookup_[gIdx]   = lIdx;
-    }
-
-    // distribute atom numbers to all ranks
-    if (mpiComm_.isParallel())
-    {
-        mpiComm_.sumReduce(atomNumbers_);
-    }
-
-    // remove unused elements in atomNumbers_, and idxLookup
-    auto atIt  = atomNumbers_.begin();
-    auto idxIt = idxLookup_.begin();
-    while (atIt != atomNumbers_.end() && idxIt != idxLookup_.end())
-    {
-        if (*atIt == 0)
-        {
-            atIt  = atomNumbers_.erase(atIt);
-            idxIt = idxLookup_.erase(idxIt);
-        }
-        else
-        {
-            ++atIt;
-            ++idxIt;
-        }
-    }
-}
 
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
