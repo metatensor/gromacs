@@ -39,17 +39,6 @@ option(GMX_METATOMIC "Enable interface to metatomic atomistic models" OFF)
 # endif()
 
 if(GMX_METATOMIC)
-    # Taken near verbatim from LAMMPS
-    # https://github.com/metatensor/lammps/blob/metatomic/cmake/Modules/Packages/ML-METATOMIC.cmake
-    if (BUILD_OMP AND APPLE)
-        message(FATAL_ERROR
-            "Can not enable both BUILD_OMP and PGK_ML-METATOMIC on Apple systems, "
-            "since this results in two different versions of the OpenMP library (one "
-            "from the system and one from Torch) being linked to the final "
-            "executable, which then crashes"
-        )
-    endif()
-
     # Bring the `torch` target in scope to allow evaluation
     # of cmake generator expression from `metatensor_torch`
     find_package(Torch REQUIRED)
@@ -69,19 +58,19 @@ if(GMX_METATOMIC)
     set(VESIN_GIT_TAG "87dcad999fec47b29ab21be9662ef283edc7530b")
 
     set(DOWNLOAD_VESIN_DEFAULT ON)
-    find_package(vesin QUIET ${VESIN_VERSION})
+    find_package(vesin ${VESIN_VERSION} QUIET)
     if (vesin_FOUND)
         set(DOWNLOAD_VESIN_DEFAULT OFF)
     endif()
 
     set(DOWNLOAD_METATENSOR_DEFAULT ON)
-    find_package(metatensor_torch QUIET ${METATENSOR_TORCH_VERSION})
+    find_package(metatensor_torch ${METATENSOR_TORCH_VERSION} QUIET)
     if (metatensor_torch_FOUND)
         set(DOWNLOAD_METATENSOR_DEFAULT OFF)
     endif()
 
     set(DOWNLOAD_METATOMIC_DEFAULT ON)
-    find_package(metatomic_torch QUIET ${METATOMIC_TORCH_VERSION})
+    find_package(metatomic_torch ${METATOMIC_TORCH_VERSION} QUIET)
     if (metatomic_torch_FOUND)
         set(DOWNLOAD_METATOMIC_DEFAULT OFF)
     endif()

@@ -63,7 +63,7 @@ void MetatomicTopologyPreprocessor::preprocess(gmx_mtop_t* mtop, const MDLogger&
 
     GMX_LOG(logger.info)
             .appendTextFormatted(
-                    "Number of embedded MTA atoms: %td\nNumber of regular atoms: %td\n",
+                    "Number of embedded metatomic atoms: %td\nNumber of regular atoms: %td\n",
                     gmx::ssize(mtaIndices_),
                     mtop->natoms - gmx::ssize(mtaIndices_));
 

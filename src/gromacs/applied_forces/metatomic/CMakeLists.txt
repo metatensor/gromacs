@@ -31,8 +31,6 @@
 # To help us fund GROMACS development, we humbly ask that you cite
 # the research papers on the package. Check out https://www.gromacs.org.
 
-include(CheckLinkerFlag)
-
 gmx_add_libgromacs_sources(
     metatomic_options.cpp
     metatomic_mdmodule.cpp
