@@ -76,28 +76,10 @@ static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
 static const std::string CHECK_CONSISTENCY_TAG    = "check_consistency";
 static const std::string DEVICE_TAG               = "device";
 
-/*! \brief \internal Helper to declare mdp transform rules.
- *
- * This local helper function is no longer needed, as we now use
- * the common addMdpTransformFromString from mdpopenumutil.h
- */
-/*
-template<class ToType, class TransformWithFunctionType>
-void MetatomicMdpTransformFromString(IKeyValueTreeTransformRules* rules,
-                                     TransformWithFunctionType    transformationFunction,
-                                     const std::string&           optionTag)
-{
-    rules->addRule()
-            .from<std::string>("/" + METATOMIC_MODULE_NAME + "-" + optionTag)
-            .to<ToType>("/" + METATOMIC_MODULE_NAME + "/" + optionTag)
-            .transformWith(transformationFunction);
-}
-*/
 
 void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
 {
     const auto& stringIdentityTransform = [](std::string s) { return s; };
-    // Use the common helper function instead of the local one
     addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ACTIVE_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, INPUT_GROUP_TAG);

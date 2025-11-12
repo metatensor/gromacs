@@ -55,12 +55,12 @@ namespace gmx
  *
  * Inherits from QMMMTopologyPreprocessor and performs the following modifications
  * for a scheme analoguous to mechanical embedding in QMMM:
- * 1) Split molecules containing NNP input atoms from other molecules in blocks
- * 2) Exclude non-bonded interactions between NNP atoms.
+ * 1) Split molecules containing Metatomic input atoms from other molecules in blocks
+ * 2) Exclude non-bonded interactions between Metatomic atoms.
  * 3) Build vector with atomic numbers of all atoms.
- * 4) Make F_CONNBOND between atoms within NNP region.
- * 5) Remove angles and settles containing 2 or more NNP atoms.
- * 6) Remove dihedrals containing 3 or more NNP atoms.
+ * 4) Make F_CONNBOND between atoms within Metatomic region.
+ * 5) Remove angles and settles containing 2 or more Metatomic atoms.
+ * 6) Remove dihedrals containing 3 or more Metatomic atoms.
  *
  * Is a clone of the NNPot preprocessor
  */
@@ -85,7 +85,7 @@ public:
 private:
     /*! \brief Global indices of metatomic atoms;
      * The dominant operation is search and we also expect the set of metatomic atoms to be very small
-     * relative to the rest, so set should outperform unordered set, i.e. unsorted std::vector.
+     * relative to the rest, so set should outperform unordered set.
      */
     std::set<int> mtaIndices_;
     //! Vector with atom numbers for the whole system

@@ -56,7 +56,7 @@ MetatomicTopologyPreprocessor::MetatomicTopologyPreprocessor(ArrayRef<const Inde
 void MetatomicTopologyPreprocessor::preprocess(gmx_mtop_t* mtop, const MDLogger& logger, WarningHandler* wi)
 {
     // We're re-using the topology-modifying functions from QMMM module for now,
-    // since they contain the same modifications as needed for MTA/MM. This should be
+    // since they contain the same modifications as needed for ML/MM with metatomic. This should be
     // refactored in the future.
     GMX_LOG(logger.info)
             .appendText("Metatomic potential Interface is active, topology was modified!");
