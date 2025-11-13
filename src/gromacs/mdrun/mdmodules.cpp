@@ -44,6 +44,7 @@
 #include "gromacs/applied_forces/colvars/colvarsMDModule.h"
 #include "gromacs/applied_forces/densityfitting/densityfitting.h"
 #include "gromacs/applied_forces/electricfield.h"
+#include "gromacs/applied_forces/metatomic/metatomic_mdmodule.h"
 #include "gromacs/applied_forces/nnpot/nnpot.h"
 #include "gromacs/applied_forces/plumed/plumedMDModule.h"
 #include "gromacs/applied_forces/qmmm/qmmm.h"
@@ -82,10 +83,11 @@ public:
                 InteractiveMolecularDynamicsModuleInfo::create();
         modules_[std::string(QMMMModuleInfo::sc_name)] = QMMMModuleInfo::create();
         modules_[std::string(SwapCoordinatesModuleInfo::sc_name)] = SwapCoordinatesModuleInfo::create();
-        modules_[std::string(ColvarsModuleInfo::sc_name)] = ColvarsModuleInfo::create();
-        modules_[std::string(PlumedModuleInfo::sc_name)]  = PlumedModuleInfo::create();
-        modules_[std::string(NNPotModuleInfo::sc_name)]   = NNPotModuleInfo::create();
-        modules_[std::string(FmmModuleInfo::sc_name)]     = FmmModuleInfo::create();
+        modules_[std::string(ColvarsModuleInfo::sc_name)]   = ColvarsModuleInfo::create();
+        modules_[std::string(PlumedModuleInfo::sc_name)]    = PlumedModuleInfo::create();
+        modules_[std::string(NNPotModuleInfo::sc_name)]     = NNPotModuleInfo::create();
+        modules_[std::string(FmmModuleInfo::sc_name)]       = FmmModuleInfo::create();
+        modules_[std::string(MetatomicModuleInfo::sc_name)] = MetatomicModuleInfo::create();
     }
 
     void makeModuleOptions(Options* options) const
@@ -102,7 +104,8 @@ public:
                                              DensityFittingModuleInfo::sc_name,
                                              QMMMModuleInfo::sc_name,
                                              ColvarsModuleInfo::sc_name,
-                                             NNPotModuleInfo::sc_name })
+                                             NNPotModuleInfo::sc_name,
+                                             MetatomicModuleInfo::sc_name })
         {
             IMDModule*          module            = modules_.at(std::string(moduleName)).get();
             IMdpOptionProvider* mdpOptionProvider = module->mdpOptionProvider();
@@ -167,7 +170,8 @@ void MDModules::initMdpTransform(IKeyValueTreeTransformRules* rules)
                                          DensityFittingModuleInfo::sc_name,
                                          QMMMModuleInfo::sc_name,
                                          ColvarsModuleInfo::sc_name,
-                                         NNPotModuleInfo::sc_name })
+                                         NNPotModuleInfo::sc_name,
+                                         MetatomicModuleInfo::sc_name })
     {
         IMDModule*          module            = impl_->modules_.at(std::string(moduleName)).get();
         IMdpOptionProvider* mdpOptionProvider = module->mdpOptionProvider();
@@ -191,7 +195,8 @@ void MDModules::buildMdpOutput(KeyValueTreeObjectBuilder* builder)
                                          DensityFittingModuleInfo::sc_name,
                                          QMMMModuleInfo::sc_name,
                                          ColvarsModuleInfo::sc_name,
-                                         NNPotModuleInfo::sc_name })
+                                         NNPotModuleInfo::sc_name,
+                                         MetatomicModuleInfo::sc_name })
     {
         IMDModule*                module = impl_->modules_.at(std::string(moduleName)).get();
         const IMdpOptionProvider* mdpOptionProvider = module->mdpOptionProvider();

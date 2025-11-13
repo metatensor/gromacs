@@ -38,7 +38,7 @@
 if(GMX_OPENMP)
     # We should do OpenMP detection if we get here
     # OpenMP check must come before other CFLAGS!
-    find_package(OpenMP)
+    find_package(OpenMP REQUIRED C CXX)
     if(NOT OPENMP_FOUND)
         if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang")
             message(FATAL_ERROR "The compiler you are using does not support OpenMP parallelism, "

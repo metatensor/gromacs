@@ -141,6 +141,16 @@ struct MDModulesEnergyOutputToNNPotRequestChecker
     bool energyOutputToNNPot_ = false;
 };
 
+/*! \libinternal \brief Check if the Metatmoic module outputs energy to a specific field.
+ *
+ * Ensures that energy is output for NNPot module.
+ */
+struct MDModulesEnergyOutputToMetatomicPotRequestChecker
+{
+    //! Trigger output to Metatomic energy field
+    bool energyOutputToMetatomicPot_ = false;
+};
+
 /*! \libinternal
  * \brief Collect errors for the energy calculation frequency.
  *
@@ -404,6 +414,9 @@ struct MDModulesNotifiers
      * \tparam MDModulesEnergyOutputToNNPotRequestChecker*
      *                              Enables NNPot module to report if it wants to write its energy
      *                              output to the "NN Potential" field in the energy files
+     * \tparam MDModulesEnergyOutputToMetatomicPotRequestChecker*
+     *                              Enables the Metatomic module to report if it wants to write its energy
+     *                              output to the "Metatomic Potential" field in the energy files
      * \tparam SeparatePmeRanksPermitted*
      *                              Enables modules to report if they want to disable dedicated
      *                              PME ranks
@@ -434,6 +447,7 @@ struct MDModulesNotifiers
                            MDModulesEnergyOutputToDensityFittingRequestChecker*,
                            MDModulesEnergyOutputToQMMMRequestChecker*,
                            MDModulesEnergyOutputToNNPotRequestChecker*,
+                           MDModulesEnergyOutputToMetatomicPotRequestChecker*,
                            SeparatePmeRanksPermitted*,
                            const PbcType&,
                            const SimulationTimeStep&,
