@@ -44,6 +44,8 @@
 #include "gromacs/mdtypes/iforceprovider.h"
 
 #include "metatensor.hpp"
+// both gromacs and torch define `DIM`, which result in a conflict. We don't need either, 
+// so we undef before including headers.
 #ifdef DIM
 #    undef DIM
 #endif
