@@ -106,7 +106,7 @@ private:
     //! local copy of simulation box
     matrix box_;
     /// From EON
-    torch::jit::Module                                model_;
+    metatensor_torch::Module model_;
     metatomic_torch::ModelCapabilities                capabilities_;
     std::vector<metatomic_torch::NeighborListOptions> nl_requests_;
     metatomic_torch::ModelEvaluationOptions           evaluations_options_;

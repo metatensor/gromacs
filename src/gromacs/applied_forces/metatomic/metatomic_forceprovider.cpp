@@ -81,11 +81,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     {
         GMX_LOG(logger_.info).asParagraph().appendText("Initializing MetatomicForceProvider...");
 
-        if (!std::filesystem::exists(options_.params_.modelPath_))
-        {
-            GMX_THROW(FileIOError("Metatomic model file does not exist: " + options_.params_.modelPath_));
-        }
-
         // Load the model
         try
         {
@@ -134,6 +129,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         evaluations_options_->set_length_unit("nm");
 
         auto outputs = capabilities_->outputs();
+        // TODO(rg): handle variants
         if (!outputs.contains("energy"))
         {
             GMX_THROW(APIError("Metatomic model must provide an 'energy' output."));

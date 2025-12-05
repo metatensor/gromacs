@@ -78,7 +78,7 @@ struct MetatomicParameters
     //! path to a directory where extensions will be present at MD time
     std::string extensionsDirectory;
     //! should metatomic run additional checks on the models inputs & outputs?
-    bool checkConsistency = true;
+    bool checkConsistency = true; // TODO(rg): remove on release
     //! Torch device to use to run the model. If left empty, this is defined
     //! based on the model declared preferences
     std::string device;
@@ -102,7 +102,6 @@ class MetatomicOptions final : public IMdpOptionProvider
 {
 public:
     MetatomicParameters params_;
-    // ^---------- lol
     void initMdpTransform(IKeyValueTreeTransformRules* rules) override;
     void initMdpOptions(IOptionsContainerWithSections* options) override;
     void buildMdpOutput(KeyValueTreeObjectBuilder* builder) const override;
