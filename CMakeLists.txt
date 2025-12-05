@@ -560,31 +560,6 @@ test_big_endian(GMX_INTEGER_BIG_ENDIAN)
 gmx_set_boolean(GMX_USE_NICE "HAVE_UNISTD_H AND HAVE_NICE")
 
 ########################################################################
-#Process MPI settings
-########################################################################
-include(gmxManageMPI)
-
-########################################################################
-#Process MiMiC settings
-########################################################################
-include(gmxManageMimic)
-
-########################################################################
-#Process CP2K settings
-########################################################################
-include(gmxManageCP2K)
-
-########################################################################
-#Process NNPot settings
-########################################################################
-include(gmxManageNNPot)
-
-########################################################################
-# Process metatomic settings
-########################################################################
-include(gmxManageMetatomic)
-
-########################################################################
 #Process shared/static library settings
 ########################################################################
 include(gmxManageSharedLibraries)
@@ -598,6 +573,21 @@ else()
     set(_GMXAPI_DEFAULT ${BUILD_SHARED_LIBS})
 endif()
 option(GMXAPI "Install GROMACS API." ${_GMXAPI_DEFAULT})
+
+########################################################################
+#Process MPI settings
+########################################################################
+include(gmxManageMPI)
+
+########################################################################
+#Process MiMiC settings
+########################################################################
+include(gmxManageMimic)
+
+########################################################################
+#Process CP2K settings
+########################################################################
+include(gmxManageCP2K)
 
 ########################################################################
 # Specify install locations
@@ -714,16 +704,18 @@ include(gmxManageSimd)
 gmx_manage_simd()
 
 if(GMX_GPU)
-
     string(TOUPPER "${GMX_GPU}" _gmx_gpu_uppercase)
     if(${_gmx_gpu_uppercase} STREQUAL "CUDA")
         include(gmxManageCuda)
     elseif(${_gmx_gpu_uppercase} STREQUAL "HIP")
         include(gmxManageHip)
     elseif(${_gmx_gpu_uppercase} STREQUAL "OPENCL")
-        message(STATUS "GPU support with OpenCL is deprecated. It is still fully supported (and "
-            "recommended for Apple GPUs). Please use CUDA for running on NVIDIA GPUs and "
-            "SYCL for running on Intel and AMD GPUs.")
+        if(NOT OpenCL_DONT_WARN_AFTER_FIRST_RUN)
+            message(STATUS "GPU support with OpenCL is deprecated. It is still fully supported (and "
+                   "recommended for Apple GPUs). Please use CUDA for running on NVIDIA GPUs and "
+                   "SYCL for running on Intel GPUs, and HIP or SYCL on AMD GPUs.")
+        endif()
+        set(OpenCL_DONT_WARN_AFTER_FIRST_RUN TRUE CACHE INTERNAL "Be quiet during future attempts to configure with OpenCL support")
         include(gmxManageOpenCL)
     elseif(${_gmx_gpu_uppercase} STREQUAL "SYCL")
         include(gmxManageSycl)
@@ -843,6 +835,18 @@ endif()
 
 # Set NVSHMEM host and device libs
 include(gmxManageNvshmem)
+
+
+########################################################################
+#Process NNPot settings (do it after our GPU detection)
+########################################################################
+include(gmxManageNNPot)
+
+
+########################################################################
+# Process metatomic settings
+########################################################################
+include(gmxManageMetatomic)
 
 if(WIN32)
     set(GMX_NATIVE_WINDOWS 1)

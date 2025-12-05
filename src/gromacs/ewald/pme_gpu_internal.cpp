@@ -56,6 +56,7 @@
 
 #include "gromacs/ewald/ewald_utils.h"
 #include "gromacs/fft/gpu_3dfft.h"
+#include "gromacs/gpu_utils/capabilities.h"
 #include "gromacs/gpu_utils/device_context.h"
 #include "gromacs/gpu_utils/device_stream.h"
 #include "gromacs/gpu_utils/gpu_utils.h"
@@ -656,15 +657,18 @@ void pme_gpu_realloc_and_copy_fract_shifts(PmeGpu* pmeGpu)
 void pme_gpu_free_fract_shifts(const PmeGpu* pmeGpu)
 {
     auto* kernelParamsPtr = pmeGpu->kernelParams.get();
-#if GMX_GPU_CUDA
-    destroyParamLookupTable(&kernelParamsPtr->grid.d_fractShiftsTable,
-                            &kernelParamsPtr->fractShiftsTableTexture);
-    destroyParamLookupTable(&kernelParamsPtr->grid.d_gridlineIndicesTable,
-                            &kernelParamsPtr->gridlineIndicesTableTexture);
-#elif GMX_GPU_OPENCL || GMX_GPU_SYCL
-    freeDeviceBuffer(&kernelParamsPtr->grid.d_fractShiftsTable);
-    freeDeviceBuffer(&kernelParamsPtr->grid.d_gridlineIndicesTable);
-#endif
+    if constexpr (gmx::GpuConfigurationCapabilities::PmeParamLookupTable)
+    {
+        destroyParamLookupTable(&kernelParamsPtr->grid.d_fractShiftsTable,
+                                &kernelParamsPtr->fractShiftsTableTexture);
+        destroyParamLookupTable(&kernelParamsPtr->grid.d_gridlineIndicesTable,
+                                &kernelParamsPtr->gridlineIndicesTableTexture);
+    }
+    else
+    {
+        freeDeviceBuffer(&kernelParamsPtr->grid.d_fractShiftsTable);
+        freeDeviceBuffer(&kernelParamsPtr->grid.d_gridlineIndicesTable);
+    }
 }
 
 bool pme_gpu_stream_query(const PmeGpu* pmeGpu)
@@ -775,8 +779,8 @@ void pme_gpu_sync_spread_grid(const PmeGpu* pmeGpu)
 static void pme_gpu_init_internal(PmeGpu* pmeGpu, const DeviceContext& deviceContext, const DeviceStream& deviceStream)
 {
     /* Allocate the target-specific structures */
-    pmeGpu->archSpecific.reset(new PmeGpuSpecific(deviceContext, deviceStream));
-    pmeGpu->kernelParams.reset(new PmeGpuKernelParams());
+    pmeGpu->archSpecific = std::make_shared<PmeGpuSpecific>(deviceContext, deviceStream);
+    pmeGpu->kernelParams = std::make_shared<PmeGpuKernelParams>();
 
     // Use in-place FFT with cuFFTMp or BBFFT.
     pmeGpu->archSpecific->performOutOfPlaceFFT =
@@ -787,18 +791,22 @@ static void pme_gpu_init_internal(PmeGpu* pmeGpu, const DeviceContext& deviceCon
      * TODO: PME could also try to pick up nice grid sizes (with factors of 2, 3, 5, 7).
      */
 
-#if GMX_GPU_CUDA || GMX_GPU_SYCL
-    pmeGpu->kernelParams->usePipeline       = char(false);
-    pmeGpu->kernelParams->pipelineAtomStart = 0;
-    pmeGpu->kernelParams->pipelineAtomEnd   = 0;
-#endif
-#if GMX_GPU_CUDA
-    pmeGpu->maxGridWidthX = deviceContext.deviceInfo().prop.maxGridSize[0];
-#else
-    // Use this path for any non-CUDA GPU acceleration
-    // TODO: is there no really global work size limit in OpenCL?
-    pmeGpu->maxGridWidthX = INT32_MAX / 2;
-#endif
+    if constexpr (gmx::GpuConfigurationCapabilities::PmePipelining)
+    {
+        pmeGpu->kernelParams->usePipeline       = char(false);
+        pmeGpu->kernelParams->pipelineAtomStart = 0;
+        pmeGpu->kernelParams->pipelineAtomEnd   = 0;
+    }
+
+    if constexpr (gmx::GpuConfigurationCapabilities::PmeDynamicMaxGridSize)
+    {
+        pmeGpu->maxGridWidthX = maximumGridSize(deviceContext.deviceInfo());
+    }
+    else
+    {
+        // Use this path for any other GPU acceleration
+        pmeGpu->maxGridWidthX = INT32_MAX / 2;
+    }
 
     if (pmeGpu->settings.useDecomposition)
     {
@@ -865,6 +873,46 @@ static gmx::FftBackend getFftBackend(const PmeGpu* pmeGpu)
         {
             GMX_RELEASE_ASSERT(GMX_GPU_FFT_CLFFT, "Only clFFT and VkFFT are supported with OpenCL");
             return gmx::FftBackend::Ocl;
+        }
+    }
+    else if (GMX_GPU_HIP)
+    {
+        if (GMX_GPU_FFT_VKFFT)
+        {
+            if (!pmeGpu->settings.useDecomposition)
+            {
+                return gmx::FftBackend::HipVkfft;
+            }
+            else
+            {
+                GMX_THROW(gmx::NotImplementedError(
+                        "GROMACS must be build with rocFFT and HeFFTe to enable fully "
+                        "GPU offloaded PME decomposition on ROCM-compatible GPUs"));
+            }
+        }
+        else if (GMX_GPU_FFT_ROCFFT)
+        {
+            if (!pmeGpu->settings.useDecomposition)
+            {
+                return gmx::FftBackend::HipRocfft;
+            }
+            else if (GMX_USE_Heffte)
+            {
+                return gmx::FftBackend::HeFFTe_HIP;
+            }
+            else
+            {
+                GMX_THROW(gmx::NotImplementedError(
+                        "GROMACS must be build with rocFFT and HeFFTe to enable fully "
+                        "GPU offloaded PME decomposition on ROCM-compatible GPUs"));
+            }
+        }
+        else
+        {
+            GMX_RELEASE_ASSERT(false,
+                               "Only VkFFT and rocFFT are compatible GPU FFT backends when "
+                               "building GROMACS with HIP as the GPU backend");
+            return gmx::FftBackend::Count;
         }
     }
     else if (GMX_GPU_SYCL)
@@ -1292,7 +1340,7 @@ static void pme_gpu_copy_common_data_from(const gmx_pme_t* pme)
     pmeGpu->common->boxScaler     = pme->boxScaler.get();
     pmeGpu->common->mpiCommX      = pme->mpi_comm_d[0];
     pmeGpu->common->mpiCommY      = pme->mpi_comm_d[1];
-    pmeGpu->common->mpiComm       = pme->mpiComm.comm();
+    pmeGpu->common->mpiComm       = pme->mpiComm_.comm();
 }
 
 /*! \libinternal \brief
@@ -1302,7 +1350,7 @@ static void pme_gpu_copy_common_data_from(const gmx_pme_t* pme)
  */
 static void pme_gpu_select_best_performing_pme_spreadgather_kernels(PmeGpu* pmeGpu)
 {
-    if (((GMX_GPU_CUDA != 0) || (GMX_GPU_SYCL != 0))
+    if (gmx::GpuConfigurationCapabilities::PmeSupportsThreadsPerAtomOrder
         && pmeGpu->kernelParams->atoms.nAtoms > pmeGpu->minParticleCountToRecalculateSplines)
     {
         pmeGpu->settings.threadsPerAtom     = ThreadsPerAtom::Order;
@@ -2002,12 +2050,12 @@ void pme_gpu_spread(PmeGpu*                        pmeGpu,
                 // set kernel configuration options specific to this stage of the pipeline
                 std::tie(kernelParamsPtr->pipelineAtomStart, kernelParamsPtr->pipelineAtomEnd) =
                         pmeCoordinateReceiverGpu->ppCommAtomRange(senderIndex);
-                const int blockCount = static_cast<int>(std::ceil(
+                const int pipelineBlockCount = static_cast<int>(std::ceil(
                         static_cast<float>(kernelParamsPtr->pipelineAtomEnd - kernelParamsPtr->pipelineAtomStart)
                         / atomsPerBlock));
-                auto      dimGrid    = pmeGpuCreateGrid(pmeGpu, blockCount);
-                config.gridSize[0]   = dimGrid.first;
-                config.gridSize[1]   = dimGrid.second;
+                auto      pipelineDimGrid    = pmeGpuCreateGrid(pmeGpu, pipelineBlockCount);
+                config.gridSize[0]           = pipelineDimGrid.first;
+                config.gridSize[1]           = pipelineDimGrid.second;
 
                 const auto kernelArgs = [&]()
                 {
@@ -2240,11 +2288,12 @@ void pme_gpu_solve(PmeGpu* pmeGpu, const int gridIndex, t_complex* h_grid, GridO
     {
         cellsPerBlock = gmx::divideRoundUp(gridLineSize, blocksPerGridLine);
     }
-    const int warpSize  = pmeGpu->programHandle_->warpSize();
-    const int blockSize = gmx::divideRoundUp(cellsPerBlock, warpSize) * warpSize;
+    const int waveFrontSize = pmeGpu->programHandle_->warpSize();
+    const int blockSize     = gmx::divideRoundUp(cellsPerBlock, waveFrontSize) * waveFrontSize;
 
-    static_assert(!GMX_GPU_CUDA || c_solveMaxWarpsPerBlock / 2 >= 4,
-                  "The CUDA solve energy kernels needs at least 4 warps. "
+    static_assert(!gmx::GpuConfigurationCapabilities::PmeSolveNeedsAtLeastFourWarps
+                          || c_solveMaxWarpsPerBlock / 2 >= 4,
+                  "Except for OpenCL, the solve energy kernels needs at least 4 warps. "
                   "Here we launch at least half of the max warps.");
 
     KernelLaunchConfig config;
@@ -2559,17 +2608,21 @@ void pme_gpu_gather(PmeGpu*                       pmeGpu,
                 kernelPtr, config, pmeGpu->archSpecific->pmeStream_, timingEvent, "PME gather", kernelArgs);
         if (!computeVirial && pmeGpu->useNvshmem)
         {
-            KernelLaunchConfig config;
-            config.blockSize[0] = 128;
-            config.blockSize[1] = 1;
-            config.blockSize[2] = 1;
-            config.gridSize[0]  = 1;
-            config.gridSize[1]  = 1;
-            auto kernelPtr_     = pmeGpu->programHandle_->impl_->nvshmemSignalKern;
+            KernelLaunchConfig nvshmemConfig;
+            nvshmemConfig.blockSize[0] = 128;
+            nvshmemConfig.blockSize[1] = 1;
+            nvshmemConfig.blockSize[2] = 1;
+            nvshmemConfig.gridSize[0]  = 1;
+            nvshmemConfig.gridSize[1]  = 1;
+            auto kernelPtr_            = pmeGpu->programHandle_->impl_->nvshmemSignalKern;
 
-            const auto kernelArgs_ = prepareGpuKernelArguments(kernelPtr_, config, kernelParamsPtr);
-            launchGpuKernel(
-                    kernelPtr_, config, pmeGpu->archSpecific->pmeStream_, timingEvent, "PME gather", kernelArgs_);
+            const auto kernelArgs_ = prepareGpuKernelArguments(kernelPtr_, nvshmemConfig, kernelParamsPtr);
+            launchGpuKernel(kernelPtr_,
+                            nvshmemConfig,
+                            pmeGpu->archSpecific->pmeStream_,
+                            timingEvent,
+                            "PME gather",
+                            kernelArgs_);
         }
         pme_gpu_stop_timing(pmeGpu, timingId);
     }

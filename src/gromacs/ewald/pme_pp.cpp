@@ -135,13 +135,9 @@ static void gmx_pme_send_coeffs_coords(t_forcerec*                    fr,
                 (flags & PP_PME_COORD) ? " coordinates" : "");
     }
 
-    if (useGpuPmePpComms)
+    if (receiveForcesToGpu)
     {
-        flags |= PP_PME_GPUCOMMS;
-        if (receiveForcesToGpu)
-        {
-            flags |= PP_PME_RECVFTOGPU;
-        }
+        flags |= PP_PME_RECVFTOGPU;
     }
 
     if (useMdGpuGraph)
@@ -277,11 +273,11 @@ static void gmx_pme_send_coeffs_coords(t_forcerec*                    fr,
                                "When sending coordinates from GPU, a synchronization event should "
                                "be provided");
                     fr->pmePpCommGpu->sendCoordinatesToPmeFromGpu(
-                            fr->stateGpu->getCoordinates(), n, coordinatesReadyOnDeviceEvent);
+                            fr->stateGpu->getCoordinates(), n, coordinatesReadyOnDeviceEvent, receiveForcesToGpu);
                 }
                 else
                 {
-                    fr->pmePpCommGpu->sendCoordinatesToPmeFromCpu(x.data(), n);
+                    fr->pmePpCommGpu->sendCoordinatesToPmeFromCpu(x.data(), n, receiveForcesToGpu);
                 }
             }
             else
@@ -305,6 +301,7 @@ static void gmx_pme_send_coeffs_coords(t_forcerec*                    fr,
     GMX_UNUSED_VALUE(sigmaA);
     GMX_UNUSED_VALUE(sigmaB);
     GMX_UNUSED_VALUE(x);
+    GMX_UNUSED_VALUE(useGpuPmePpComms);
     GMX_UNUSED_VALUE(reinitGpuPmePpComms);
     GMX_UNUSED_VALUE(sendCoordinatesFromGpu);
     GMX_UNUSED_VALUE(coordinatesReadyOnDeviceEvent);

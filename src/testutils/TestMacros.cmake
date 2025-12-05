@@ -118,6 +118,9 @@ endfunction ()
 #     All the C++ .cpp source files needed only with SYCL
 #   NON_GPU_CPP_SOURCE_FILES  file1.cpp file2.cpp ...
 #     All the other C++ .cpp source files needed only with neither OpenCL nor CUDA nor SYCL
+#
+# Note that multi-value options (like source-file lists) must follow the
+# no-option or single-value options.
 function (gmx_add_gtest_executable EXENAME)
     if (GMX_BUILD_UNITTESTS AND BUILD_TESTING)
         set(_options MPI NVSHMEM HARDWARE_DETECTION DYNAMIC_REGISTRATION)
@@ -163,13 +166,8 @@ function (gmx_add_gtest_executable EXENAME)
                 ${ARG_CPP_SOURCE_FILES}
                 ${ARG_CUDA_CU_SOURCE_FILES}
                 ${ARG_GPU_CPP_SOURCE_FILES})
-            if (GMX_CLANG_CUDA)
-                set_target_properties(${EXENAME} PROPERTIES CUDA_ARCHITECTURES "${_CUDA_CLANG_GENCODE_FLAGS}")
-                target_compile_options(${EXENAME} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${GMX_CUDA_CLANG_FLAGS}>")
-            else()
-                set_target_properties(${EXENAME} PROPERTIES CUDA_ARCHITECTURES "${GMX_CUDA_NVCC_GENCODE_FLAGS}")
-                target_compile_options(${EXENAME} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${GMX_CUDA_NVCC_FLAGS}>")
-            endif()
+            target_compile_options(${EXENAME} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${GMX_CUDA_FLAGS}>")
+            set_target_properties(${EXENAME} PROPERTIES CUDA_ARCHITECTURES "${GMX_CUDA_ARCHITECTURES}")
             set_source_files_properties(${ARG_GPU_CPP_SOURCE_FILES} PROPERTIES LANGUAGE CUDA)
         elseif (GMX_GPU_HIP)
             set_source_files_properties(${ARG_HIP_CPP_SOURCE_FILES} PROPERTIES LANGUAGE HIP)
@@ -342,6 +340,10 @@ function (gmx_register_gtest_test NAME EXENAME)
                 list(APPEND _cmd -ntmpi ${ARG_MPI_RANKS})
             endif()
             math(EXPR _nproc "${_nproc} * ${ARG_MPI_RANKS}")
+	elseif(GMX_MPI)
+                set(_cmd
+                    ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG} 1
+                    ${MPIEXEC_PREFLAGS} ${_cmd} ${MPIEXEC_POSTFLAGS})
         endif()
         if (CMAKE_CROSSCOMPILING_EMULATOR)
             set(_cmd ${CMAKE_CROSSCOMPILING_EMULATOR} ${_cmd})
@@ -370,7 +372,7 @@ function (gmx_add_unit_test NAME EXENAME)
         # All unit tests should be quick, so mark them as QUICK_GPU_TEST if they use GPU
         set(_test_labels "QUICK_GPU_TEST")
     endif()
-    gmx_register_gtest_test(${NAME} ${EXENAME} ${_test_labels})
+    gmx_register_gtest_test(${NAME} ${EXENAME} ${_test_labels} ${ARGN})
 endfunction()
 
 function (gmx_add_mpi_unit_test NAME EXENAME RANKS)

@@ -168,7 +168,7 @@ void QMMMForceProvider::initCP2KForceEnvironment(const MpiComm& mpiComm)
                     "with an MPI library or to use a single thread-MPI rank (-ntmpi 1). "
                     "In the latter case, manual use of -ntomp is also advisable when "
                     "the node has many cores to fill them with threads.";
-            GMX_THROW(NotImplementedError(msg.c_str()));
+            GMX_THROW(NotImplementedError(msg));
         }
 
         // Attempt to init CP2K and create force environment
@@ -273,7 +273,8 @@ void QMMMForceProvider::calculateForces(const ForceProviderInput& fInput, ForceP
     {
         double qmEner = 0.0;
         cp2k_get_potential_energy(force_env_, &qmEner);
-        fOutput->enerd_.term[F_EQM] += qmEner * c_hartree2Kj * c_avogadro;
+        fOutput->enerd_.term[InteractionFunction::QuantumMechanicalRegionEnergy] +=
+                qmEner * c_hartree2Kj * c_avogadro;
     }
 
     // Get Forces they are in Hartree/Bohr and will be converted to kJ/mol/nm

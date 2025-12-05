@@ -407,11 +407,11 @@ NbnxnPairlistGpu::NbnxnPairlistGpu(PinningPolicy pinningPolicy) :
     excl.resize(1);
 }
 
-static std::vector<NbnxnPairlistGpu> createGpuPairlists(int numLists)
+static std::vector<NbnxnPairlistGpu> createGpuPairlists(int numLists, PinningPolicy pinPolicy)
 {
     auto lists = std::vector<NbnxnPairlistGpu>();
     /* Only list 0 is used on the GPU, use normal allocation for i>0 */
-    lists.emplace_back(NbnxnPairlistGpu{ PinningPolicy::PinnedIfSupported });
+    lists.emplace_back(NbnxnPairlistGpu{ pinPolicy });
     /* Lists 0 to numLists are use for constructing lists in parallel
      * on the CPU using numLists threads (and then merged into list 0).
      */
@@ -424,7 +424,7 @@ static std::vector<NbnxnPairlistGpu> createGpuPairlists(int numLists)
 
 
 // TODO: Move to pairlistset.cpp
-PairlistSet::PairlistSet(const PairlistParams& pairlistParams) :
+PairlistSet::PairlistSet(const PairlistParams& pairlistParams, PinningPolicy pinPolicy) :
     params_(pairlistParams),
     combineLists_(sc_isGpuSpecificPairlist(pairlistParams.pairlistType)), // Currently GPU lists are always combined
     isCpuType_(!sc_isGpuSpecificPairlist(pairlistParams.pairlistType))
@@ -461,7 +461,7 @@ PairlistSet::PairlistSet(const PairlistParams& pairlistParams) :
     }
     else
     {
-        gpuLists_ = createGpuPairlists(numLists);
+        gpuLists_ = createGpuPairlists(numLists, pinPolicy);
     }
     if (params_.haveFep_)
     {
@@ -1134,46 +1134,6 @@ static void setExclusionsForIEntry(const GridSet&          gridSet,
     }
 }
 
-static RVec getCoordinate(const nbnxn_atomdata_t& nbat, const int a)
-{
-    RVec x;
-
-    switch (nbat.XFormat)
-    {
-        case nbatXYZQ:
-            x[XX] = nbat.x()[a * STRIDE_XYZQ];
-            x[YY] = nbat.x()[a * STRIDE_XYZQ + 1];
-            x[ZZ] = nbat.x()[a * STRIDE_XYZQ + 2];
-            break;
-        case nbatXYZ:
-            x[XX] = nbat.x()[a * STRIDE_XYZ];
-            x[YY] = nbat.x()[a * STRIDE_XYZ + 1];
-            x[ZZ] = nbat.x()[a * STRIDE_XYZ + 2];
-            break;
-        case nbatX4:
-        {
-            const int i = atom_to_x_index<c_packX4>(a);
-
-            x[XX] = nbat.x()[i + XX * c_packX4];
-            x[YY] = nbat.x()[i + YY * c_packX4];
-            x[ZZ] = nbat.x()[i + ZZ * c_packX4];
-            break;
-        }
-        case nbatX8:
-        {
-            const int i = atom_to_x_index<c_packX8>(a);
-
-            x[XX] = nbat.x()[i + XX * c_packX8];
-            x[YY] = nbat.x()[i + YY * c_packX8];
-            x[ZZ] = nbat.x()[i + ZZ * c_packX8];
-            break;
-        }
-        default: GMX_ASSERT(false, "Unsupported nbnxn_atomdata_t format");
-    }
-
-    return x;
-}
-
 //! Returns the j/i cluster size ratio for the geometry of a grid
 static KernelLayoutClusterRatio layoutClusterRatio(const Grid::Geometry& geometry)
 {
@@ -1449,13 +1409,6 @@ static inline int cj_to_cjPacked(int cj)
     return cj / sc_gpuJgroupSize(layoutType);
 }
 
-/* Return the index of an j-atom within a warp */
-template<PairlistType layoutType>
-static inline int a_mod_wj(int a)
-{
-    return a & (sc_gpuSplitJClusterSize(layoutType) - 1);
-}
-
 /* As make_fep_list above, but for super/sub lists. */
 template<PairlistType layoutType>
 static void make_fep_list(ArrayRef<const int>     atomIndices,
@@ -1548,7 +1501,8 @@ static void make_fep_list(ArrayRef<const int>     atomIndices,
                                     const int jHalf = j / sc_gpuSplitJClusterSize(layoutType);
                                     auto&     excl  = get_exclusion_mask(nbl, cjPacked_ind, jHalf);
 
-                                    int excl_pair = a_mod_wj<layoutType>(j) * nbl->na_ci + i;
+                                    int excl_pair =
+                                            atomIndexInClusterpairSplit<layoutType>(j) * nbl->na_ci + i;
                                     unsigned int excl_bit =
                                             (1U << (gcj * sc_gpuNumClusterPerCell(layoutType) + c));
 
@@ -1697,7 +1651,7 @@ static void setExclusionsForIEntry(const GridSet&          gridSet,
                             auto& interactionMask =
                                     get_exclusion_mask(nbl, cj_to_cjPacked<layoutType>(index), jHalf);
 
-                            interactionMask.pair[a_mod_wj<layoutType>(innerJ) * c_clusterSize + innerI] &=
+                            interactionMask.pair[atomIndexInClusterpairSplit<layoutType>(innerJ) * c_clusterSize + innerI] &=
                                     ~pairMask;
                         }
                     }
@@ -2519,6 +2473,46 @@ static void balance_fep_lists(ArrayRef<std::unique_ptr<AtomPairlist>> fepLists, 
     }
 }
 
+// Combine fep pair lists generated on multiple threads
+static void combine_fep_lists(ArrayRef<std::unique_ptr<AtomPairlist>> fepLists)
+{
+    const int numLists = fepLists.ssize();
+
+    if (numLists == 1)
+    {
+        /* Nothing to combine */
+        return;
+    }
+
+    AtomPairlist& dest = *fepLists[0];
+
+    for (int srcThread = 1; srcThread < numLists; srcThread++)
+    {
+        AtomPairlist& src = *fepLists[srcThread];
+        for (gmx::Index i = 0; i < src.iList().ssize(); i++)
+        {
+            /* The number of pairs in this i-entry */
+            const int nrj = src.jList(i).ssize();
+            dest.addIEntry(src.iList()[i], nrj);
+
+            for (const AtomPairlist::JEntry& jEntry : src.jList(i))
+            {
+                dest.addJEntry(jEntry);
+            }
+        }
+
+        src.clear();
+    }
+
+    if (debug)
+    {
+        fprintf(debug,
+                "nbl_fep[0] nri %4d nrj %4d\n",
+                int(dest.iList().ssize()),
+                int(dest.flatJList().ssize()));
+    }
+}
+
 /* Returns the distance^2 for which we put cell pairs in the list
  * without checking atom pair distances. This is usually < rlist^2.
  */
@@ -2837,6 +2831,7 @@ static void nbnxn_make_pairlist_part(const GridSet&          gridSet,
                                      PairsearchWork*         work,
                                      const nbnxn_atomdata_t* nbat,
                                      const ListOfLists<int>& exclusions,
+                                     const bool              includeAllPairs,
                                      real                    rlist,
                                      const PairlistType      pairlistType,
                                      bool                    bFBufferFlag,
@@ -2980,8 +2975,9 @@ static void nbnxn_make_pairlist_part(const GridSet&          gridSet,
          * With perturbed atoms, we can not skip clusters, as we check the exclusion
          * count of perturbed interactions, including those with zero coefficients.
          */
-        if (c_listIsSimple && !haveFep && flags_i[ci] == 0)
+        if (c_listIsSimple && !haveFep && !includeAllPairs && flags_i[ci] == 0)
         {
+            // This i-cluster has no non-bonded interactions
             continue;
         }
         const int ncj_old_i = getNumSimpleJClustersInList(*nbl);
@@ -3679,9 +3675,11 @@ void PairlistSet::constructPairlists(InteractionLocality      locality,
                                      ArrayRef<PairsearchWork> searchWork,
                                      nbnxn_atomdata_t*        nbat,
                                      const ListOfLists<int>&  exclusions,
+                                     const bool               includeAllPairs,
                                      const int                minimumIlistCountForGpuBalancing,
                                      t_nrnb*                  nrnb,
-                                     SearchCycleCounting*     searchCycleCounting)
+                                     SearchCycleCounting*     searchCycleCounting,
+                                     const bool               useGpuNonbondedFE)
 {
     const real rlist = params_.rlistOuter;
 
@@ -3796,6 +3794,7 @@ void PairlistSet::constructPairlists(InteractionLocality      locality,
                                                  &work,
                                                  nbat,
                                                  exclusions,
+                                                 includeAllPairs,
                                                  rlist,
                                                  params_.pairlistType,
                                                  nbat->useBufferFlags(),
@@ -3815,6 +3814,7 @@ void PairlistSet::constructPairlists(InteractionLocality      locality,
                                                  &work,
                                                  nbat,
                                                  exclusions,
+                                                 includeAllPairs,
                                                  rlist,
                                                  params_.pairlistType,
                                                  nbat->useBufferFlags(),
@@ -3930,9 +3930,16 @@ void PairlistSet::constructPairlists(InteractionLocality      locality,
         {
             numPerturbedExclusionsWithinRlist_ += fepList->numExclusionsWithinRlist();
         }
-
-        /* Balance the free-energy lists over all the threads */
-        balance_fep_lists(fepLists_, searchWork);
+        if (isCpuType_ || !useGpuNonbondedFE || !params_.haveNonbondedFEGpu_)
+        {
+            /* Balance the free-energy lists over all the threads */
+            balance_fep_lists(fepLists_, searchWork);
+        }
+        else
+        {
+            /* Combine the free-energy lists into one for GPU */
+            combine_fep_lists(fepLists_);
+        }
     }
 
     if (isCpuType_)
@@ -4001,9 +4008,13 @@ void PairlistSets::construct(const InteractionLocality iLocality,
                              PairSearch*               pairSearch,
                              nbnxn_atomdata_t*         nbat,
                              const ListOfLists<int>&   exclusions,
+                             const bool                includeAllPairs,
                              const int64_t             step,
-                             t_nrnb*                   nrnb)
+                             t_nrnb*                   nrnb,
+                             const bool                useGpuNonbondedFE)
 {
+    includesAllPairs_ = includeAllPairs;
+
     const auto& gridSet = pairSearch->gridSet();
     const auto* ddZones = gridSet.domainSetup().zones;
 
@@ -4022,9 +4033,11 @@ void PairlistSets::construct(const InteractionLocality iLocality,
                                               pairSearch->work(),
                                               nbat,
                                               exclusions,
+                                              includeAllPairs,
                                               minimumIlistCountForGpuBalancing_,
                                               nrnb,
-                                              &pairSearch->cycleCounting_);
+                                              &pairSearch->cycleCounting_,
+                                              useGpuNonbondedFE);
 
     if (iLocality == InteractionLocality::Local)
     {
@@ -4050,12 +4063,15 @@ void PairlistSets::construct(const InteractionLocality iLocality,
 
 void nonbonded_verlet_t::constructPairlist(const InteractionLocality iLocality,
                                            const ListOfLists<int>&   exclusions,
+                                           const bool                includeAllPairs,
                                            int64_t                   step,
                                            t_nrnb*                   nrnb) const
 {
-    pairlistSets_->construct(iLocality, pairSearch_.get(), nbat_.get(), exclusions, step, nrnb);
+    pairlistSets_->construct(
 
-    if (useGpu())
+            iLocality, pairSearch_.get(), nbat_.get(), exclusions, includeAllPairs, step, nrnb, useGpuNonbondedFE_);
+    // For tests it is convenient to allow gpuNbv_==nullptr and skip GPU calls
+    if (useGpu() && gpuNbv_ != nullptr)
     {
         /* Launch the transfer of the pairlist to the GPU.
          *

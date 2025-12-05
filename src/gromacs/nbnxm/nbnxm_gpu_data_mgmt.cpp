@@ -132,7 +132,8 @@ static bool useTabulatedEwaldByDefault(InteractionModifiers vdwModifier, const D
     const int  major   = deviceInfo.prop.major;
     const int  minor   = deviceInfo.prop.minor;
     const bool isMi300 = (major == 9 && minor == 4);
-    return !isMi300;
+    const bool isMi350 = (major == 9 && minor == 5);
+    return !isMi300 && !isMi350;
 #elif GMX_GPU_SYCL
     const int major = deviceInfo.hardwareVersionMajor.value_or(-1);
     const int minor = deviceInfo.hardwareVersionMinor.value_or(-1);
@@ -235,13 +236,20 @@ GpuPairlistSorting::GpuPairlistSorting() {}
 
 GpuPairlistSorting::~GpuPairlistSorting()
 {
-    if (nbnxmSortListsOnGpu())
+    try
     {
-        freeDeviceBuffer(&scanTemporary);
-        freeDeviceBuffer(&sciHistogram);
-        freeDeviceBuffer(&sciOffset);
-        freeDeviceBuffer(&sciCount);
-        freeDeviceBuffer(&sciSorted);
+        if (nbnxmSortListsOnGpu())
+        {
+            freeDeviceBuffer(&scanTemporary);
+            freeDeviceBuffer(&sciHistogram);
+            freeDeviceBuffer(&sciOffset);
+            freeDeviceBuffer(&sciCount);
+            freeDeviceBuffer(&sciSorted);
+        }
+    }
+    catch (gmx::InternalError& e)
+    {
+        fprintf(stderr, "Internal error in destructor of GpuPairlistSorting: %s\n", e.what());
     }
 }
 
@@ -250,11 +258,18 @@ GpuPairlist::GpuPairlist() {}
 
 GpuPairlist::~GpuPairlist()
 {
-    freeDeviceBuffer(&sci);
-    freeDeviceBuffer(&cjPacked);
-    freeDeviceBuffer(&imask);
-    freeDeviceBuffer(&excl);
-    freeDeviceBuffer(&d_rollingPruningPart);
+    try
+    {
+        freeDeviceBuffer(&sci);
+        freeDeviceBuffer(&cjPacked);
+        freeDeviceBuffer(&imask);
+        freeDeviceBuffer(&excl);
+        freeDeviceBuffer(&d_rollingPruningPart);
+    }
+    catch (gmx::InternalError& e)
+    {
+        fprintf(stderr, "Internal error in destructor of GpuPairlist: %s\n", e.what());
+    }
 }
 
 static inline void init_timings(gmx_wallclock_gpu_nbnxn_t* t)
@@ -363,7 +378,21 @@ static inline VdwType nbnxmGpuPickVdwKernelType(const interaction_const_t& ic,
 static inline ElecType nbnxmGpuPickElectrostaticsKernelType(const interaction_const_t& ic,
                                                             const DeviceInformation&   deviceInfo)
 {
-    if (ic.coulomb.type == CoulombInteractionType::Cut)
+    if (ic.coulomb.type == CoulombInteractionType::Fmm)
+    {
+        if (ic.nbnxmIsDirectCoulombProvider)
+        {
+            GMX_RELEASE_ASSERT(
+                    false,
+                    "FMM is not yet supported in GROMACS for short-range coulomb interactions");
+            return ElecType::Fmm;
+        }
+        else
+        {
+            return ElecType::None;
+        }
+    }
+    else if (ic.coulomb.type == CoulombInteractionType::Cut)
     {
         return ElecType::Cut;
     }
@@ -461,7 +490,8 @@ NbnxmGpu* gpu_init(const DeviceStreamManager& deviceStreamManager,
                    const interaction_const_t* ic,
                    const PairlistParams&      listParams,
                    const nbnxn_atomdata_t*    nbat,
-                   const bool                 bLocalAndNonlocal)
+                   const bool                 bLocalAndNonlocal,
+                   const gmx_unused std::optional<int> n_lambda)
 {
     auto* nb           = new NbnxmGpu();
     nb->deviceContext_ = &deviceStreamManager.context();

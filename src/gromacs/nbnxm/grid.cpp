@@ -1665,7 +1665,7 @@ real generateAndFill2DGrid(Grid*                  grid,
 
 void Grid::setNonLocalGrid(const int                           ddZone,
                            const GridDimensions&               dimensions,
-                           ArrayRef<const std::pair<int, int>> columns,
+                           ArrayRef<const std::pair<int, int>> clusterRanges,
                            const int                           cellOffset,
                            ArrayRef<const int32_t>             atomInfo,
                            ArrayRef<const RVec>                x,
@@ -1682,36 +1682,57 @@ void Grid::setNonLocalGrid(const int                           ddZone,
 
     cellOffset_ = cellOffset;
 
-    const int numAtomsPerCell = geometry_.numAtomsPerCell_;
+    // There are two types of cluster here:
+    // - the clusters on the grid, these have size geometry_.numAtomsICluster_
+    // - the clusters as passed in clusterRanges, these have size numAtomsPerCluster
+    const int numAtomsPerCluster = std::max(geometry_.numAtomsICluster_, geometry_.numAtomsJCluster_);
+    const int numAtomsPerCell    = geometry_.numAtomsPerCell_;
+    const int numClustersPerCell = numAtomsPerCell / geometry_.numAtomsICluster_;
+
+    // Conversion factor from clusterRanges to grid clusters
+    const int clusterFactor = numAtomsPerCluster / geometry_.numAtomsICluster_;
 
     // Set the cluster counts for the columns in the range of communicated columns
     int lastColumnIndex = -1;
-    int cellIndex       = 0;
+    int clusterIndex    = 0;
     numCellsColumnMax_  = 0;
-    for (const auto& columnInfo : columns)
+    for (const auto& clusterRange : clusterRanges)
     {
-        const int columnIndex = columnInfo.first;
+        const int columnIndex = clusterRange.first;
 
-        GMX_ASSERT(columnIndex > lastColumnIndex, "The input columns should be ordered");
+        GMX_ASSERT(columnIndex >= lastColumnIndex, "The input columns should be ordered");
 
-        // When we skipped columns this fills those with appropriate values
-        cxy_na_.resize(columnIndex, 0);
-        cxy_ind_.resize(columnIndex + 1, cellIndex);
+        GMX_ASSERT(columnIndex == lastColumnIndex || clusterIndex % numClustersPerCell == 0,
+                   "The number of clusters in a column should be a multiple of the "
+                   "numClustersPerCell");
+
+        // When we skipped columns this fills those with appropriate values.
+        // Note that the clusterIndex might not be a multiple of numClustersPerCell when
+        // this is not the last range added for this column. We assert the counts for whole columns
+        // just here above.
+        // Also fill the current column.
+        cxy_na_.resize(columnIndex + 1, 0);
+        cxy_ind_.resize(columnIndex + 2, clusterIndex / numClustersPerCell);
         numClusters_.resize(columnIndex, 0);
 
-        const int numCellsInColumn = columnInfo.second;
-        const int numAtomsInColumn = numCellsInColumn * numAtomsPerCell;
-        GMX_ASSERT(numAtomsInColumn % geometry().numAtomsICluster_ == 0
-                           && numAtomsInColumn % geometry().numAtomsJCluster_ == 0,
-                   "The number of cell in a column should be a multiple of the cluster sizes");
+        const int numClustersInColumn = clusterRange.second;
+        const int numAtomsInColumn = cxy_na_[columnIndex] + numClustersInColumn * numAtomsPerCluster;
 
-        cellIndex += numCellsInColumn;
-        cxy_na_.push_back(numAtomsInColumn);
-        cxy_ind_.push_back(cellIndex);
+        clusterIndex += numClustersInColumn * clusterFactor;
+        cxy_na_[columnIndex]      = numAtomsInColumn;
+        cxy_ind_[columnIndex + 1] = clusterIndex / numClustersPerCell;
 
-        numCellsColumnMax_ = std::max(numCellsColumnMax_, numAtomsInColumn);
+        numCellsColumnMax_ =
+                std::max(numCellsColumnMax_, cxy_ind_[columnIndex + 1] - cxy_ind_[columnIndex]);
 
         lastColumnIndex = columnIndex;
+    }
+
+    for (int columnIndex = 0; columnIndex < lastColumnIndex; columnIndex++)
+    {
+        GMX_ASSERT(cxy_na_[columnIndex] % geometry().numAtomsICluster_ == 0
+                           && cxy_na_[columnIndex] % geometry().numAtomsJCluster_ == 0,
+                   "The number of cell in a column should be a multiple of the cluster sizes");
     }
 
     GMX_ASSERT(gmx::ssize(cxy_ind_) == lastColumnIndex + 2,
@@ -1722,7 +1743,7 @@ void Grid::setNonLocalGrid(const int                           ddZone,
 
     // Set the data for the remaining, empty, columns
     cxy_na_.resize(numColumns(), 0);
-    cxy_ind_.resize(numColumns() + 1, cellIndex);
+    cxy_ind_.resize(numColumns() + 1, clusterIndex / numClustersPerCell);
     numClusters_.resize(numColumns(), 0);
 
     numCellsTotal_ = cxy_ind_.back() - cxy_ind_[0];
@@ -1780,16 +1801,17 @@ void Grid::setNonLocalGrid(const int                           ddZone,
         }
         else
         {
-            const int numAtomsPerCluster = geometry_.numAtomsICluster_;
+            const int numAtomsPerClusterNonSimple = geometry_.numAtomsICluster_;
 
-            numClustersInCell = divideRoundUp(atomEnd - atomOffsetCell, numAtomsPerCluster);
+            numClustersInCell = divideRoundUp(atomEnd - atomOffsetCell, numAtomsPerClusterNonSimple);
 
             bbcz_[cell].lower = x[atomOffsetCell][ZZ];
             bbcz_[cell].upper = x[atomOffsetCell][ZZ];
             for (int c = 0; c < numClustersInCell; c++)
             {
-                const int atomClusterStart = atomOffsetCell + c * numAtomsPerCluster;
-                const int atomClusterEnd = std::min(atomClusterStart + numAtomsPerCluster, atomEnd);
+                const int atomClusterStart = atomOffsetCell + c * numAtomsPerClusterNonSimple;
+                const int atomClusterEnd =
+                        std::min(atomClusterStart + numAtomsPerClusterNonSimple, atomEnd);
                 fillCell(gridSetData, nbat, atomClusterStart, atomClusterEnd, atomInfo, x);
 
 #if GMX_DOUBLE

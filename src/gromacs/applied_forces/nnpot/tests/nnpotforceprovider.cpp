@@ -50,6 +50,7 @@
 #include "gromacs/fileio/confio.h"
 #include "gromacs/gmxpreprocess/grompp.h"
 #include "gromacs/hardware/device_information.h"
+#include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/mdtypes/forceoutput.h"
 #include "gromacs/pbcutil/pbc.h"
@@ -137,7 +138,8 @@ public:
         std::unique_ptr<NNPotForceProvider> nnpotForceProvider;
         EXPECT_NO_THROW(nnpotForceProvider =
                                 std::make_unique<NNPotForceProvider>(params_, logger_, mpiComm_));
-        EXPECT_NO_THROW(nnpotForceProvider->gatherAtomNumbersIndices());
+        MDModulesAtomsRedistributedSignal signal{ box_, x_, std::nullopt };
+        EXPECT_NO_THROW(nnpotForceProvider->gatherAtomNumbersIndices(signal));
 
         // Prepare input for force provider
         ForceProviderInput fInput(x_, params_.numAtoms_, {}, {}, 0.0, 0, box_, mpiComm_, dd_);
@@ -151,7 +153,8 @@ public:
         EXPECT_NO_THROW(nnpotForceProvider->calculateForces(fInput, &forceProviderOutput));
 
         checker.setDefaultTolerance(gmx::test::relativeToleranceAsFloatingPoint(100000.0, 5e-5));
-        checker.checkReal(enerdDummy.term[F_ENNPOT], "Energy");
+        checker.checkReal(enerdDummy.term[InteractionFunction::NeuralNetworkPotentialEnergy],
+                          "Energy");
         checker.setDefaultTolerance(gmx::test::relativeToleranceAsFloatingPoint(100.0, 5e-5));
         checker.checkSequence(forces.begin(), forces.end(), "Forces");
     }

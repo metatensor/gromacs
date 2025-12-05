@@ -47,6 +47,7 @@
 #include "gromacs/gpu_utils/device_stream.h"
 #include "gromacs/gpu_utils/devicebuffer.h"
 #include "gromacs/gpu_utils/gpueventsynchronizer.h"
+#include "gromacs/gpu_utils/gputraits.h"
 #include "gromacs/mdlib/gpuforcereduction_impl_internal.h"
 #include "gromacs/utility/gmxassert.h"
 
@@ -183,7 +184,14 @@ void GpuForceReduction::Impl::execute()
 
 GpuForceReduction::Impl::~Impl()
 {
-    freeDeviceBuffer(&cellInfo_.d_cell);
+    try
+    {
+        freeDeviceBuffer(&cellInfo_.d_cell);
+    }
+    catch (gmx::InternalError& e)
+    {
+        fprintf(stderr, "Internal error in destructor of GpuForceReduction: %s\n", e.what());
+    }
 }
 
 GpuForceReduction::GpuForceReduction(const DeviceContext& deviceContext,

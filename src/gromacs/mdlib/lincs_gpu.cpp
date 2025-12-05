@@ -54,6 +54,7 @@
 
 #include "gromacs/gpu_utils/devicebuffer.h"
 #include "gromacs/gpu_utils/gputraits.h"
+#include "gromacs/gpu_utils/hostallocator.h"
 #include "gromacs/math/functions.h"
 #include "gromacs/mdlib/constr.h"
 #include "gromacs/mdlib/constraint_gpu_helpers.h"
@@ -127,8 +128,7 @@ LincsGpu::LincsGpu(int                  numIterations,
                    const DeviceStream&  deviceStream) :
     deviceContext_(deviceContext), deviceStream_(deviceStream)
 {
-    GMX_RELEASE_ASSERT(bool(GMX_GPU_CUDA) || bool(GMX_GPU_SYCL),
-                       "LINCS GPU is only implemented in CUDA and SYCL.");
+    GMX_RELEASE_ASSERT(GMX_GPU && !GMX_GPU_OPENCL, "LINCS GPU is not implemented in OPENCL.");
     kernelParams_.numIterations  = numIterations;
     kernelParams_.expansionOrder = expansionOrder;
 
@@ -148,24 +148,31 @@ LincsGpu::LincsGpu(int                  numIterations,
 
 LincsGpu::~LincsGpu()
 {
-    // Wait for all the tasks to complete before freeing the memory. See #4519.
-    deviceStream_.synchronize();
-
-    freeDeviceBuffer(&kernelParams_.d_virialScaled);
-
-    if (numConstraintsThreadsAlloc_ > 0)
+    try
     {
-        freeDeviceBuffer(&kernelParams_.d_constraints);
-        freeDeviceBuffer(&kernelParams_.d_constraintsTargetLengths);
+        // Wait for all the tasks to complete before freeing the memory. See #4519.
+        deviceStream_.synchronize();
 
-        freeDeviceBuffer(&kernelParams_.d_coupledConstraintsCounts);
-        freeDeviceBuffer(&kernelParams_.d_coupledConstraintsIndices);
-        freeDeviceBuffer(&kernelParams_.d_massFactors);
-        freeDeviceBuffer(&kernelParams_.d_matrixA);
+        freeDeviceBuffer(&kernelParams_.d_virialScaled);
+
+        if (numConstraintsThreadsAlloc_ > 0)
+        {
+            freeDeviceBuffer(&kernelParams_.d_constraints);
+            freeDeviceBuffer(&kernelParams_.d_constraintsTargetLengths);
+
+            freeDeviceBuffer(&kernelParams_.d_coupledConstraintsCounts);
+            freeDeviceBuffer(&kernelParams_.d_coupledConstraintsIndices);
+            freeDeviceBuffer(&kernelParams_.d_massFactors);
+            freeDeviceBuffer(&kernelParams_.d_matrixA);
+        }
+        if (numAtomsAlloc_ > 0)
+        {
+            freeDeviceBuffer(&kernelParams_.d_inverseMasses);
+        }
     }
-    if (numAtomsAlloc_ > 0)
+    catch (gmx::InternalError& e)
     {
-        freeDeviceBuffer(&kernelParams_.d_inverseMasses);
+        fprintf(stderr, "Internal error in destructor of LincsGpu: %s\n", e.what());
     }
 }
 
@@ -220,11 +227,10 @@ bool LincsGpu::isNumCoupledConstraintsSupported(const gmx_mtop_t& mtop)
 
 void LincsGpu::set(const InteractionDefinitions& idef, int numAtoms, const ArrayRef<const real> invmass)
 {
-    GMX_ASSERT(!(numAtoms == 0 && !idef.il[F_CONSTR].empty()),
+    GMX_ASSERT(!(numAtoms == 0 && !idef.il[InteractionFunction::Constraints].empty()),
                "The number of atoms needs to be > 0 if there are constraints in the domain.");
 
-    GMX_RELEASE_ASSERT(bool(GMX_GPU_CUDA) || bool(GMX_GPU_SYCL),
-                       "LINCS GPU is only implemented in CUDA and SYCL.");
+    GMX_RELEASE_ASSERT(GMX_GPU && !GMX_GPU_OPENCL, "LINCS GPU is not implemented in OPENCL.");
     // List of constrained atoms (CPU memory)
     std::vector<AtomPair> constraintsHost;
     // Equilibrium distances for the constraints (CPU)
@@ -237,9 +243,9 @@ void LincsGpu::set(const InteractionDefinitions& idef, int numAtoms, const Array
     std::vector<float> massFactorsHost;
 
     // List of constrained atoms in local topology
-    ArrayRef<const int> iatoms         = idef.il[F_CONSTR].iatoms;
-    const int           stride         = NRAL(F_CONSTR) + 1;
-    const int           numConstraints = idef.il[F_CONSTR].size() / stride;
+    ArrayRef<const int> iatoms         = idef.il[InteractionFunction::Constraints].iatoms;
+    const int           stride         = NRAL(InteractionFunction::Constraints) + 1;
+    const int           numConstraints = idef.il[InteractionFunction::Constraints].size() / stride;
 
     // Early exit if no constraints
     if (numConstraints == 0)
@@ -301,10 +307,10 @@ void LincsGpu::set(const InteractionDefinitions& idef, int numAtoms, const Array
         int a2   = iatoms[stride * c + 2];
         int type = iatoms[stride * c];
 
-        AtomPair pair;
-        pair.i                                    = a1;
-        pair.j                                    = a2;
-        constraintsHost[splitMap[c]]              = pair;
+        AtomPair localPair;
+        localPair.i                               = a1;
+        localPair.j                               = a2;
+        constraintsHost[splitMap[c]]              = localPair;
         constraintsTargetLengthsHost[splitMap[c]] = idef.iparams[type].constr.dA;
     }
 

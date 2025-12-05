@@ -358,7 +358,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
 
         // Set energy output (GROMACS sums this over ranks)
-        outputs->enerd_.term[F_EMETATOMICPOT] = energy_tensor.item<double>();
+        outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] =
+                energy_tensor.item<double>();
 
         // Compute gradients
         energy_tensor.backward();
@@ -442,7 +443,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     else
     {
-            GMX_THROW(APIError("Unsupported dtype, only float32 and float64 are supported for now"));
+        GMX_THROW(APIError("Unsupported dtype, only float32 and float64 are supported for now"));
     }
     // TODO(rg): Virial calculation. For now, GROMACS will (incorrectly) calculate it from forces if
     // needed. This is the same behavior as nnpot

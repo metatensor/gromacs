@@ -179,9 +179,6 @@ Performance and Run Control
         to the :ref:`log` file. The resulting output is the way performance summary is reported in versions
         4.5.x and thus may be useful for anyone using scripts to parse :ref:`log` files or standard output.
 
-``GMX_DISABLE_CUDA_TIMING``
-        Deprecated. Use ``GMX_DISABLE_GPU_TIMING`` instead.
-
 ``GMX_DISABLE_DYNAMICPRUNING``
         disables dynamic pair-list pruning. Note that :ref:`gmx mdrun` will
         still tune nstlist to the optimal value picked assuming dynamic pruning. Thus
@@ -426,6 +423,11 @@ Performance and Run Control
 
 ``GMX_PULL_PARTICIPATE_ALL``
         disable the default heuristic for when to use a separate pull MPI communicator (at >=32 ranks).
+
+``GMX_REPORT_CPU_AFFINITY``
+        print to the log file the CPU affinity of each MPI rank at startup. This prints the effective
+        affinity mask of the main thread before OpenMP and GPU offload are initialized (unless they
+        do so on library load, as is the case with ``libgomp``).
 
 ``GMX_REQUIRE_SHELL_INIT``
         require that shell positions are initiated.

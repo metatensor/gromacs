@@ -16,15 +16,67 @@ in the :ref:`release-notes`.
 Fixes where mdrun could behave incorrectly
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+The Parrinello-Rahman barostat can give too large volume fluctutations
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+The increase of the default :mdp:`nstpcouple` value in the |Gromacs| 2023 release
+can cause too large fluctuations of the volume of the simulation box.
+This, in turn, can lead to instabilities, in particular when anisotropic
+pressure coupling is used. The average volume is not affected. This issue
+is solved by requiring at least 200 integration steps per period (tau_p)
+for the Parrinello-Rahman barostat.
+
+:issue:`5424`
+
+The C-rescale barostat can give too large volume fluctutations
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+The increase of the default :mdp:`nstpcouple` value in the |Gromacs| 2023 release
+can cause too large fluctuations of the volume of the simulation box.
+The average volume is not affected. The is only an issue when tau_p is smaller
+than the recommended value of 5 ps, in combination with a timestep of 2 fs or larger.
+This is solved by requiring at least 25 integration steps per period (tau_p)
+for the C-rescale barostat.
+
+:issue:`5425`
+
+PME tuning could exit with an assertion failure
+"""""""""""""""""""""""""""""""""""""""""""""""
+
+When using OpenMP threading and an unlucky combination of PME grid dimensions,
+mdrun could exit during PME tuning with an assertion failure for gridSize.
+
+:issue:`5406`
+:issue:`5417`
+
+mdrun would report incorrect kinetic energy values when interrupted
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+When mdrun was interrupted and did not stop at a step that was a multiple
+of :mdp:`nstcalcenergy`, the kinetic energy, temperature, pressure and
+energy drift reported for the last step were incorrect when using the
+leap-frog integrator. Note that such an incorrect frame was removed
+when the simulation was continued with concatenation of output files.
+
+:issue:`5433`
+
 Direct halo communication could cause mdrun to exit with an MPI error
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 The direct halo communication in mdrun, which needs to be enabled by setting
-an environment variable, could case mdrun to stop with an MPI error.
-This is very unlikely to have lead to incorrect results.
+an environment variable, could cause mdrun to stop with an MPI error.
+This is very unlikely to have led to incorrect results.
 
 :issue:`5418`
 
+Expanded ensemble replica exchange output could contain concatenated numbers
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+With 100 or more replicas, spaces would be missing between values and indices.
+Also other large values could lead to no whitespace being printed.
+
+:issue:`5248`
+       
 Fixes for ``gmx`` tools
 ^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -38,6 +90,14 @@ is now compatible with XMGrace.
 
 Fixes that affect portability
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Fix CUDA build on Windows
+"""""""""""""""""""""""""
+
+Building |Gromacs| with CUDA on Windows would sometimes fail at CMake
+stage with ``Could NOT find OpenMP_CUDA`` error. Added a workaround for that.
+
+:issue:`5431`
 
 Fixes to the Colvars library
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -64,7 +124,6 @@ The following is a list of bugfix pull requests in the`Colvars repository
 
 * Fix indentation of 'Init CVC' message in standard output (`Colvars PR 755
   <https://github.com/Colvars/colvars/pull/755>`_)
-
 
 Miscellaneous
 ^^^^^^^^^^^^^

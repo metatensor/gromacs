@@ -136,11 +136,20 @@ void nonbonded_verlet_t::setLocalAtomOrder() const
     pairSearch_->setLocalAtomOrder();
 }
 
-void nonbonded_verlet_t::setAtomProperties(ArrayRef<const int>     atomTypes,
-                                           ArrayRef<const real>    atomCharges,
-                                           ArrayRef<const int32_t> atomInfo) const
+void nonbonded_verlet_t::setAtomProperties(ArrayRef<const int>     atomTypesA,
+                                           ArrayRef<const real>    atomChargesA,
+                                           ArrayRef<const int32_t> atomInfo,
+                                           ArrayRef<const int>     atomTypesB,
+                                           ArrayRef<const real>    atomChargesB) const
 {
-    nbnxn_atomdata_set(nbat_.get(), pairSearch_->gridSet(), atomTypes, atomCharges, atomInfo);
+    nbnxn_atomdata_set(nbat_.get(),
+                       pairSearch_->gridSet(),
+                       atomTypesA,
+                       atomTypesB,
+                       atomChargesA,
+                       atomChargesB,
+                       atomInfo,
+                       useGpuNonbondedFE());
 }
 
 void nonbonded_verlet_t::convertCoordinates(const AtomLocality locality, ArrayRef<const RVec> coordinates)
@@ -291,6 +300,15 @@ std::optional<std::string> nbnxmGpuClusteringDescription()
 #else
     return std::nullopt;
 #endif
+}
+
+const PlainPairlist& nonbonded_verlet_t::plainPairlist(const real range, ArrayRef<const RVec> shiftVectors)
+{
+    // This might lead to copying twice during pair-search steps, but the cost of this
+    // compared with generating the (plain) pairlist is negligible
+    nbnxn_atomdata_copy_shiftvec(std::nullopt, shiftVectors, nbat_.get());
+
+    return pairlistSets_->plainPairlist(range, *nbat_, pairSearch_->gridSet().atomIndices());
 }
 
 } // namespace gmx

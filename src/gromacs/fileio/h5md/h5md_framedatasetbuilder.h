@@ -42,6 +42,7 @@
 
 #include <hdf5.h>
 
+#include <string_view>
 #include <vector>
 
 #include "gromacs/fileio/h5md/h5md_datasetbuilder.h"
@@ -74,6 +75,13 @@ public:
     // Inherit constructor with no further changes
     using Base::Base;
 
+    //! \copydoc H5mdDataSetBuilder::withCompression()
+    H5mdFrameDataSetBuilder& withCompression(const H5mdCompression compression)
+    {
+        Base::withCompression(compression);
+        return *this;
+    }
+
     //! \brief Set dimension for a single frame in the data set.
     H5mdFrameDataSetBuilder& withFrameDimension(ArrayRef<const hsize_t> dims)
     {
@@ -101,10 +109,39 @@ public:
         return *this;
     }
 
+    //! \brief Set the frame data set to use a fixed size string with maximum length \p maxLength.
+    //
+    // \note The max length must be positive and count the null-terminator character.
+    // If neither withMaxStringLength() nor withVariableStringLength() is called,
+    // the default is variable-length strings for string data sets.
+    H5mdFrameDataSetBuilder& withMaxStringLength(const int maxLength)
+    {
+        // Use int to prevent the integer overflow if passed a negative value
+        throwUponH5mdError(
+                maxLength <= 0,
+                "Cannot create fixed-size string data set with non-positive maximum length");
+        Base::withMaxStringLength(maxLength);
+        return *this;
+    }
+
+    //! \brief Set the frame data set to use variable length strings.
+    H5mdFrameDataSetBuilder& withVariableStringLength()
+    {
+        Base::withVariableStringLength();
+        return *this;
+    }
+
+    //! \copydoc H5mdDataSetBuilder::withUnit()
+    H5mdFrameDataSetBuilder& withUnit(std::string_view unit)
+    {
+        Base::withUnit(unit);
+        return *this;
+    }
+
     //! \brief Create the data set, then build and return it.
     H5mdDataSetBase<ValueType> build()
     {
-        const std::vector<hsize_t> dims = [&]()
+        const std::vector<hsize_t> dimensions = [&]()
         {
             std::vector<hsize_t> dims = { numFrames_ };
             for (const hsize_t d : frameDims_)
@@ -113,23 +150,23 @@ public:
             }
             return dims;
         }();
-        Base::withDimension(dims);
+        Base::withDimension(dimensions);
 
-        const std::vector<hsize_t> maxDims = [&]()
+        const std::vector<hsize_t> maxDimensions = [&]()
         {
-            std::vector<hsize_t> maxDims = dims;
+            std::vector<hsize_t> maxDims = dimensions;
             maxDims[0]                   = maxNumFrames_;
             return maxDims;
         }();
-        Base::withMaxDimension(maxDims);
+        Base::withMaxDimension(maxDimensions);
 
-        const std::vector<hsize_t> chunkDims = [&]()
+        const std::vector<hsize_t> chunkDimensions = [&]()
         {
-            std::vector<hsize_t> chunkDims = dims;
+            std::vector<hsize_t> chunkDims = dimensions;
             chunkDims[0]                   = frameChunkSize_;
             return chunkDims;
         }();
-        Base::withChunkDimension(chunkDims);
+        Base::withChunkDimension(chunkDimensions);
 
         return Base::build();
     }

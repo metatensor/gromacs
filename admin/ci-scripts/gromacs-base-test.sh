@@ -59,6 +59,7 @@ if grep -qF 'INTEL' <<< "$GPU_VENDOR"; then
     sycl-ls || true;
     export SYCL_CACHE_PERSISTENT=1  # Issue #4218
 fi
+
 LABEL_REGEX=
 if [[ -n "$GMX_TEST_LABELS" ]] ; then
     LABEL_REGEX="--label-regex $GMX_TEST_LABELS"

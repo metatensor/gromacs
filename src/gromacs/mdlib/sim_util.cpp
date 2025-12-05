@@ -220,7 +220,7 @@ static void pull_potential_wrapper(const MpiComm&       mpiComm,
     wallcycle_start(wcycle, WallCycleCounter::PullPot);
     set_pbc(&pbc, ir.pbcType, box);
     dvdl = 0;
-    enerd->term[F_COM_PULL] +=
+    enerd->term[InteractionFunction::CenterOfMassPullingEnergy] +=
             pull_potential(pull_work,
                            mdatoms->massT,
                            pbc,
@@ -263,8 +263,8 @@ static void pme_receive_force_ener(t_forcerec*      fr,
                       useGpuPmePpComms,
                       receivePmeForceToGpu,
                       &cycles_seppme);
-    enerd->term[F_COUL_RECIP] += e_q;
-    enerd->term[F_LJ_RECIP] += e_lj;
+    enerd->term[InteractionFunction::CoulombReciprocalSpace] += e_q;
+    enerd->term[InteractionFunction::LennardJonesReciprocalSpace] += e_lj;
     enerd->dvdl_lin[FreeEnergyPerturbationCouplingType::Coul] += dvdl_q;
     enerd->dvdl_lin[FreeEnergyPerturbationCouplingType::Vdw] += dvdl_lj;
 
@@ -541,8 +541,8 @@ static real averageKineticEnergyEstimate(const t_grpopts& groupOptions)
  *
  * \param[in] step      The step number, used for checking and printing
  * \param[in] enerd     The energy data; the non-bonded group energies need to be added to
- *                      \c enerd.term[F_EPOT] before calling this routine
- * \param[in] inputrec  The input record
+ *                      \c enerd.term[InteractionFunction::PotentialEnergy] before calling this
+ * routine \param[in] inputrec  The input record
  */
 static void checkPotentialEnergyValidity(int64_t step, const gmx_enerdata_t& enerd, const t_inputrec& inputrec)
 {
@@ -553,7 +553,7 @@ static void checkPotentialEnergyValidity(int64_t step, const gmx_enerdata_t& ene
      */
     constexpr real c_thresholdFactor = 1e6;
 
-    bool energyIsNotFinite    = !std::isfinite(enerd.term[F_EPOT]);
+    bool energyIsNotFinite    = !std::isfinite(enerd.term[InteractionFunction::PotentialEnergy]);
     real averageKineticEnergy = 0;
     /* We only check for large potential energy at the initial step,
      * because that is by far the most likely step for this too occur
@@ -567,7 +567,8 @@ static void checkPotentialEnergyValidity(int64_t step, const gmx_enerdata_t& ene
     }
 
     if (energyIsNotFinite
-        || (averageKineticEnergy > 0 && enerd.term[F_EPOT] > c_thresholdFactor * averageKineticEnergy))
+        || (averageKineticEnergy > 0
+            && enerd.term[InteractionFunction::PotentialEnergy] > c_thresholdFactor * averageKineticEnergy))
     {
         GMX_THROW(InternalError(formatString(
                 "Step %" PRId64
@@ -577,10 +578,10 @@ static void checkPotentialEnergyValidity(int64_t step, const gmx_enerdata_t& ene
                 "coordinate values. Usually this is caused by a badly- or non-equilibrated initial "
                 "configuration, incorrect interactions or parameters in the topology.",
                 step,
-                enerd.term[F_EPOT],
+                enerd.term[InteractionFunction::PotentialEnergy],
                 energyIsNotFinite ? "not finite" : "extremely high",
-                enerd.term[F_LJ],
-                enerd.term[F_COUL_SR],
+                enerd.term[InteractionFunction::LennardJonesShortRange],
+                enerd.term[InteractionFunction::CoulombShortRange],
                 energyIsNotFinite ? "non-finite" : "very high",
                 energyIsNotFinite ? " or Nan" : "")));
     }
@@ -691,7 +692,7 @@ static void computeSpecialForces(FILE*                fplog,
             std::tie(foreignLambdaDeltaH, foreignLambdaDhDl) = enerd->foreignLambdaTerms.getTerms(mpiComm);
         }
 
-        enerd->term[F_COM_PULL] += awh->applyBiasForcesAndUpdateBias(
+        enerd->term[InteractionFunction::CenterOfMassPullingEnergy] += awh->applyBiasForcesAndUpdateBias(
                 inputrec.pbcType, foreignLambdaDeltaH, foreignLambdaDhDl, box, t, step, wcycle, fplog);
     }
     // Note: this condition is mirrored in haveSpecialForces()
@@ -708,7 +709,7 @@ static void computeSpecialForces(FILE*                fplog,
     if (inputrec.bRot)
     {
         wallcycle_start(wcycle, WallCycleCounter::RotAdd);
-        enerd->term[F_COM_PULL] +=
+        enerd->term[InteractionFunction::CenterOfMassPullingEnergy] +=
                 add_rot_forces(enforcedRotation, forceWithVirialMtsLevel0->force_, mpiComm, step, t);
         wallcycle_stop(wcycle, WallCycleCounter::RotAdd);
     }
@@ -835,8 +836,6 @@ static void alternatePmeNbGpuWaitReduce(nonbonded_verlet_t* nbv,
 {
     bool isPmeGpuDone = false;
     bool isNbGpuDone  = false;
-
-    ArrayRef<const RVec> pmeGpuForces;
 
     while (!isPmeGpuDone || !isNbGpuDone)
     {
@@ -1264,7 +1263,17 @@ static void setupLocalGpuForceReduction(const MdrunScheduleWorkload& runSchedule
 
     if (runScheduleWork.simulationWork.useGpuHaloExchange)
     {
-        gpuForceReduction->addDependency(dd->gpuHaloExchange[0][0]->getForcesReadyOnDeviceEvent());
+        if (runScheduleWork.simulationWork.useNvshmem)
+        {
+            GMX_RELEASE_ASSERT(dd->gpuHaloExchangeNvshmemHelper != nullptr,
+                               "NVSHMEM helper should be initialized when using NVSHMEM");
+            gpuForceReduction->addDependency(
+                    dd->gpuHaloExchangeNvshmemHelper->getForcesReadyOnDeviceEvent());
+        }
+        else
+        {
+            gpuForceReduction->addDependency(dd->gpuHaloExchange[0][0]->getForcesReadyOnDeviceEvent());
+        }
     }
 }
 
@@ -1332,8 +1341,9 @@ static void doPairSearch(const t_commrec*             cr,
 
     StatePropagatorDataGpu* stateGpu = fr->stateGpu;
 
-    const SimulationWorkload& simulationWork = runScheduleWork.simulationWork;
-    const StepWorkload&       stepWork       = runScheduleWork.stepWork;
+    const SimulationWorkload&     simulationWork = runScheduleWork.simulationWork;
+    const StepWorkload&           stepWork       = runScheduleWork.stepWork;
+    const DomainLifetimeWorkload& domainWork     = runScheduleWork.domainWork;
 
     if (needStateGpu(simulationWork))
     {
@@ -1416,7 +1426,7 @@ static void doPairSearch(const t_commrec*             cr,
         wallcycle_sub_stop(wcycle, WallCycleSubCounter::NBSGridNonLocal);
     }
 
-    nbv->setAtomProperties(mdatoms.typeA, mdatoms.chargeA, fr->atomInfo);
+    nbv->setAtomProperties(mdatoms.typeA, mdatoms.chargeA, fr->atomInfo, mdatoms.typeB, mdatoms.chargeB);
 
     wallcycle_stop(wcycle, WallCycleCounter::NS);
 
@@ -1448,7 +1458,8 @@ static void doPairSearch(const t_commrec*             cr,
     wallcycle_start_nocount(wcycle, WallCycleCounter::NS);
     wallcycle_sub_start(wcycle, WallCycleSubCounter::NBSSearchLocal);
     /* Note that with a GPU the launch overhead of the list transfer is not timed separately */
-    nbv->constructPairlist(InteractionLocality::Local, top.excls, step, nrnb);
+    const bool alsoMakePlainPairlist = fr->plainPairlistRange.has_value();
+    nbv->constructPairlist(InteractionLocality::Local, top.excls, alsoMakePlainPairlist, step, nrnb);
 
     nbv->setupGpuShortRangeWork(fr->listedForcesGpu.get(), InteractionLocality::Local);
 
@@ -1492,7 +1503,7 @@ static void doPairSearch(const t_commrec*             cr,
         wallcycle_start_nocount(wcycle, WallCycleCounter::NS);
         wallcycle_sub_start(wcycle, WallCycleSubCounter::NBSSearchNonLocal);
         /* Note that with a GPU the launch overhead of the list transfer is not timed separately */
-        nbv->constructPairlist(InteractionLocality::NonLocal, top.excls, step, nrnb);
+        nbv->constructPairlist(InteractionLocality::NonLocal, top.excls, alsoMakePlainPairlist, step, nrnb);
 
         nbv->setupGpuShortRangeWork(fr->listedForcesGpu.get(), InteractionLocality::NonLocal);
         wallcycle_sub_stop(wcycle, WallCycleSubCounter::NBSSearchNonLocal);
@@ -1511,11 +1522,19 @@ static void doPairSearch(const t_commrec*             cr,
 
     // With FEP we set up the reduction over threads for local+non-local simultaneously,
     // so we need to do that here after the local and non-local pairlist construction.
-    if (fr->efep != FreeEnergyPerturbationType::No)
+    if (domainWork.haveCpuNonbondedFreeEnergyWork)
     {
         wallcycle_sub_start(wcycle, WallCycleSubCounter::NonbondedFep);
         nbv->setupFepThreadedForceBuffer(fr->natoms_force_constr);
         wallcycle_sub_stop(wcycle, WallCycleSubCounter::NonbondedFep);
+    }
+
+    if (alsoMakePlainPairlist)
+    {
+        const auto& plainPairlist = nbv->plainPairlist(fr->plainPairlistRange.value(), fr->shift_vec);
+        MDModulesPairlistConstructedSignal mdModulesPairlistConstructedSignal(
+                plainPairlist.pairs, plainPairlist.excludedPairs, mdatoms.typeA);
+        mdModulesNotifiers.simulationRunNotifier_.notify(mdModulesPairlistConstructedSignal);
     }
 }
 
@@ -2058,7 +2077,7 @@ void do_force(FILE*                         fplog,
     }
 
     wallcycle_start_nocount(wcycle, WallCycleCounter::Force);
-    if (fr->efep != FreeEnergyPerturbationType::No && stepWork.computeNonbondedForces)
+    if (domainWork.haveCpuNonbondedFreeEnergyWork && stepWork.computeNonbondedForces)
     {
         /* Calculate the local and non-local free energy interactions here.
          * Happens here on the CPU both with and without GPU.
@@ -2206,14 +2225,14 @@ void do_force(FILE*                         fplog,
 
         if (stepWork.computeEnergy)
         {
-            enerd->term[F_DISPCORR] = correction.energy;
-            enerd->term[F_DVDL_VDW] += correction.dvdl;
+            enerd->term[InteractionFunction::DispersionCorrection] = correction.energy;
+            enerd->term[InteractionFunction::dVvanderWaalsdLambda] += correction.dvdl;
             enerd->dvdl_lin[FreeEnergyPerturbationCouplingType::Vdw] += correction.dvdl;
         }
         if (stepWork.computeVirial)
         {
             correction.correctVirial(vir_force);
-            enerd->term[F_PDISPCORR] = correction.pressure;
+            enerd->term[InteractionFunction::PressureDispersionCorrection] = correction.pressure;
         }
     }
 

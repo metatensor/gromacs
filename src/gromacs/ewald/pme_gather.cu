@@ -555,7 +555,7 @@ __launch_bounds__(c_gatherMaxThreadsPerBlock, c_gatherMinBlocksPerMP) __global__
     {
         const float3* __restrict__ gm_coordinates = asFloat3(kernelParams.atoms.d_coordinates);
         /* Recalculate  Splines  */
-        if (c_useAtomDataPrefetch)
+        if constexpr (c_useAtomDataPrefetch)
         {
             // charges
             __shared__ float sm_coefficients[atomsPerBlock];
@@ -660,11 +660,11 @@ __launch_bounds__(c_gatherMaxThreadsPerBlock, c_gatherMinBlocksPerMP) __global__
 
         /* We must sync here since the same shared memory is used as above. */
         __syncthreads();
-        fx                    = 0.0F;
-        fy                    = 0.0F;
-        fz                    = 0.0F;
-        const int chargeCheck = pme_gpu_check_atom_charge(gm_coefficientsB[atomIndexGlobal]);
-        if (chargeCheck)
+        fx                     = 0.0F;
+        fy                     = 0.0F;
+        fz                     = 0.0F;
+        const int chargeCheckB = pme_gpu_check_atom_charge(gm_coefficientsB[atomIndexGlobal]);
+        if (chargeCheckB)
         {
             sumForceComponents<order, atomsPerWarp, wrapX, wrapY>(&fx,
                                                                   &fy,

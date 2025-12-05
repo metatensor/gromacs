@@ -43,11 +43,14 @@
 #include <hdf5.h>
 
 #include <initializer_list>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
-#include "gromacs/fileio/h5md/h5md_dataset.h"
+#include "gromacs/fileio/h5md/h5md_attribute.h"
+#include "gromacs/fileio/h5md/h5md_datasetbase.h"
 #include "gromacs/fileio/h5md/h5md_error.h"
 #include "gromacs/fileio/h5md/h5md_guard.h"
 #include "gromacs/fileio/h5md/h5md_type.h"
@@ -58,6 +61,17 @@
 
 namespace gmx
 {
+
+//! \brief Data set compression options
+enum class H5mdCompression : int
+{
+    Uncompressed,      //!< No compression
+    LosslessNoShuffle, //!< Lossless, only gzip (deflate)
+    LosslessShuffle    //!< Lossless, byte shuffle followed by gzip (deflate)
+};
+
+// gzip (deflate) compression level: 1 = fastest, 9 = highest compression
+constexpr int c_h5mdDeflateCompressionLevel = 1;
 
 /*! \brief Builder class for H5md data sets.
  *
@@ -104,6 +118,23 @@ public:
 
     GMX_DISALLOW_COPY_MOVE_AND_ASSIGN(H5mdDataSetBuilder);
 
+    //! \brief Set \p compression for data set.
+    H5mdDataSetBuilder& withCompression(const H5mdCompression compression)
+    {
+        switch (compression)
+        {
+            case H5mdCompression::Uncompressed: break;
+            case H5mdCompression::LosslessShuffle:
+                H5Pset_shuffle(creationPropertyList_);
+                [[fallthrough]];
+            case H5mdCompression::LosslessNoShuffle:
+                H5Pset_deflate(creationPropertyList_, c_h5mdDeflateCompressionLevel);
+                break;
+        }
+
+        return *this;
+    }
+
     //! \brief Set data set dimensions (required).
     H5mdDataSetBuilder& withDimension(ArrayRef<const hsize_t> dims)
     {
@@ -145,6 +176,35 @@ public:
     H5mdDataSetBuilder& withChunkDimension(std::initializer_list<hsize_t> chunkDims)
     {
         return withChunkDimension(ArrayRef<const hsize_t>(chunkDims.begin(), chunkDims.end()));
+    }
+
+    //! \brief Set the data set to use a fixed size string with maximum length \p maxLength.
+    //
+    // \note The max length must be positive and count the null-terminator character.
+    // If neither withMaxStringLength() nor withVariableStringLength() is called,
+    // the default is variable-length strings for string data sets.
+    H5mdDataSetBuilder& withMaxStringLength(const int maxLength)
+    {
+        // Use int to prevent the integer overflow if passed a negative value
+        throwUponH5mdError(
+                maxLength <= 0,
+                "Cannot create fixed-size string data set with non-positive maximum length");
+        maxStringLength_ = static_cast<size_t>(maxLength);
+        return *this;
+    }
+
+    //! \brief Set the data set to use variable length strings.
+    H5mdDataSetBuilder& withVariableStringLength()
+    {
+        maxStringLength_ = std::nullopt;
+        return *this;
+    }
+
+    //! \brief Set \p unit attribute for data set values.
+    H5mdDataSetBuilder& withUnit(std::string_view unit)
+    {
+        unit_ = unit;
+        return *this;
     }
 
     //! \brief Finalize all set options, then build and return the data set.
@@ -208,6 +268,11 @@ public:
                 container_, name_.c_str(), dataType, dataSpace, H5P_DEFAULT, creationPropertyList_, accessPropertyList_);
         throwUponInvalidHid(dataSetHandle, "Cannot create data set.");
 
+        if (!unit_.empty())
+        {
+            setAttribute(dataSetHandle, c_unitAttributeKey, unit_.c_str());
+        }
+
         // Responsibility for closing `dataSetHandle` is taken by the `H5mdDataSetBase<ValueType>`
         return H5mdDataSetBase<ValueType>(dataSetHandle);
     }
@@ -229,6 +294,17 @@ private:
         {
             appendDimension(DIM);
             return hdf5DataTypeFor<double>();
+        }
+        else if constexpr (std::is_same_v<ValueType, std::string> || std::is_same_v<ValueType, char*>)
+        {
+            if (maxStringLength_.has_value())
+            {
+                return hdf5DataTypeForFixedSizeString(maxStringLength_.value());
+            }
+            else
+            {
+                return hdf5DataTypeForVariableSizeString();
+            }
         }
         else
         {
@@ -256,6 +332,9 @@ private:
     //!< Name of data set.
     std::string name_;
 
+    //!< When set, the maximum length of a string data set (default: variable-length string)
+    std::optional<size_t> maxStringLength_ = std::nullopt;
+
     //!< Dimensions to create data set with.
     std::vector<hsize_t> dims_;
 
@@ -270,6 +349,9 @@ private:
 
     //!< Property list for creation options to create data set with.
     hid_t creationPropertyList_;
+
+    //!< Unit for values in data set.
+    std::string unit_;
 };
 
 } // namespace gmx

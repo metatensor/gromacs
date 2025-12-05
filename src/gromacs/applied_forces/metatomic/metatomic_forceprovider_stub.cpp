@@ -45,12 +45,60 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/exceptions.h"
 
-#include "metatomic_forceprovider.h"
-
 namespace gmx
 {
 
+struct MetatomicParameters;
+class MDLogger;
+class MpiComm;
+
 CLANG_DIAGNOSTIC_IGNORE("-Wmissing-noreturn")
+
+
+class MetatomicForceProvider final : public IForceProvider
+{
+public:
+    MetatomicForceProvider(const MetatomicOptions&, const MDLogger&, const MpiComm&);
+    ~MetatomicForceProvider();
+
+    /*! TODO
+     */
+    void calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs) override;
+    void updateLocalAtoms();
+    void gatherAtomPositions(ArrayRef<const RVec> globalPositions);
+    void gatherAtomNumbersIndices();
+
+    metatensor_torch::TensorBlock computeNeighbors(metatomic_torch::NeighborListOptions request,
+                                                   long                                 n_atoms,
+                                                   const float*                         positions,
+                                                   const matrix                         box,
+                                                   bool                                 periodic);
+
+private:
+    /// From NNPot
+    const MetatomicOptions& options_;
+    const MDLogger&         logger_;
+    const MpiComm&          mpiComm_;
+    torch::Device           device_;
+    //! vector storing all atom positions
+    std::vector<RVec> positions_;
+
+    //! vector storing all atomic numbers
+    std::vector<int> atomNumbers_;
+
+    //! global index lookup table to map indices from model input to global atom indices
+    std::vector<int> idxLookup_;
+
+    //! local copy of simulation box
+    matrix box_;
+    /// From EON
+    metatensor_torch::Module model_;
+    metatomic_torch::ModelCapabilities                capabilities_;
+    std::vector<metatomic_torch::NeighborListOptions> nl_requests_;
+    metatomic_torch::ModelEvaluationOptions           evaluations_options_;
+    torch::ScalarType                                 dtype_;
+    bool                                              check_consistency_;
+};
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicParameters& params,
                                                const MDLogger&            logger,
