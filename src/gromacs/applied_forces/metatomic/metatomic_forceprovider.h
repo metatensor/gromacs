@@ -44,7 +44,7 @@
 #include "gromacs/mdtypes/iforceprovider.h"
 
 #include "metatensor.hpp"
-// both gromacs and torch define `DIM`, which result in a conflict. We don't need either, 
+// both gromacs and torch define `DIM`, which result in a conflict. We don't need either,
 // so we undef before including headers.
 #ifdef DIM
 #    undef DIM
@@ -60,6 +60,15 @@
 
 namespace gmx
 {
+
+namespace torchutils
+{
+
+
+// TODO(rg): kanged from nnpot, modularize
+torch::Tensor preparePbcType(PbcType* pbcType);
+
+} // namespace torchutils
 
 struct MetatomicParameters;
 
@@ -106,7 +115,7 @@ private:
     //! local copy of simulation box
     matrix box_;
     /// From EON
-    metatensor_torch::Module model_;
+    metatensor_torch::Module                          model_;
     metatomic_torch::ModelCapabilities                capabilities_;
     std::vector<metatomic_torch::NeighborListOptions> nl_requests_;
     metatomic_torch::ModelEvaluationOptions           evaluations_options_;

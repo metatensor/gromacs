@@ -65,6 +65,27 @@ using namespace std::string_literals; // For ""s
 namespace gmx
 {
 
+namespace torchutils
+{
+
+torch::Tensor preparePbcType(PbcType* pbcType)
+{
+    torch::Tensor pbcTensor =
+            torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool));
+    if (*pbcType == PbcType::XY)
+    {
+        pbcTensor[2] = false;
+    }
+    else if (*pbcType != PbcType::Xyz)
+    {
+        GMX_THROW(InconsistentInputError(
+                "Option use_pbc was set to true, but PBC type is not supported."));
+    }
+    return pbcTensor;
+}
+
+} // namespace torchutils
+
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                                const MDLogger&         logger,
                                                const MpiComm&          mpiComm) :
@@ -313,8 +334,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto torch_cell =
                 torch::from_blob(&box_, { 3, 3 }, blob_options).to(this->dtype_).to(this->device_);
 
-        auto torch_pbc = torch::tensor(std::vector<uint8_t>{ 1, 1, 1 },
-                                       torch::TensorOptions().dtype(torch::kBool).device(this->device_));
+
+        auto torch_pbc = torchutils::preparePbcType(options_.params_.pbcType_).to(this->device_);
         auto torch_types =
                 torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(this->device_);
 
