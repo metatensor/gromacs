@@ -69,11 +69,11 @@ static const std::string METATOMIC_MODULE_NAME = "metatomic";
  */
 
 static const std::string ACTIVE_TAG      = "active";
-static const std::string INPUT_GROUP_TAG = "input_group";
+static const std::string INPUT_GROUP_TAG = "input-group";
 
 static const std::string MODEL_PATH_TAG           = "model";
 static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
-static const std::string CHECK_CONSISTENCY_TAG    = "check_consistency";
+static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
 static const std::string DEVICE_TAG               = "device";
 
 

@@ -94,11 +94,11 @@ public:
         mdpValueBuilder.rootObject().addValue(
                 METATOMIC_MODULE_NAME + "-model",
                 gmx::test::TestFileManager::getInputFilePath("model.pt").string());
-        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-input_group",
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-input-group",
                                               std::string("System"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-extensions", std::string("./ext"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-device", std::string("cpu"));
-        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-check_consistency",
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-check-consistency",
                                               std::string("true"));
         return mdpValueBuilder.build();
     }
