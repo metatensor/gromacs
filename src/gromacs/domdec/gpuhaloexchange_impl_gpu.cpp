@@ -47,6 +47,8 @@
 
 #include "config.h"
 
+#include "gromacs/gpu_utils/gpu_utils.h"
+
 #include "fused_gpuhaloexchange.h"
 
 #if GMX_NVSHMEM
@@ -132,6 +134,9 @@ HaloPlan computeHaloPlan(const gmx_domdec_comm_t& comm,
                  MPI_STATUS_IGNORE);
     plan.xRecvSize = xRecv;
 #else
+    GMX_UNUSED_VALUE(mpiCommMySim);
+    GMX_UNUSED_VALUE(sendRankX);
+    GMX_UNUSED_VALUE(recvRankX);
     plan.xRecvSize = plan.xSendSize;
 #endif
 
@@ -301,12 +306,17 @@ GpuEventSynchronizer* GpuHaloExchange::Impl::communicateHaloCoordinates(const ma
         enqueueWaitRemoteCoordinatesReadyEvent(dependencyEvent);
     }
 
-    Float3* recvPtr = GMX_THREAD_MPI ? asMpiPointer(remoteXPtr_) : (asMpiPointer(d_x_) + atomOffset_);
-
     if (receiveInPlace_)
     {
-        communicateHaloData(
-                asMpiPointer(d_sendBuf_), xSendSize_, sendRankX_, recvPtr, xRecvSize_, recvRankX_, HaloType::Coordinates);
+        communicateHaloData(d_sendBuf_,
+                            0,
+                            xSendSize_,
+                            sendRankX_,
+                            GMX_THREAD_MPI ? remoteXPtr_ : d_x_,
+                            GMX_THREAD_MPI ? 0 : atomOffset_,
+                            xRecvSize_,
+                            recvRankX_,
+                            HaloType::Coordinates);
     }
     else
     {
@@ -337,16 +347,15 @@ void GpuHaloExchange::Impl::communicateHaloForces(bool accumulateForces,
         dependencyEvents->pop_back();
     }
 
-    Float3* recvPtr = asMpiPointer(GMX_THREAD_MPI ? remoteFPtr_ : d_recvBuf_);
-
-
     // Communicate halo data
     if (receiveInPlace_)
     {
-        communicateHaloData((asMpiPointer(d_f_) + atomOffset_),
+        communicateHaloData(d_f_,
+                            atomOffset_,
                             fSendSize_,
                             sendRankF_,
-                            recvPtr,
+                            GMX_THREAD_MPI ? remoteFPtr_ : d_recvBuf_,
+                            0,
                             fRecvSize_,
                             recvRankF_,
                             HaloType::Forces);
@@ -378,23 +387,28 @@ void GpuHaloExchange::Impl::communicateHaloForces(bool accumulateForces,
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
 }
 
-void GpuHaloExchange::Impl::communicateHaloData(Float3*  sendPtr,
-                                                int      sendSize,
-                                                int      sendRank,
-                                                Float3*  recvPtr,
-                                                int      recvSize,
-                                                int      recvRank,
-                                                HaloType haloType)
+void GpuHaloExchange::Impl::communicateHaloData(DeviceBuffer<Float3> sendPtr,
+                                                int                  sendOffset,
+                                                int                  sendSize,
+                                                int                  sendRank,
+                                                DeviceBuffer<Float3> recvPtr,
+                                                int                  recvOffset,
+                                                int                  recvSize,
+                                                int                  recvRank,
+                                                HaloType             haloType)
 {
     if constexpr (supportedThreadMpiBuild)
     {
         // no need to explicitly sync with GMX_THREAD_MPI as all operations are
         // anyway launched in correct stream
-        communicateHaloDataPeerToPeer(sendPtr, sendSize, sendRank, recvPtr, recvRank, haloType);
+        communicateHaloDataPeerToPeer(&sendPtr, sendOffset, sendSize, sendRank, &recvPtr, recvRank, haloType);
+        GMX_RELEASE_ASSERT(recvOffset == 0,
+                           "communicateHaloDataPeerToPeer does not support receiveOffset");
     }
     else if constexpr (supportedLibMpiBuild)
     {
-        communicateHaloDataGpuAwareMpi(sendPtr, sendSize, sendRank, recvPtr, recvSize, recvRank);
+        communicateHaloDataGpuAwareMpi(
+                asMpiPointer(sendPtr), sendOffset, sendSize, sendRank, asMpiPointer(recvPtr), recvOffset, recvSize, recvRank);
     }
     else
     {
@@ -403,9 +417,11 @@ void GpuHaloExchange::Impl::communicateHaloData(Float3*  sendPtr,
 }
 
 void GpuHaloExchange::Impl::communicateHaloDataGpuAwareMpi(Float3* sendPtr,
+                                                           int     sendOffset,
                                                            int     sendSize,
                                                            int     sendRank,
                                                            Float3* recvPtr,
+                                                           int     recvOffset,
                                                            int     recvSize,
                                                            int     recvRank)
 {
@@ -426,10 +442,10 @@ void GpuHaloExchange::Impl::communicateHaloDataGpuAwareMpi(Float3* sendPtr,
     MPI_Request request;
 
     // recv remote data into halo region
-    MPI_Irecv(recvPtr, recvSize * DIM, MPI_FLOAT, recvRank, 0, mpi_comm_mysim_, &request);
+    MPI_Irecv(recvPtr + recvOffset, recvSize * DIM, MPI_FLOAT, recvRank, 0, mpi_comm_mysim_, &request);
 
     // send data to remote halo region
-    MPI_Send(sendPtr, sendSize * DIM, MPI_FLOAT, sendRank, 0, mpi_comm_mysim_);
+    MPI_Send(sendPtr + sendOffset, sendSize * DIM, MPI_FLOAT, sendRank, 0, mpi_comm_mysim_);
 
     MPI_Wait(&request, MPI_STATUS_IGNORE);
 #else
@@ -526,45 +542,19 @@ void GpuHaloExchange::Impl::communicateHaloForcesOutOfPlace(DeviceBuffer<Float3>
 #endif
 }
 
-void GpuHaloExchange::Impl::communicateHaloDataPeerToPeer(Float3*  sendPtr,
-                                                          int      sendSize,
-                                                          int      sendRank,
-                                                          Float3*  remotePtr,
-                                                          int      recvRank,
-                                                          HaloType haloType)
+void GpuHaloExchange::Impl::communicateHaloDataPeerToPeer(DeviceBuffer<Float3>* sendPtr,
+                                                          int                   sendOffset,
+                                                          int                   sendSize,
+                                                          int                   sendRank,
+                                                          DeviceBuffer<Float3>* remotePtr,
+                                                          int                   recvRank,
+                                                          HaloType              haloType)
 {
     GMX_RELEASE_ASSERT(supportedThreadMpiBuild, "Build does not support peer-to-peer communication");
-    // The code below can be made backend-agnostic once we add device-to-device copy functionality to DeviceBuffer
-
-
 #if GMX_GPU_CUDA || GMX_GPU_HIP
-    // We asynchronously push data to remote rank. The remote
-    // destination pointer has already been set in the init fn.  We
-    // don't need to worry about overwriting data the remote ranks
-    // still needs since the halo exchange is just done once per
-    // timestep, for each of X and F.
-
-    // send data to neighbor, if any data exists to send
-    if (sendSize > 0)
-    {
-#    if GMX_GPU_CUDA
-        cudaError_t stat = cudaMemcpyAsync(remotePtr,
-                                           sendPtr,
-                                           sendSize * DIM * sizeof(float),
-                                           cudaMemcpyDeviceToDevice,
-                                           haloStream_->stream());
-
-        CU_RET_ERR(stat, "cudaMemcpyAsync on GPU Domdec CUDA direct data transfer failed");
-#    elif GMX_GPU_HIP
-        hipError_t stat = hipMemcpyAsync(remotePtr,
-                                         sendPtr,
-                                         sendSize * DIM * sizeof(float),
-                                         hipMemcpyDeviceToDevice,
-                                         haloStream_->stream());
-
-        gmx::checkDeviceError(stat, "hipMemcpyAsync on GPU Domdec HIP direct data transfer failed");
-#    endif
-    }
+    DeviceBuffer<Float3> offsetSendPtr = *sendPtr + sendOffset;
+    copyBetweenDeviceBuffers(
+            remotePtr, &offsetSendPtr, sendSize, *haloStream_, GpuApiCallBehavior::Async, nullptr);
 
 #    if GMX_THREAD_MPI
     // ensure pushed data has arrived before remote rank progresses
@@ -601,6 +591,7 @@ void GpuHaloExchange::Impl::communicateHaloDataPeerToPeer(Float3*  sendPtr,
 #    endif
 #else
     GMX_UNUSED_VALUE(sendPtr);
+    GMX_UNUSED_VALUE(sendOffset);
     GMX_UNUSED_VALUE(sendSize);
     GMX_UNUSED_VALUE(sendRank);
     GMX_UNUSED_VALUE(remotePtr);
@@ -867,11 +858,13 @@ void GpuHaloExchangeNvshmemHelper::reinit()
 
         if (isPmeRank)
         {
-            int64_t newSize              = 1;
             int64_t totalSendRecvBufSize = 1;
 
+#if GMX_MPI
+            int64_t newSize = 1;
             MPI_Allreduce(
                     &newSize, &totalSendRecvBufSize, 1, MPI_INT64_T, MPI_MAX, dd_.mpiCommMySim().comm());
+#endif
             size_t totalSendSize = static_cast<size_t>(totalSendRecvBufSize);
             size_t totalRecvSize = static_cast<size_t>(totalSendRecvBufSize);
 

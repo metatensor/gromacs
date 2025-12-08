@@ -117,7 +117,7 @@ public:
     H5mdFrameDataSetBuilder& withMaxStringLength(const int maxLength)
     {
         // Use int to prevent the integer overflow if passed a negative value
-        throwUponH5mdError(
+        GMX_H5MD_THROW_UPON_ERROR(
                 maxLength <= 0,
                 "Cannot create fixed-size string data set with non-positive maximum length");
         Base::withMaxStringLength(maxLength);
@@ -141,32 +141,17 @@ public:
     //! \brief Create the data set, then build and return it.
     H5mdDataSetBase<ValueType> build()
     {
-        const std::vector<hsize_t> dimensions = [&]()
-        {
-            std::vector<hsize_t> dims = { numFrames_ };
-            for (const hsize_t d : frameDims_)
-            {
-                dims.push_back(d);
-            }
-            return dims;
-        }();
+        std::vector<hsize_t> dimensions;
+        dimensions.reserve(1 + frameDims_.size());
+        dimensions.push_back(numFrames_);
+        dimensions.insert(dimensions.end(), frameDims_.begin(), frameDims_.end());
         Base::withDimension(dimensions);
 
-        const std::vector<hsize_t> maxDimensions = [&]()
-        {
-            std::vector<hsize_t> maxDims = dimensions;
-            maxDims[0]                   = maxNumFrames_;
-            return maxDims;
-        }();
-        Base::withMaxDimension(maxDimensions);
+        dimensions[0] = maxNumFrames_;
+        Base::withMaxDimension(dimensions);
 
-        const std::vector<hsize_t> chunkDimensions = [&]()
-        {
-            std::vector<hsize_t> chunkDims = dimensions;
-            chunkDims[0]                   = frameChunkSize_;
-            return chunkDims;
-        }();
-        Base::withChunkDimension(chunkDimensions);
+        dimensions[0] = frameChunkSize_;
+        Base::withChunkDimension(dimensions);
 
         return Base::build();
     }

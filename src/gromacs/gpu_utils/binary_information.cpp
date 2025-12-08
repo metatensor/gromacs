@@ -126,20 +126,22 @@ std::vector<std::string> getSyclOptionalFeatures()
 #    if GMX_HAVE_GPU_GRAPH_SUPPORT
     optionalFeatures.push_back("graphs");
 #    endif
+#    if GMX_SYCL_ENABLE_HANDLER_FREE_SUBMISSION
+    optionalFeatures.push_back("experimental_enqueue_functions");
+#    endif
     return optionalFeatures;
 }
 
 std::string getSyclCompilerVersion()
 {
-    std::string                    versionStr       = getSyclVersion();
     const std::vector<std::string> optionalFeatures = getSyclOptionalFeatures();
     if (optionalFeatures.empty())
     {
-        return versionStr;
+        return getSyclVersion();
     }
     else
     {
-        return versionStr + " with " + gmx::joinStrings(optionalFeatures, ",");
+        return getSyclVersion() + " with " + gmx::joinStrings(optionalFeatures, ",");
     }
 }
 

@@ -74,8 +74,8 @@ namespace gmx
 using sycl::access::fence_space;
 using mode = sycl::access_mode;
 
-template<bool calcVir, bool calcEner>
-auto bondedKernel(sycl::handler&                   cgh,
+template<bool calcVir, bool calcEner, typename CommandGroupHandler>
+auto bondedKernel(CommandGroupHandler              cgh,
                   const BondedGpuKernelParameters& kernelParams,
                   const DeviceBuffer<t_iatom>      gm_iatoms_[numFTypesOnGpu],
                   float* __restrict__ gm_vTot,
@@ -99,12 +99,19 @@ auto bondedKernel(sycl::handler&                   cgh,
 
     const auto electrostaticsScaleFactor = kernelParams.electrostaticsScaleFactor;
 
-    sycl::local_accessor<Float3, 1> sm_fShiftLoc{ sycl::range<1>(c_numShiftVectors), cgh };
+    using FShiftLoc              = StaticLocalStorage<Float3, c_numShiftVectors>;
+    auto sm_fShiftLocHostStorage = FShiftLoc::makeHostStorage(cgh);
 
     const PbcAiuc pbcAiuc = kernelParams.pbcAiuc;
 
     return [=](sycl::nd_item<1> itemIdx)
     {
+        // This declaration works on the device
+        typename FShiftLoc::DeviceStorage sm_fShiftLocDeviceStorage;
+        // Extract the valid pointer to local storage
+        sycl::local_ptr<Float3> sm_fShiftLoc =
+                FShiftLoc::get_pointer(sm_fShiftLocHostStorage, sm_fShiftLocDeviceStorage);
+
         sycl::global_ptr<const t_iparams>    gm_forceParams = gm_forceParams_;
         sycl::global_ptr<const DeviceFloat4> gm_xq          = gm_xq_;
         sycl::global_ptr<Float3>             gm_f           = gm_f_;
@@ -242,20 +249,17 @@ void ListedForcesGpu::Impl::launchKernel()
     const sycl::nd_range<1> rangeAll(kernelLaunchConfig_.blockSize[0] * kernelLaunchConfig_.gridSize[0],
                                      kernelLaunchConfig_.blockSize[0]);
 
-    gmx::syclSubmitWithoutEvent(deviceStream_.stream(),
-                                [&](sycl::handler& cgh)
-                                {
-                                    auto kernel = bondedKernel<calcVir, calcEner>(
-                                            cgh,
-                                            kernelParams_,
-                                            kernelBuffers_.d_iatoms,
-                                            kernelBuffers_.d_vTot.get_pointer(),
-                                            kernelBuffers_.d_forceParams.get_pointer(),
-                                            d_xq_.get_pointer(),
-                                            d_f_.get_pointer(),
-                                            d_fShift_.get_pointer());
-                                    cgh.parallel_for<kernelNameType>(rangeAll, kernel);
-                                });
+    auto kernelFunctionBuilder = bondedKernel<calcVir, calcEner, CommandGroupHandler>;
+    syclSubmitWithoutEvent<kernelNameType>(deviceStream_.stream(),
+                                           kernelFunctionBuilder,
+                                           rangeAll,
+                                           kernelParams_,
+                                           kernelBuffers_.d_iatoms,
+                                           kernelBuffers_.d_vTot.get_pointer(),
+                                           kernelBuffers_.d_forceParams.get_pointer(),
+                                           d_xq_.get_pointer(),
+                                           d_f_.get_pointer(),
+                                           d_fShift_.get_pointer());
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
