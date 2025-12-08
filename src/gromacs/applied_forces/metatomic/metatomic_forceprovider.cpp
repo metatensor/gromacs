@@ -93,6 +93,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     logger_(logger),
     mpiComm_(mpiComm),
     device_(torch::Device(torch::kCPU)),
+    model_(torch::jit::Module()),
     box_{ { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 } }
 {
     // NOTE: do NOT return early on non-main ranks. Only perform file I/O / GPU init
@@ -335,7 +336,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 torch::from_blob(&box_, { 3, 3 }, blob_options).to(this->dtype_).to(this->device_);
 
 
-        auto torch_pbc = torchutils::preparePbcType(options_.params_.pbcType_).to(this->device_);
+        auto torch_pbc = torchutils::preparePbcType(options_.params_.pbcType_.get()).to(this->device_);
         auto torch_types =
                 torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(this->device_);
 
@@ -356,12 +357,14 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         metatensor_torch::TensorMap output_map;
         try
         {
-            auto ivalue_output = this->model_.forward({
-                    std::vector<metatomic_torch::System>{ system },
-                    evaluations_options_,
-                    this->check_consistency_,
-            });
-            auto dict_output   = ivalue_output.toGenericDict();
+            std::vector<metatomic_torch::System> systems;
+            systems.push_back(system);
+
+            auto ivalue_output = this->model_.forward(
+                    { c10::IValue(systems),
+                      evaluations_options_,
+                      this->check_consistency_ });
+            auto dict_output = ivalue_output.toGenericDict();
             output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
         }
         catch (const std::exception& e)
