@@ -98,6 +98,12 @@ if(GMX_METATOMIC)
 
         message(STATUS "Fetching metatensor-torch v${METATENSOR_TORCH_VERSION} from github")
         FetchContent_MakeAvailable(metatensor-torch)
+        install(TARGETS metatensor-torch EXPORT libgromacs
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        )
     else()
         # make sure to fail the configuration if cmake can not find metatensor-torch
         find_package(metatensor_torch REQUIRED ${METATENSOR_TORCH_VERSION})
@@ -114,6 +120,12 @@ if(GMX_METATOMIC)
 
         message(STATUS "Fetching metatomic-torch v${METATOMIC_TORCH_VERSION} from github")
         FetchContent_MakeAvailable(metatomic-torch)
+        install(TARGETS metatomic-torch EXPORT libgromacs
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        )
     else()
         # make sure to fail the configuration if cmake can not find metatomic-torch
         find_package(metatomic_torch REQUIRED ${METATOMIC_TORCH_VERSION})
@@ -129,16 +141,22 @@ if(GMX_METATOMIC)
         )
 
         FetchContent_MakeAvailable(vesin)
+        install(TARGETS vesin EXPORT libgromacs
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        )
     else()
         # make sure to fail the configuration if cmake can not find vesin
         find_package(vesin REQUIRED ${VESIN_VERSION})
     endif()
 
-    # list(APPEND GMX_COMMON_LIBRARIES
-    #     vesin
-    #     metatensor
-    #     metatomic_torch
-    #     metatensor_torch
-    # )
-    target_link_libraries(libgromacs PRIVATE vesin metatensor metatomic_torch metatensor_torch)
+    list(APPEND GMX_COMMON_LIBRARIES
+        vesin
+        metatensor
+        metatomic_torch
+        metatensor_torch
+    )
+
 endif()
