@@ -45,10 +45,11 @@
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/fileio/warninp.h"
-#include "gromacs/options/basicoptions.h"
 #include "gromacs/mdtypes/imdpoptionprovider_helpers.h"
+#include "gromacs/options/basicoptions.h"
 #include "gromacs/options/optionsection.h"
 #include "gromacs/selection/indexutil.h"
+#include "gromacs/topology/embedded_system_preprocessing.h"
 #include "gromacs/topology/mtop_util.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 #include "gromacs/utility/keyvaluetreetransform.h"
@@ -56,8 +57,7 @@
 #include "gromacs/utility/mpicomm.h"
 #include "gromacs/utility/strconvert.h"
 #include "gromacs/utility/stringutil.h"
-
-#include "metatomic_topologypreprocessor.h"
+#include <set>
 
 namespace gmx
 {
@@ -75,6 +75,47 @@ static const std::string MODEL_PATH_TAG           = "model";
 static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
 static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
 static const std::string DEVICE_TAG               = "device";
+
+
+//! \brief Helper function to preprocess topology for MTA
+void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, const MDLogger& logger, WarningHandler* wi)
+{
+    // convert mtaIndices to set for faster lookup
+    std::set<int> mtaIndicesSet(mtaIndices.begin(), mtaIndices.end());
+    const int     numMTAAtoms     = mtaIndices.size();
+    const int     numRegularAtoms = mtop->natoms - numMTAAtoms;
+
+    GMX_LOG(logger.info)
+            .appendText("Neural network potential interface is active, topology was modified!");
+    GMX_LOG(logger.info)
+            .appendTextFormatted("Number of embedded MTA atoms: %d\nNumber of regular atoms: %d\n",
+                                 numMTAAtoms,
+                                 numRegularAtoms);
+
+    // 1) Split QM-containing molecules from other molecules in blocks
+    std::vector<bool> isMTABlock = splitEmbeddedBlocks(mtop, mtaIndicesSet);
+
+    // 2) Exclude non-bonded interactions between QM atoms
+    addEmbeddedNBExclusions(mtop, mtaIndicesSet, logger);
+
+    // 3) Build atomNumbers vector with atomic numbers of all atoms
+    std::vector<int> atomNumbers = buildEmbeddedAtomNumbers(*mtop);
+
+    // 4) Make F_CONNBOND between atoms within QM region
+    modifyEmbeddedTwoCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
+
+    // 5) Remove angles and settles containing 2 or more QM atoms
+    modifyEmbeddedThreeCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
+
+    // 6) Remove dihedrals containing 3 or more QM atoms
+    modifyEmbeddedFourCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
+
+    // 7) Check for constrained bonds in subsystem
+    checkConstrainedBonds(mtop, mtaIndicesSet, isMTABlock, wi);
+
+    // finalize topology
+    mtop->finalize();
+}
 
 
 void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
@@ -163,9 +204,7 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
     {
         return;
     }
-
-    MetatomicTopologyPreprocessor topPrep(params_.mtaIndices_);
-    topPrep.preprocess(top, logger(), wi_);
+    preprocessTopology(top, params_.mtaIndices_, logger(), wi_);
 }
 
 void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
