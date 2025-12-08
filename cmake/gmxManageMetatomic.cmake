@@ -134,11 +134,11 @@ if(GMX_METATOMIC)
         find_package(vesin REQUIRED ${VESIN_VERSION})
     endif()
 
-    list(APPEND GMX_COMMON_LIBRARIES
-        vesin
-        metatensor
-        metatomic_torch
-        metatensor_torch
-    )
-
+    # list(APPEND GMX_COMMON_LIBRARIES
+    #     vesin
+    #     metatensor
+    #     metatomic_torch
+    #     metatensor_torch
+    # )
+    target_link_libraries(libgromacs PRIVATE vesin metatensor metatomic_torch metatensor_torch)
 endif()
