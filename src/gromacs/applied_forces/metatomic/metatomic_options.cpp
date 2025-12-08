@@ -43,6 +43,8 @@
 
 #include "metatomic_options.h"
 
+#include <set>
+
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/fileio/warninp.h"
 #include "gromacs/mdtypes/imdpoptionprovider_helpers.h"
@@ -51,13 +53,13 @@
 #include "gromacs/selection/indexutil.h"
 #include "gromacs/topology/embedded_system_preprocessing.h"
 #include "gromacs/topology/mtop_util.h"
+#include "gromacs/topology/topology.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 #include "gromacs/utility/keyvaluetreetransform.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
 #include "gromacs/utility/strconvert.h"
 #include "gromacs/utility/stringutil.h"
-#include <set>
 
 namespace gmx
 {
@@ -76,6 +78,9 @@ static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
 static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
 static const std::string DEVICE_TAG               = "device";
 
+namespace
+{
+// TODO(rg): this is duplicated from the nnpotoptions
 
 //! \brief Helper function to preprocess topology for MTA
 void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, const MDLogger& logger, WarningHandler* wi)
@@ -116,7 +121,7 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
     // finalize topology
     mtop->finalize();
 }
-
+} // namespace
 
 void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
 {
