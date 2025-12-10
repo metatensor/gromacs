@@ -45,66 +45,29 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/exceptions.h"
 
+#include "metatomic_forceprovider.h"
+
 namespace gmx
 {
 
-struct MetatomicParameters;
-class MDLogger;
-class MpiComm;
+// use an empty struct for MetatomicData in the stub implementation
+struct MetatomicData {};
 
 CLANG_DIAGNOSTIC_IGNORE("-Wmissing-noreturn")
 
-
-class MetatomicForceProvider final : public IForceProvider
+MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
+                                               const MDLogger&         logger,
+                                               const MpiComm&          mpiComm) :
+    options_(options),
+    logger_(logger),
+    mpiComm_(mpiComm),
+    box_{{ 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }},
+    data_(nullptr)
 {
-public:
-    MetatomicForceProvider(const MetatomicOptions&, const MDLogger&, const MpiComm&);
-    ~MetatomicForceProvider();
-
-    /*! TODO
-     */
-    void calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs) override;
-    void updateLocalAtoms();
-    void gatherAtomPositions(ArrayRef<const RVec> globalPositions);
-    void gatherAtomNumbersIndices();
-
-    metatensor_torch::TensorBlock computeNeighbors(metatomic_torch::NeighborListOptions request,
-                                                   long                                 n_atoms,
-                                                   const float*                         positions,
-                                                   const matrix                         box,
-                                                   bool                                 periodic);
-
-private:
-    /// From NNPot
-    const MetatomicOptions& options_;
-    const MDLogger&         logger_;
-    const MpiComm&          mpiComm_;
-    torch::Device           device_;
-    //! vector storing all atom positions
-    std::vector<RVec> positions_;
-
-    //! vector storing all atomic numbers
-    std::vector<int> atomNumbers_;
-
-    //! global index lookup table to map indices from model input to global atom indices
-    std::vector<int> idxLookup_;
-
-    //! local copy of simulation box
-    matrix box_;
-    /// From EON
-    metatensor_torch::Module model_;
-    metatomic_torch::ModelCapabilities                capabilities_;
-    std::vector<metatomic_torch::NeighborListOptions> nl_requests_;
-    metatomic_torch::ModelEvaluationOptions           evaluations_options_;
-    torch::ScalarType                                 dtype_;
-    bool                                              check_consistency_;
-};
-
-MetatomicForceProvider::MetatomicForceProvider(const MetatomicParameters& params,
-                                               const MDLogger&            logger,
-                                               const MpiComm&             mpiComm) :
-    params_(params), logger_(logger), mpiComm_(mpiComm)
-{
+    (void)options_;
+    (void)logger_;
+    (void)mpiComm_;
+    (void)box_;
     GMX_THROW(
             InternalError("This version of GROMACS can not use metatomic atomistic models. "
                           "Please reconfigure with `-DGMX_METATOMIC=ON` to enable this interface"));
@@ -116,6 +79,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& /*inputs*
                                              ForceProviderOutput* /*outputs*/)
 {
 }
+
+void MetatomicForceProvider::updateLocalAtoms() {}
+void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPositions) {
+    (void)globalPositions;
+}
+void MetatomicForceProvider::gatherAtomNumbersIndices() {}
 
 CLANG_DIAGNOSTIC_RESET
 

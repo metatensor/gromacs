@@ -51,17 +51,11 @@ if(GMX_METATOMIC)
     set(METATENSOR_TORCH_VERSION "0.8.0")
     set(METATENSOR_TORCH_SHA256 "61d383ce958deafe0e3916088185527680c9118588722b17ec5c39cfbaa6da55")
 
-    set(METATOMIC_TORCH_VERSION "0.1.4")
-    set(METATOMIC_TORCH_SHA256 "385ec8b8515d674b6a9f093f724792b2469e7ea2365ca596f574b64e38494f94")
+    set(METATOMIC_TORCH_VERSION "0.1.7")
+    set(METATOMIC_TORCH_SHA256 "726f5711b70c4b8cc80d9bc6c3ce6f3449f31d20acc644ab68dab083aa4ea572")
 
     set(VESIN_VERSION "0.4.1")
     set(VESIN_GIT_TAG "87dcad999fec47b29ab21be9662ef283edc7530b")
-
-    set(DOWNLOAD_VESIN_DEFAULT ON)
-    find_package(vesin ${VESIN_VERSION} QUIET)
-    if (vesin_FOUND)
-        set(DOWNLOAD_VESIN_DEFAULT OFF)
-    endif()
 
     set(DOWNLOAD_METATENSOR_DEFAULT ON)
     find_package(metatensor_torch ${METATENSOR_TORCH_VERSION} QUIET)
@@ -79,9 +73,9 @@ if(GMX_METATOMIC)
     option(DOWNLOAD_METATENSOR "Download metatensor package instead of using an already installed one" ${DOWNLOAD_METATENSOR_DEFAULT})
     option(DOWNLOAD_METATOMIC "Download metatomic package instead of using an already installed one" ${DOWNLOAD_METATOMIC_DEFAULT})
 
-    if (DOWNLOAD_METATENSOR)
-        include(FetchContent)
+    include(FetchContent)
 
+    if (DOWNLOAD_METATENSOR)
         set(URL_BASE "https://github.com/metatensor/metatensor/releases/download")
         FetchContent_Declare(metatensor
             URL ${URL_BASE}/metatensor-core-v${METATENSOR_CORE_VERSION}/metatensor-core-cxx-${METATENSOR_CORE_VERSION}.tar.gz
@@ -98,20 +92,12 @@ if(GMX_METATOMIC)
 
         message(STATUS "Fetching metatensor-torch v${METATENSOR_TORCH_VERSION} from github")
         FetchContent_MakeAvailable(metatensor-torch)
-        install(TARGETS metatensor-torch EXPORT libgromacs
-            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-            INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        )
     else()
         # make sure to fail the configuration if cmake can not find metatensor-torch
         find_package(metatensor_torch REQUIRED ${METATENSOR_TORCH_VERSION})
     endif()
 
     if (DOWNLOAD_METATOMIC)
-        include(FetchContent)
-
         set(URL_BASE "https://github.com/metatensor/metatomic/releases/download")
         FetchContent_Declare(metatomic-torch
             URL ${URL_BASE}/metatomic-torch-v${METATOMIC_TORCH_VERSION}/metatomic-torch-cxx-${METATOMIC_TORCH_VERSION}.tar.gz
@@ -120,37 +106,25 @@ if(GMX_METATOMIC)
 
         message(STATUS "Fetching metatomic-torch v${METATOMIC_TORCH_VERSION} from github")
         FetchContent_MakeAvailable(metatomic-torch)
-        install(TARGETS metatomic-torch EXPORT libgromacs
-            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-            INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        )
     else()
         # make sure to fail the configuration if cmake can not find metatomic-torch
         find_package(metatomic_torch REQUIRED ${METATOMIC_TORCH_VERSION})
     endif()
 
-    if (DOWNLOAD_VESIN)
-        include(FetchContent)
+    # always fetch vesin
+    FetchContent_Declare(
+        vesin
+        GIT_REPOSITORY https://github.com/Luthaf/vesin.git
+        GIT_TAG ${VESIN_GIT_TAG}
+    )
 
-        FetchContent_Declare(
-            vesin
-            GIT_REPOSITORY https://github.com/Luthaf/vesin.git
-            GIT_TAG ${VESIN_GIT_TAG}
-        )
-
-        FetchContent_MakeAvailable(vesin)
-        install(TARGETS vesin EXPORT libgromacs
-            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-            INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        )
-    else()
-        # make sure to fail the configuration if cmake can not find vesin
-        find_package(vesin REQUIRED ${VESIN_VERSION})
-    endif()
+    FetchContent_MakeAvailable(vesin)
+    install(TARGETS vesin EXPORT libgromacs
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
 
     list(APPEND GMX_COMMON_LIBRARIES
         vesin

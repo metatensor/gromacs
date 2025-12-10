@@ -43,34 +43,13 @@
 
 #include "gromacs/mdtypes/iforceprovider.h"
 
-#include "metatensor.hpp"
-// both gromacs and torch define `DIM`, which result in a conflict. We don't need either,
-// so we undef before including headers.
-#ifdef DIM
-#    undef DIM
-#endif
-#include "metatensor/torch.hpp"
-#include "metatomic/torch.hpp"
-#ifdef DIM
-// XXX(rg): ask gromacs folks to do GMX_DIM
-#    undef DIM
-#endif
-
 #include "metatomic_options.h"
 
 namespace gmx
 {
 
-namespace torchutils
-{
-
-
-// TODO(rg): kanged from nnpot, modularize
-torch::Tensor preparePbcType(PbcType* pbcType);
-
-} // namespace torchutils
-
 struct MetatomicParameters;
+struct MetatomicData;
 
 class MDLogger;
 class MpiComm;
@@ -91,18 +70,12 @@ public:
     void gatherAtomPositions(ArrayRef<const RVec> globalPositions);
     void gatherAtomNumbersIndices();
 
-    metatensor_torch::TensorBlock computeNeighbors(metatomic_torch::NeighborListOptions request,
-                                                   long                                 n_atoms,
-                                                   const float*                         positions,
-                                                   const matrix                         box,
-                                                   bool                                 periodic);
-
 private:
     /// From NNPot
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
     const MpiComm&          mpiComm_;
-    torch::Device           device_;
+
     //! vector storing all atom positions
     std::vector<RVec> positions_;
 
@@ -114,13 +87,8 @@ private:
 
     //! local copy of simulation box
     matrix box_;
-    /// From EON
-    metatensor_torch::Module                          model_;
-    metatomic_torch::ModelCapabilities                capabilities_;
-    std::vector<metatomic_torch::NeighborListOptions> nl_requests_;
-    metatomic_torch::ModelEvaluationOptions           evaluations_options_;
-    torch::ScalarType                                 dtype_;
-    bool                                              check_consistency_;
+    //! Data required for metatomic calculations
+    std::unique_ptr<MetatomicData> data_;
 };
 
 } // namespace gmx

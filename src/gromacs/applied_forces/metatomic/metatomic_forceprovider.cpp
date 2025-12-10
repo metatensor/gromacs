@@ -40,35 +40,31 @@
  */
 #include "gmxpre.h"
 
-#include "metatomic_forceprovider.h"
-
-#include <vesin.h>
-
 #include <cstdint>
 
-#include <filesystem>
-
-#ifndef DIM
-#    define DIM 3
-#endif
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/mdtypes/forceoutput.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/exceptions.h"
-#include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
 
-using namespace std::string_literals; // For ""s
-namespace gmx
-{
+#include "metatomic_forceprovider.h"
 
-namespace torchutils
-{
+// both gromacs and torch define `DIM`, which result in a conflict. We don't
+// need either, so we undef before including headers.
+#ifdef DIM
+#    undef DIM
+#endif
+#include <metatensor/torch.hpp>
+#include <metatomic/torch.hpp>
 
-torch::Tensor preparePbcType(PbcType* pbcType)
+#include <vesin.h>
+
+
+static torch::Tensor preparePbcType(PbcType* pbcType)
 {
     torch::Tensor pbcTensor =
             torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool));
@@ -78,13 +74,135 @@ torch::Tensor preparePbcType(PbcType* pbcType)
     }
     else if (*pbcType != PbcType::Xyz)
     {
-        GMX_THROW(InconsistentInputError(
+        GMX_THROW(gmx::InconsistentInputError(
                 "Option use_pbc was set to true, but PBC type is not supported."));
     }
     return pbcTensor;
 }
 
-} // namespace torchutils
+static metatensor_torch::TensorBlock computeNeighbors(
+    metatomic_torch::NeighborListOptions request,
+    long n_atoms,
+    const float* positions,
+    const matrix box,
+    bool periodic,
+    torch::Device device,
+    torch::ScalarType dtype
+) {
+    auto cutoff = request->engine_cutoff("nm");
+
+    VesinOptions options;
+    options.cutoff           = cutoff;
+    options.full             = request->full_list();
+    options.return_shifts    = true;
+    options.return_distances = false;
+    options.return_vectors   = true;
+
+    VesinNeighborList* vesin_neighbor_list = new VesinNeighborList();
+    // .............................. gromacs likes floats, vesin does not
+    double double_box[3][3];
+
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            double_box[i][j] = static_cast<double>(box[i][j]);
+        }
+    }
+
+    const size_t        total_elements = static_cast<size_t>(n_atoms) * 3;
+    std::vector<double> double_positions(total_elements);
+
+    for (size_t i = 0; i < total_elements; i++)
+    {
+        double_positions[i] = static_cast<double>(positions[i]);
+    }
+    const double* positions_ptr = double_positions.data();
+
+    VesinDevice cpu{ VesinCPU, 0 };
+    const char* error_message = nullptr;
+    int         status = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions_ptr),
+                                 static_cast<size_t>(n_atoms),
+                                 double_box,
+                                 &periodic,
+                                 cpu,
+                                 options,
+                                 vesin_neighbor_list,
+                                 &error_message);
+
+
+    if (status != EXIT_SUCCESS)
+    {
+        std::string err_str = "vesin_neighbors failed: ";
+        if (error_message)
+        {
+            err_str += error_message;
+        }
+        delete vesin_neighbor_list;
+        GMX_THROW(gmx::APIError(err_str));
+    }
+
+    auto n_pairs = static_cast<int64_t>(vesin_neighbor_list->length);
+
+    // Build samples tensor (first_atom, second_atom, cell_shifts)
+    auto pair_samples_values = torch::empty({ n_pairs, 5 }, torch::TensorOptions().dtype(torch::kInt32));
+    auto pair_samples_ptr = pair_samples_values.accessor<int32_t, 2>();
+    for (int64_t i = 0; i < n_pairs; i++)
+    {
+        pair_samples_ptr[i][0] = static_cast<int32_t>(vesin_neighbor_list->pairs[i][0]);
+        pair_samples_ptr[i][1] = static_cast<int32_t>(vesin_neighbor_list->pairs[i][1]);
+        pair_samples_ptr[i][2] = vesin_neighbor_list->shifts[i][0];
+        pair_samples_ptr[i][3] = vesin_neighbor_list->shifts[i][1];
+        pair_samples_ptr[i][4] = vesin_neighbor_list->shifts[i][2];
+    }
+
+    // Custom deleter to free vesin's memory when the torch tensor is destroyed
+    auto deleter = [=](void*)
+    {
+        vesin_free(vesin_neighbor_list);
+        delete vesin_neighbor_list;
+    };
+
+    auto pair_vectors = torch::from_blob(vesin_neighbor_list->vectors,
+                                         { n_pairs, 3, 1 },
+                                         deleter,
+                                         torch::TensorOptions().dtype(torch::kFloat64));
+    pair_vectors.to(dtype);
+
+    auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+            std::vector<std::string>{
+                    "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c" },
+            pair_samples_values.to(device));
+
+    auto neighbor_component = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+            std::vector<std::string>{ "xyz" },
+            torch::tensor({ 0, 1, 2 }, torch::TensorOptions().dtype(torch::kInt32).device(device))
+                    .reshape({ 3, 1 }));
+
+    auto neighbor_properties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+            std::vector<std::string>{ "distance" },
+            torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device)));
+
+    return torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
+            pair_vectors.to(dtype).to(device),
+            neighbor_samples,
+            std::vector<metatensor_torch::Labels>{ neighbor_component },
+            neighbor_properties);
+}
+
+namespace gmx
+{
+
+struct MetatomicData
+{
+    metatensor_torch::Module                            model = metatensor_torch::Module(torch::jit::Module());
+    metatomic_torch::ModelCapabilities                  capabilities;
+    std::vector<metatomic_torch::NeighborListOptions>   nl_requests;
+    metatomic_torch::ModelEvaluationOptions             evaluations_options;
+    torch::ScalarType                                   dtype;
+    bool                                                check_consistency;
+    torch::Device                                       device = torch::kCPU;
+};
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                                const MDLogger&         logger,
@@ -92,9 +210,8 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     options_(options),
     logger_(logger),
     mpiComm_(mpiComm),
-    device_(torch::Device(torch::kCPU)),
-    model_(torch::jit::Module()),
-    box_{ { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 } }
+    box_{{ 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }},
+    data_(std::make_unique<MetatomicData>())
 {
     // NOTE: do NOT return early on non-main ranks. Only perform file I/O / GPU init
     // on the main rank, but still run the remainder of the constructor on all ranks
@@ -112,7 +229,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 extensions_directory = options_.params_.extensionsDirectory;
             }
 
-            model_ = metatomic_torch::load_atomistic_model(options_.params_.modelPath_, extensions_directory);
+            this->data_->model = metatomic_torch::load_atomistic_model(options_.params_.modelPath_, extensions_directory);
         }
         catch (const std::exception& e)
         {
@@ -120,37 +237,36 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         }
 
         // Query model capabilities
-        capabilities_ =
-                model_.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
-        auto requests_ivalue = model_.run_method("requested_neighbor_lists");
+        data_->capabilities = data_->model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
+        auto requests_ivalue = data_->model.run_method("requested_neighbor_lists");
         for (const auto& request_ivalue : requests_ivalue.toList())
         {
-            nl_requests_.push_back(
+            data_->nl_requests.push_back(
                     request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>());
         }
 
         // TODO(rg): determine device
-        model_.to(device_);
+        data_->model.to(data_->device);
 
         // Set data type locally on main rank
-        if (capabilities_->dtype() == "float64")
+        if (data_->capabilities->dtype() == "float64")
         {
-            dtype_ = torch::kFloat64;
+            data_->dtype = torch::kFloat64;
         }
-        else if (capabilities_->dtype() == "float32")
+        else if (data_->capabilities->dtype() == "float32")
         {
-            dtype_ = torch::kFloat32;
+            data_->dtype = torch::kFloat32;
         }
         else
         {
-            GMX_THROW(APIError("Unsupported dtype from model: " + capabilities_->dtype()));
+            GMX_THROW(APIError("Unsupported dtype from model: " + data_->capabilities->dtype()));
         }
 
         // 5. Set up evaluation options (only on main rank)
-        evaluations_options_ = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
-        evaluations_options_->set_length_unit("nm");
+        data_->evaluations_options = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
+        data_->evaluations_options->set_length_unit("nm");
 
-        auto outputs = capabilities_->outputs();
+        auto outputs = data_->capabilities->outputs();
         // TODO(rg): handle variants
         if (!outputs.contains("energy"))
         {
@@ -161,7 +277,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         requested_output->per_atom = false;
         requested_output->explicit_gradients = {}; // Use autograd for forces
 
-        evaluations_options_->outputs.insert("energy", requested_output);
+        data_->evaluations_options->outputs.insert("energy", requested_output);
     }
     else
     {
@@ -212,7 +328,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     int dtype_code_local = 0;
     if (mpiComm_.isMainRank())
     {
-        dtype_code_local = (dtype_ == torch::kFloat32) ? 1 : 0;
+        dtype_code_local = (data_->dtype == torch::kFloat32) ? 1 : 0;
     }
     // comm() may be MPI_COMM_NULL for SingleRank so..
     if (mpiComm_.isParallel())
@@ -220,7 +336,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         block_bc(mpiComm_.comm(), dtype_code_local);
     }
     // Set dtype_ on all ranks
-    dtype_ = (dtype_code_local == 1) ? torch::kFloat32 : torch::kFloat64;
+    data_->dtype = (dtype_code_local == 1) ? torch::kFloat32 : torch::kFloat64;
 
     // Initialize the lookup table. It will be populated correctly
     // by the first call from the SimulationRunNotifier.
@@ -328,27 +444,34 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         auto torch_positions =
                 torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, blob_options)
-                        .to(this->dtype_)
-                        .to(this->device_)
+                        .to(data_->dtype)
+                        .to(data_->device)
                         .set_requires_grad(true);
 
         auto torch_cell =
-                torch::from_blob(&box_, { 3, 3 }, blob_options).to(this->dtype_).to(this->device_);
+                torch::from_blob(&box_, { 3, 3 }, blob_options).to(data_->dtype).to(data_->device);
 
 
-        auto torch_pbc = torchutils::preparePbcType(options_.params_.pbcType_.get()).to(this->device_);
+        auto torch_pbc = preparePbcType(options_.params_.pbcType_.get()).to(data_->device);
         auto torch_types =
-                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(this->device_);
+                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 torch_types, torch_positions, torch_cell, torch_pbc);
 
         bool periodic = torch::all(torch_pbc).item<bool>();
         // Compute and add neighbor lists
-        for (const auto& request : nl_requests_)
+        for (const auto& request : data_->nl_requests)
         {
             auto neighbors = computeNeighbors(
-                    request, n_atoms, coerced_positions.data()->as_vec(), box_, periodic);
+                request,
+                n_atoms,
+                coerced_positions.data()->as_vec(),
+                box_,
+                periodic,
+                data_->device,
+                data_->dtype
+            );
             metatomic_torch::register_autograd_neighbors(system, neighbors, false);
             system->add_neighbor_list(request, neighbors);
         }
@@ -360,16 +483,17 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             std::vector<metatomic_torch::System> systems;
             systems.push_back(system);
 
-            auto ivalue_output = this->model_.forward(
-                    { c10::IValue(systems),
-                      evaluations_options_,
-                      this->check_consistency_ });
+            auto ivalue_output = data_->model.forward({
+                c10::IValue(systems),
+                data_->evaluations_options,
+                data_->check_consistency
+            });
             auto dict_output = ivalue_output.toGenericDict();
             output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
         }
         catch (const std::exception& e)
         {
-            GMX_THROW(APIError("[MetatomicPotential] Model evaluation failed: "s + e.what()));
+            GMX_THROW(APIError("[MetatomicPotential] Model evaluation failed: " + std::string(e.what())));
         }
 
         // Extract energy
@@ -378,19 +502,18 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         if (energy_tensor.sizes().vec() != std::vector<int64_t>{ 1, 1 })
         {
-            GMX_THROW(APIError("Model did not return a single scalar energy value."s));
+            GMX_THROW(APIError("Model did not return a single scalar energy value."));
         }
 
         // Set energy output (GROMACS sums this over ranks)
-        outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] =
-                energy_tensor.item<double>();
+        outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] = static_cast<float>(energy_tensor.item<double>());
 
         // Compute gradients
         energy_tensor.backward();
         auto grad = system->positions().grad();
 
         // Populate the outer-scoped tensor
-        forceTensor = -grad.to(torch::kCPU).to(dtype_);
+        forceTensor = -grad.to(torch::kCPU).to(data_->dtype);
     } // --- End of main rank block ---
 
 
@@ -398,7 +521,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     const size_t total = static_cast<size_t>(n_atoms) * 3;
     MPI_Comm     comm  = mpiComm_.comm();
 
-    if (dtype_ == torch::kFloat64)
+    if (data_->dtype == torch::kFloat64)
     {
         std::vector<double> global_force(total, 0.0);
         if (mpiComm_.isMainRank())
@@ -430,7 +553,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
         }
     }
-    else if (dtype_ == torch::kFloat32)
+    else if (data_->dtype == torch::kFloat32)
     {
         std::vector<float> global_force(total, 0.0f);
         if (mpiComm_.isMainRank())
@@ -471,114 +594,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     // TODO(rg): Virial calculation. For now, GROMACS will (incorrectly) calculate it from forces if
     // needed. This is the same behavior as nnpot
-}
-
-
-metatensor_torch::TensorBlock MetatomicForceProvider::computeNeighbors(metatomic_torch::NeighborListOptions request,
-                                                                       long         n_atoms,
-                                                                       const float* positions,
-                                                                       const matrix box,
-                                                                       bool         periodic)
-{
-    auto cutoff = request->engine_cutoff("nm");
-
-    VesinOptions options;
-    options.cutoff           = cutoff;
-    options.full             = request->full_list();
-    options.return_shifts    = true;
-    options.return_distances = false;
-    options.return_vectors   = true;
-
-    VesinNeighborList* vesin_neighbor_list = new VesinNeighborList();
-    // .............................. gromacs likes floats, vesin does not
-    double double_box[3][3];
-
-    for (int i = 0; i < 3; i++)
-    {
-        for (int j = 0; j < 3; j++)
-        {
-            double_box[i][j] = static_cast<double>(box[i][j]);
-        }
-    }
-
-    const size_t        total_elements = static_cast<size_t>(n_atoms) * 3;
-    std::vector<double> double_positions(total_elements);
-
-    for (size_t i = 0; i < total_elements; i++)
-    {
-        double_positions[i] = static_cast<double>(positions[i]);
-    }
-    const double* positions_ptr = double_positions.data();
-
-    VesinDevice cpu{ VesinCPU, 0 };
-    const char* error_message = nullptr;
-    int         status = vesin_neighbors(reinterpret_cast<const double (*)[3]>(positions_ptr),
-                                 static_cast<size_t>(n_atoms),
-                                 double_box,
-                                 &periodic,
-                                 cpu,
-                                 options,
-                                 vesin_neighbor_list,
-                                 &error_message);
-
-
-    if (status != EXIT_SUCCESS)
-    {
-        std::string err_str = "vesin_neighbors failed: ";
-        if (error_message)
-        {
-            err_str += error_message;
-        }
-        delete vesin_neighbor_list;
-        GMX_THROW(APIError(err_str));
-    }
-
-    auto n_pairs = static_cast<int64_t>(vesin_neighbor_list->length);
-
-    // Build samples tensor (first_atom, second_atom, cell_shifts)
-    auto pair_samples_values = torch::empty({ n_pairs, 5 }, torch::TensorOptions().dtype(torch::kInt32));
-    auto pair_samples_ptr = pair_samples_values.accessor<int32_t, 2>();
-    for (int64_t i = 0; i < n_pairs; i++)
-    {
-        pair_samples_ptr[i][0] = static_cast<int32_t>(vesin_neighbor_list->pairs[i][0]);
-        pair_samples_ptr[i][1] = static_cast<int32_t>(vesin_neighbor_list->pairs[i][1]);
-        pair_samples_ptr[i][2] = vesin_neighbor_list->shifts[i][0];
-        pair_samples_ptr[i][3] = vesin_neighbor_list->shifts[i][1];
-        pair_samples_ptr[i][4] = vesin_neighbor_list->shifts[i][2];
-    }
-
-    // Custom deleter to free vesin's memory when the torch tensor is destroyed
-    auto deleter = [=](void*)
-    {
-        vesin_free(vesin_neighbor_list);
-        delete vesin_neighbor_list;
-    };
-
-    auto pair_vectors = torch::from_blob(vesin_neighbor_list->vectors,
-                                         { n_pairs, 3, 1 },
-                                         deleter,
-                                         torch::TensorOptions().dtype(torch::kFloat64));
-    pair_vectors.to(this->dtype_);
-
-    auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{
-                    "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c" },
-            pair_samples_values.to(device_));
-
-    auto neighbor_component = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{ "xyz" },
-            torch::tensor({ 0, 1, 2 }, torch::TensorOptions().dtype(torch::kInt32).device(device_))
-                    .reshape({ 3, 1 }));
-
-    auto neighbor_properties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{ "distance" },
-            torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device_)));
-
-    return torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
-            pair_vectors.to(this->dtype_).to(this->device_),
-            neighbor_samples,
-            std::vector<metatensor_torch::Labels>{ neighbor_component },
-            neighbor_properties);
 }
 
 

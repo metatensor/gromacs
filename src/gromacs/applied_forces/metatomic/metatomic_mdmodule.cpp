@@ -185,8 +185,9 @@ public:
         }
 
         // After domain decomposition, the force provider needs to know which atoms are local.
-        const auto notifyDDFunction = [this](const MDModulesAtomsRedistributedSignal& /*signal*/)
-        { force_provider_->gatherAtomNumbersIndices(); };
+        const auto notifyDDFunction = [this](const MDModulesAtomsRedistributedSignal& /*signal*/) {
+            force_provider_->gatherAtomNumbersIndices();
+        };
         notifiers->simulationRunNotifier_.subscribe(notifyDDFunction);
     }
 
@@ -198,7 +199,8 @@ public:
         }
 
         force_provider_ = std::make_unique<MetatomicForceProvider>(
-                options_, options_.logger(), options_.mpiComm());
+                options_, options_.logger(), options_.mpiComm()
+        );
         forceProviders->addForceProvider(force_provider_.get(), "Metatomic");
     }
 

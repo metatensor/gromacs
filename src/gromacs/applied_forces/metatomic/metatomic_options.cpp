@@ -87,8 +87,8 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
 {
     // convert mtaIndices to set for faster lookup
     std::set<int> mtaIndicesSet(mtaIndices.begin(), mtaIndices.end());
-    const int     numMTAAtoms     = mtaIndices.size();
-    const int     numRegularAtoms = mtop->natoms - numMTAAtoms;
+    int numMTAAtoms = static_cast<int>(mtaIndices.size());
+    int numRegularAtoms = mtop->natoms - numMTAAtoms;
 
     GMX_LOG(logger.info)
             .appendText("Neural network potential interface is active, topology was modified!");
