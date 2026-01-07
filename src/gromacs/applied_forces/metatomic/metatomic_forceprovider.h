@@ -55,7 +55,9 @@ class MDLogger;
 class MpiComm;
 
 /*! \brief \internal
- * TODO
+ * MetatomicForceProvider class
+ *
+ * Implements the IForceProvider interface for the Metatomic force provider.
  */
 class MetatomicForceProvider final : public IForceProvider
 {
@@ -63,7 +65,11 @@ public:
     MetatomicForceProvider(const MetatomicOptions&, const MDLogger&, const MpiComm&);
     ~MetatomicForceProvider();
 
-    /*! TODO
+    /*! \brief Calculate forces for Metatomic.
+     *
+     * Prepares the input for the neural network model triggers model inference.
+     * \param[in] fInput input for force provider
+     * \param[out] fOutput output for force provider
      */
     void calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs) override;
     void updateLocalAtoms();
@@ -71,7 +77,6 @@ public:
     void gatherAtomNumbersIndices();
 
 private:
-    /// From NNPot
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
     const MpiComm&          mpiComm_;

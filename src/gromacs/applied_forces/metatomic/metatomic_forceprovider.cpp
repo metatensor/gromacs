@@ -55,6 +55,8 @@
 
 // both gromacs and torch define `DIM`, which result in a conflict. We don't
 // need either, so we undef before including headers.
+// NOTE(rg) xref:
+// https://gitlab.com/gromacs/gromacs/-/issues/5490
 #ifdef DIM
 #    undef DIM
 #endif
@@ -273,7 +275,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         data_->evaluations_options->set_length_unit("nm");
 
         auto outputs = data_->capabilities->outputs();
-        // TODO(rg): handle variants
+        // TODO(PicoCentauri): handle variants
         if (!outputs.contains("energy"))
         {
             GMX_THROW(APIError("Metatomic model must provide an 'energy' output."));

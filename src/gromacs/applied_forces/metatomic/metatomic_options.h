@@ -66,7 +66,7 @@ class LocalAtomSet;
 class MpiComm;
 
 
-//! TODO
+//!\brief \internal Data structure to store Metatomic input parameters
 struct MetatomicParameters
 {
     //! Is the metatomic force provider enabled?

@@ -87,15 +87,16 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
 {
     // convert mtaIndices to set for faster lookup
     std::set<int> mtaIndicesSet(mtaIndices.begin(), mtaIndices.end());
-    int numMTAAtoms = static_cast<int>(mtaIndices.size());
-    int numRegularAtoms = mtop->natoms - numMTAAtoms;
+    int           numMTAAtoms     = static_cast<int>(mtaIndices.size());
+    int           numRegularAtoms = mtop->natoms - numMTAAtoms;
 
     GMX_LOG(logger.info)
-            .appendText("Neural network potential interface is active, topology was modified!");
+            .appendText("Metatomic potential interface is active, topology was modified!");
     GMX_LOG(logger.info)
-            .appendTextFormatted("Number of embedded MTA atoms: %d\nNumber of regular atoms: %d\n",
-                                 numMTAAtoms,
-                                 numRegularAtoms);
+            .appendTextFormatted(
+                    "Number of embedded Metatomic atoms: %d\nNumber of regular atoms: %d\n",
+                    numMTAAtoms,
+                    numRegularAtoms);
 
     // 1) Split QM-containing molecules from other molecules in blocks
     std::vector<bool> isMTABlock = splitEmbeddedBlocks(mtop, mtaIndicesSet);
