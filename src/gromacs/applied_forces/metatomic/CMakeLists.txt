@@ -40,12 +40,11 @@ if (GMX_METATOMIC)
     gmx_add_libgromacs_sources(
         metatomic_forceprovider.cpp
     )
+if (BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 else()
     gmx_add_libgromacs_sources(
         metatomic_forceprovider_stub.cpp
     )
-endif()
-
-if (BUILD_TESTING)
-    add_subdirectory(tests)
 endif()
