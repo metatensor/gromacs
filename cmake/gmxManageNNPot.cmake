@@ -66,8 +66,20 @@ if(NOT GMX_NNPOT STREQUAL "OFF")
     mark_as_advanced(TORCH_ALREADY_SEARCHED)
 
     if(Torch_FOUND)
+        # This toggle exists anyway
+        # Filter out nvToolsExt from TORCH_LIBRARIES to prevent build failures
+        if (NOT GMX_USE_NVTX)
+        set(_filtered_torch_libs "")
         # TORCH_LIBRARIES contain imported target "torch" that will set all flags and include paths etc
-        list(APPEND GMX_COMMON_LIBRARIES ${TORCH_LIBRARIES})
+        foreach(_lib IN LISTS TORCH_LIBRARIES)
+            if(NOT _lib MATCHES "nvToolsExt")
+                list(APPEND _filtered_torch_libs "${_lib}")
+            endif()
+        endforeach()
+        endif()
+        
+        # TORCH_LIBRARIES contain imported target "torch" that will set all flags and include paths etc
+        list(APPEND GMX_COMMON_LIBRARIES ${_filtered_torch_libs})
         if(NOT FIND_TORCH_QUIETLY)
             message(STATUS "Found Torch: Neural network potential support enabled.")
         endif()
