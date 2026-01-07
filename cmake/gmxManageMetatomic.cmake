@@ -32,16 +32,73 @@
 # the research papers on the package. Check out https://www.gromacs.org.
 
 
-option(GMX_METATOMIC "Enable interface to metatomic atomistic models" OFF)
+gmx_option_multichoice(GMX_METATOMIC
+  "Enable interface to metatomic atomistic models"
+    AUTO
+    AUTO TORCH OFF
+)
 
-# if(TORCH_ALREADY_SEARCHED)
-#     set(FIND_TORCH_QUIETLY ON)
-# endif()
+if(TORCH_ALREADY_SEARCHED)
+    set(FIND_TORCH_QUIETLY ON)
+endif()
 
-if(GMX_METATOMIC)
+set(GMX_TORCH OFF)
+if(NOT GMX_METATOMIC STREQUAL "OFF")
+    # TODO(rg): try to consolidate with the managennpot
+    if(GMX_GPU_CUDA AND NOT TORCH_CUDA_ARCH_LIST)
+        set(TORCH_CUDA_ARCH_LIST)
+        foreach(_arch IN LISTS GMX_CUDA_ARCHITECTURES)
+            if(_arch MATCHES "^[0-9]+[a-z]?(-virtual)?$")
+                # Convert _arch from 75 or 75-virtual to 7.5+PTX
+                string(REGEX REPLACE "^([0-9]+)([0-9][a-z]?)(-virtual)?$" "\\1.\\2+PTX" arch_ptx "${_arch}")
+            elseif(_arch MATCHES "^[0-9]+[a-z]?-real$")
+                # Convert _arch from 75-real to 7.5
+                string(REGEX REPLACE "^([0-9]+)([0-9][a-z]?)-real$" "\\1.\\2" arch_ptx "${_arch}")
+            else()
+                message(FATAL_ERROR "Unknown CUDA architecture: ${_arch}")
+            endif()
+            set(TORCH_CUDA_ARCH_LIST "${TORCH_CUDA_ARCH_LIST} ${arch_ptx}")
+        endforeach()
+    endif()
+
     # Bring the `torch` target in scope to allow evaluation
     # of cmake generator expression from `metatensor_torch`
     find_package(Torch REQUIRED)
+    set(TORCH_ALREADY_SEARCHED TRUE CACHE BOOL "True if a search for libtorch has already been done")
+    mark_as_advanced(TORCH_ALREADY_SEARCHED)
+
+    if(Torch_FOUND)
+        # This toggle exists anyway
+        # Filter out nvToolsExt from TORCH_LIBRARIES to prevent build failures
+        if (NOT GMX_USE_NVTX)
+        set(_filtered_torch_libs "")
+        # TORCH_LIBRARIES contain imported target "torch" that will set all flags and include paths etc
+        foreach(_lib IN LISTS TORCH_LIBRARIES)
+            if(NOT _lib MATCHES "nvToolsExt")
+                list(APPEND _filtered_torch_libs "${_lib}")
+            endif()
+        endforeach()
+        endif()
+        if(NOT FIND_TORCH_QUIETLY)
+            message(STATUS "Found Torch: Metatomic potential support enabled.")
+        endif()
+
+        # Check if the Torch version uses the correct ABI
+        if (${TORCH_CXX_FLAGS} MATCHES "-D_GLIBCXX_USE_CXX11_ABI=0")
+            message(FATAL_ERROR "Torch was compiled with the pre-cxx11 ABI. Please use a libtorch version "
+                                "compiled with the cxx11 ABI, which is required for building GROMACS.")
+        endif()
+
+        set(GMX_TORCH ON)
+    elseif(GMX_METATOMIC STREQUAL "TORCH")
+        message(FATAL_ERROR "Torch not found. Please install libtorch and add its installation prefix"
+                            " to CMAKE_PREFIX_PATH or set Torch_DIR to a directory containing "
+                            "a TorchConfig.cmake or torch-config.cmake file.")
+    else() # "AUTO"
+        if(NOT FIND_TORCH_QUIETLY)
+            message(STATUS "Torch not found. Metatomic potential support will be disabled.")
+        endif()
+    endif()
 
     ################ definition of metatensor and metatomic targets ################
 
