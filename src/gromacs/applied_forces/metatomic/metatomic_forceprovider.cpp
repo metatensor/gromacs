@@ -34,7 +34,7 @@
 /*! \internal \file
  * \brief
  * Implements the Metatomic Force Provider class with proper domain decomposition support.
- * 
+ *
  * \author Metatensor developers <https://github.com/metatensor>
  * \ingroup module_applied_forces
  */
@@ -43,6 +43,7 @@
 #include "metatomic_forceprovider.h"
 
 #include <cstdint>
+
 #include <unordered_map>
 
 #include "gromacs/domdec/localatomset.h"
@@ -122,25 +123,26 @@ static torch::Device determineDevice(const MDLogger& logger, const MpiComm& mpiC
         {
             if (!torch::cuda::is_available())
             {
-                GMX_THROW(InternalError(formatString(
-                        "GMX_METATOMIC_DEVICE='%s' but no device available.", env)));
+                GMX_THROW(InternalError(
+                        formatString("GMX_METATOMIC_DEVICE='%s' but no device available.", env)));
             }
             GMX_RELEASE_ASSERT(activeDevice.has_value(), "Could not determine active device.");
             device = torch::Device(torch::kCUDA, activeDevice.value());
         }
         else if (devLC != "cpu")
         {
-            GMX_THROW(InvalidInputError(formatString(
-                    "GMX_METATOMIC_DEVICE invalid value: '%s'.", env)));
+            GMX_THROW(InvalidInputError(formatString("GMX_METATOMIC_DEVICE invalid value: '%s'.", env)));
         }
-        GMX_LOG(logger.info).asParagraph()
+        GMX_LOG(logger.info)
+                .asParagraph()
                 .appendTextFormatted("Using device from GMX_METATOMIC_DEVICE: '%s'.", env);
     }
     else
     {
         if (torch::cuda::is_available() && activeDevice.has_value())
         {
-            GMX_LOG(logger.info).asParagraph()
+            GMX_LOG(logger.info)
+                    .asParagraph()
                     .appendText("Using " + toUpperCase(torchDeviceType) + " for Metatomic.");
             device = torch::Device(torch::kCUDA, activeDevice.value());
         }
@@ -167,31 +169,42 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     return pbcTensor.to(device);
 }
 
-static metatensor_torch::TensorBlock buildNeighborListFromPairlist(
-        ArrayRef<const int>  pairlist,
-        ArrayRef<const RVec> shiftVectors,
-        torch::Device        device,
-        torch::ScalarType    dtype)
+static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int> pairlist,
+                                                                   ArrayRef<const RVec> shiftVectors,
+                                                                   ArrayRef<const RVec> positions,
+                                                                   torch::Device        device,
+                                                                   torch::ScalarType    dtype)
 {
     const int64_t n_pairs = static_cast<int64_t>(pairlist.size() / 2);
 
     auto pair_samples_values = torch::zeros({ n_pairs, 5 }, torch::TensorOptions().dtype(torch::kInt32));
     auto pair_samples_ptr = pair_samples_values.accessor<int32_t, 2>();
 
+    // Full interatomic vectors (rj - ri + shift), not just shifts.
     auto pair_vectors = torch::zeros({ n_pairs, 3, 1 }, torch::TensorOptions().dtype(torch::kFloat64));
-    auto vectors_accessor = pair_vectors.accessor<double, 3>();
+
+    auto vectors_cpu = torch::zeros({ n_pairs, 3, 1 }, torch::TensorOptions().dtype(torch::kFloat64));
+    auto vectors_accessor = vectors_cpu.accessor<double, 3>();
 
     for (int64_t i = 0; i < n_pairs; i++)
     {
-        pair_samples_ptr[i][0] = static_cast<int32_t>(pairlist[2 * i]);
-        pair_samples_ptr[i][1] = static_cast<int32_t>(pairlist[2 * i + 1]);
+        int atom_i = pairlist[2 * i];
+        int atom_j = pairlist[2 * i + 1];
+
+        pair_samples_ptr[i][0] = static_cast<int32_t>(atom_i);
+        pair_samples_ptr[i][1] = static_cast<int32_t>(atom_j);
         pair_samples_ptr[i][2] = 0;
         pair_samples_ptr[i][3] = 0;
         pair_samples_ptr[i][4] = 0;
 
-        vectors_accessor[i][0][0] = static_cast<double>(shiftVectors[i][0]);
-        vectors_accessor[i][1][0] = static_cast<double>(shiftVectors[i][1]);
-        vectors_accessor[i][2][0] = static_cast<double>(shiftVectors[i][2]);
+        // Calculate r_ij = r_j - r_i + shift
+        double r_ij_x = positions[atom_j][0] - positions[atom_i][0] + shiftVectors[i][0];
+        double r_ij_y = positions[atom_j][1] - positions[atom_i][1] + shiftVectors[i][1];
+        double r_ij_z = positions[atom_j][2] - positions[atom_i][2] + shiftVectors[i][2];
+
+        vectors_accessor[i][0][0] = r_ij_x;
+        vectors_accessor[i][1][0] = r_ij_y;
+        vectors_accessor[i][2][0] = r_ij_z;
     }
 
     auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
@@ -209,7 +222,7 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(
             torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device)));
 
     return torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
-            pair_vectors.to(dtype).to(device),
+            vectors_cpu.to(dtype).to(device),
             neighbor_samples,
             std::vector<metatensor_torch::Labels>{ neighbor_component },
             neighbor_properties);
@@ -222,9 +235,9 @@ struct MetatomicData
     metatomic_torch::ModelCapabilities capabilities;
     std::vector<metatomic_torch::NeighborListOptions> nl_requests;
     metatomic_torch::ModelEvaluationOptions           evaluations_options;
-    torch::ScalarType                                 dtype  = torch::kFloat32;
+    torch::ScalarType                                 dtype             = torch::kFloat32;
     bool                                              check_consistency = true;
-    torch::Device                                     device = torch::kCPU;
+    torch::Device                                     device            = torch::kCPU;
 };
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
@@ -303,7 +316,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             GMX_THROW(APIError("Metatomic model must provide 'energy' output."));
         }
 
-        auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
+        auto requested_output      = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
         requested_output->per_atom = false;
         requested_output->explicit_gradients = {};
 
@@ -319,7 +332,9 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     inputToLocalIndex_.resize(n_atoms, -1);
     inputToGlobalIndex_.resize(n_atoms, -1);
 
-    GMX_LOG(logger_.info).asParagraph().appendText("MetatomicForceProvider initialization complete.");
+    GMX_LOG(logger_.info)
+            .asParagraph()
+            .appendText("MetatomicForceProvider initialization complete.");
 }
 
 MetatomicForceProvider::~MetatomicForceProvider() = default;
@@ -337,8 +352,8 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     {
         GMX_RELEASE_ASSERT(signal.globalAtomIndices_.has_value(),
                            "Global atom indices required for DD.");
-        auto globalAtomIndices = signal.globalAtomIndices_.value();
-        const int numLocal = signal.x_.size();
+        auto      globalAtomIndices = signal.globalAtomIndices_.value();
+        const int numLocal          = signal.x_.size();
 
         for (int i = 0; i < static_cast<int>(globalAtomIndices.size()); i++)
         {
@@ -364,8 +379,8 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
         const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
         for (int i = 0; i < numInput; i++)
         {
-            int localIndex = mtaAtoms->localIndex()[i];
-            int globalIdx  = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
+            int localIndex         = mtaAtoms->localIndex()[i];
+            int globalIdx          = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
             inputToLocalIndex_[i]  = localIndex;
             inputToGlobalIndex_[i] = globalIdx;
             atomNumbers_[i]        = options_.params_.atoms_.atom[globalIdx].atomnumber;
@@ -425,7 +440,7 @@ void MetatomicForceProvider::preparePairlistInput()
 
         if (inputIdxA.has_value() && inputIdxB.has_value())
         {
-            RVec shift;
+            RVec       shift;
             const IVec unitShift = shiftIndexToXYZ(shiftIndex);
             mvmul_ur0(box_, unitShift.toRVec(), shift);
 
@@ -449,7 +464,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     preparePairlistInput();
 
     // Force tensor - main rank fills, others have zeros
-    torch::Tensor forceTensor = torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64));
+    torch::Tensor forceTensor =
+            torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64));
 
     if (mpiComm_.isMainRank())
     {
@@ -460,11 +476,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
         auto blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
 
-        auto torch_positions =
-                torch::from_blob(positions_.data()->as_vec(), { n_atoms, 3 }, blob_options)
-                        .to(data_->dtype)
-                        .to(data_->device)
-                        .set_requires_grad(true);
+        auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { n_atoms, 3 }, blob_options)
+                                       .to(data_->dtype)
+                                       .to(data_->device)
+                                       .set_requires_grad(true);
 
         auto torch_cell =
                 torch::from_blob(&box_, { 3, 3 }, blob_options).to(data_->dtype).to(data_->device);
@@ -480,7 +495,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         for (const auto& request : data_->nl_requests)
         {
             auto neighbors = buildNeighborListFromPairlist(
-                    pairlistForModel_, shiftVectors_, data_->device, data_->dtype);
+                    pairlistForModel_, shiftVectors_, positions_, data_->device, data_->dtype);
             metatomic_torch::register_autograd_neighbors(system, neighbors, false);
             system->add_neighbor_list(request, neighbors);
         }
@@ -508,7 +523,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 static_cast<real>(energy_tensor.item<double>());
 
         energy_tensor.backward();
-        auto grad = system->positions().grad();
+        auto grad   = system->positions().grad();
         forceTensor = -grad.to(torch::kCPU).to(torch::kFloat64);
     }
 

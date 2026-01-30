@@ -53,6 +53,12 @@
 
 #include "metatomic_forceprovider.h"
 #include "metatomic_options.h"
+#ifdef DIM
+#    undef DIM
+#endif
+
+#include <metatensor/torch.hpp>
+#include <metatomic/torch.hpp>
 
 namespace gmx
 {
@@ -171,9 +177,34 @@ public:
 
         const auto setPlainPairlistRangeFunction = [this](PlainPairlistRanges* ranges)
         {
-            // XXX: take the real cutoff..
-            float cutoff = 0.576;
-            ranges->addRange(cutoff);
+            // Temporary: Load model just to peek at cutoff.
+            // Optimization: move this to MetatomicOptions::checkNNPotModel equivalent later.
+            double req_cutoff = 0.0;
+            try
+            {
+                auto model = metatomic_torch::load_atomistic_model(options_.parameters().modelPath_);
+                auto requests = model.run_method("requested_neighbor_lists");
+                for (const auto& req : requests.toList())
+                {
+                    auto opts = req.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
+                    double c = opts->engine_cutoff("nm");
+                    if (c > req_cutoff)
+                        req_cutoff = c;
+                }
+            }
+            catch (const std::exception& e)
+            {
+                GMX_THROW(InternalError("Failed to read cutoff from model: " + std::string(e.what())));
+            }
+
+            if (req_cutoff <= 0.0)
+            {
+                // Fallback or error
+                GMX_THROW(InconsistentInputError(
+                        "Metatomic model requested 0.0 or negative cutoff."));
+            }
+
+            ranges->addRange(req_cutoff);
         };
         notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);
     }
