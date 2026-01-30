@@ -175,6 +175,7 @@ public:
      *
      * The Metatomic module subscribes to the following notifications:
      * - Atom redistribution due to domain decomposition
+     * - Changes in the neighborlist
      * by taking a const MDModulesAtomsRedistributedSignal as a parameter.
      */
     void subscribeToSimulationRunNotifications(MDModulesNotifiers* notifiers) override
@@ -185,10 +186,14 @@ public:
         }
 
         // After domain decomposition, the force provider needs to know which atoms are local.
-        const auto notifyDDFunction = [this](const MDModulesAtomsRedistributedSignal& /*signal*/) {
-            force_provider_->gatherAtomNumbersIndices();
-        };
+        const auto notifyDDFunction = [this](const MDModulesAtomsRedistributedSignal& signal)
+        { force_provider_->gatherAtomNumbersIndices(signal); };
         notifiers->simulationRunNotifier_.subscribe(notifyDDFunction);
+
+        // subscribe to pairlist construction notification
+        const auto notifyPairlistFunction = [this](const MDModulesPairlistConstructedSignal& signal)
+        { force_provider_->setPairlist(signal); };
+        notifiers->simulationRunNotifier_.subscribe(notifyPairlistFunction);
     }
 
     void initForceProviders(ForceProviders* forceProviders) override
@@ -199,8 +204,7 @@ public:
         }
 
         force_provider_ = std::make_unique<MetatomicForceProvider>(
-                options_, options_.logger(), options_.mpiComm()
-        );
+                options_, options_.logger(), options_.mpiComm());
         forceProviders->addForceProvider(force_provider_.get(), "Metatomic");
     }
 
