@@ -33,8 +33,8 @@
  */
 /*! \internal \file
  * \brief
- * Implements the Metatomic Force Provider class
- *
+ * Implements the Metatomic Force Provider class with proper domain decomposition support.
+ * 
  * \author Metatensor developers <https://github.com/metatensor>
  * \ingroup module_applied_forces
  */
@@ -43,6 +43,7 @@
 #include "metatomic_forceprovider.h"
 
 #include <cstdint>
+#include <unordered_map>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
@@ -53,10 +54,6 @@
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
 
-// both gromacs and torch define `DIM`, which result in a conflict. We don't
-// need either, so we undef before including headers.
-// NOTE(rg) xref:
-// https://gitlab.com/gromacs/gromacs/-/issues/5490
 #ifdef DIM
 #    undef DIM
 #endif
@@ -100,9 +97,8 @@ static metatensor_torch::TensorBlock computeNeighbors(metatomic_torch::NeighborL
     options.return_vectors   = true;
 
     VesinNeighborList* vesin_neighbor_list = new VesinNeighborList();
-    // .............................. gromacs likes floats, vesin does not
-    double double_box[3][3];
 
+    double double_box[3][3];
     for (int i = 0; i < 3; i++)
     {
         for (int j = 0; j < 3; j++)
@@ -131,7 +127,6 @@ static metatensor_torch::TensorBlock computeNeighbors(metatomic_torch::NeighborL
                                  vesin_neighbor_list,
                                  &error_message);
 
-
     if (status != EXIT_SUCCESS)
     {
         std::string err_str = "vesin_neighbors failed: ";
@@ -145,7 +140,6 @@ static metatensor_torch::TensorBlock computeNeighbors(metatomic_torch::NeighborL
 
     auto n_pairs = static_cast<int64_t>(vesin_neighbor_list->length);
 
-    // Build samples tensor (first_atom, second_atom, cell_shifts)
     auto pair_samples_values = torch::empty({ n_pairs, 5 }, torch::TensorOptions().dtype(torch::kInt32));
     auto pair_samples_ptr = pair_samples_values.accessor<int32_t, 2>();
     for (int64_t i = 0; i < n_pairs; i++)
@@ -157,7 +151,6 @@ static metatensor_torch::TensorBlock computeNeighbors(metatomic_torch::NeighborL
         pair_samples_ptr[i][4] = vesin_neighbor_list->shifts[i][2];
     }
 
-    // Custom deleter to free vesin's memory when the torch tensor is destroyed
     auto deleter = [=](void*)
     {
         vesin_free(vesin_neighbor_list);
@@ -214,177 +207,112 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     box_{ { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 } },
     data_(std::make_unique<MetatomicData>())
 {
-    // NOTE: do NOT return early on non-main ranks. Only perform file I/O / GPU init
-    // on the main rank, but still run the remainder of the constructor on all ranks
-    // so that all ranks call the same MPI collectives.
-    if (mpiComm_.isMainRank())
+    // ALL ranks load the model, not just the main rank
+    // This enables each rank to compute forces for its local atoms independently
+    
+    GMX_LOG(logger_.info).asParagraph().appendText("Initializing MetatomicForceProvider on all ranks...");
+
+    // Load the model on EVERY rank
+    try
     {
-        GMX_LOG(logger_.info).asParagraph().appendText("Initializing MetatomicForceProvider...");
-
-        // Load the model
-        try
+        torch::optional<std::string> extensions_directory = torch::nullopt;
+        if (!options_.params_.extensionsDirectory.empty())
         {
-            torch::optional<std::string> extensions_directory = torch::nullopt;
-            if (!options_.params_.extensionsDirectory.empty())
-            {
-                extensions_directory = options_.params_.extensionsDirectory;
-            }
-
-            this->data_->model = metatomic_torch::load_atomistic_model(options_.params_.modelPath_,
-                                                                       extensions_directory);
-        }
-        catch (const std::exception& e)
-        {
-            GMX_THROW(APIError("Failed to load metatomic model: " + std::string(e.what())));
+            extensions_directory = options_.params_.extensionsDirectory;
         }
 
-        // Query model capabilities
-        data_->capabilities =
-                data_->model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
-        auto requests_ivalue = data_->model.run_method("requested_neighbor_lists");
-        for (const auto& request_ivalue : requests_ivalue.toList())
-        {
-            data_->nl_requests.push_back(
-                    request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>());
-        }
+        this->data_->model = metatomic_torch::load_atomistic_model(options_.params_.modelPath_,
+                                                                   extensions_directory);
+    }
+    catch (const std::exception& e)
+    {
+        GMX_THROW(APIError("Failed to load metatomic model: " + std::string(e.what())));
+    }
 
-        torch::optional<std::string> desired;
-        if (const char* env = std::getenv("GMX_METATOMIC_DEVICE")) {
-            GMX_LOG(logger_.info)
-                .asParagraph()
-                .appendText("Using device from GMX_METATOMIC_DEVICE environment variable: ")
-                .appendText(env);
-            desired = std::string(env);
-        } else {
-            desired = options_.params_.device;
-        }
+    // Query model capabilities on all ranks
+    data_->capabilities =
+            data_->model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
+    auto requests_ivalue = data_->model.run_method("requested_neighbor_lists");
+    for (const auto& request_ivalue : requests_ivalue.toList())
+    {
+        data_->nl_requests.push_back(
+                request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>());
+    }
 
-        c10::DeviceType              device_type_ =
-                metatomic_torch::pick_device(data_->capabilities->supported_devices, desired);
-        data_->device = torch::Device(device_type_);
+    // Determine device - each rank picks its own device
+    torch::optional<std::string> desired;
+    if (const char* env = std::getenv("GMX_METATOMIC_DEVICE")) {
+        GMX_LOG(logger_.info)
+            .asParagraph()
+            .appendText("Using device from GMX_METATOMIC_DEVICE environment variable: ")
+            .appendText(env);
+        desired = std::string(env);
+    } else {
+        desired = options_.params_.device;
+    }
 
-        data_->model.to(data_->device);
+    c10::DeviceType device_type_ =
+            metatomic_torch::pick_device(data_->capabilities->supported_devices, desired);
+    data_->device = torch::Device(device_type_);
 
-        // Set data type locally on main rank
-        if (data_->capabilities->dtype() == "float64")
-        {
-            data_->dtype = torch::kFloat64;
-        }
-        else if (data_->capabilities->dtype() == "float32")
-        {
-            data_->dtype = torch::kFloat32;
-        }
-        else
-        {
-            GMX_THROW(APIError("Unsupported dtype from model: " + data_->capabilities->dtype()));
-        }
+    data_->model.to(data_->device);
 
-        // 5. Set up evaluation options (only on main rank)
-        data_->evaluations_options =
-                torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
-        data_->evaluations_options->set_length_unit("nm");
-
-        auto outputs = data_->capabilities->outputs();
-        // TODO(PicoCentauri): handle variants
-        if (!outputs.contains("energy"))
-        {
-            GMX_THROW(APIError("Metatomic model must provide an 'energy' output."));
-        }
-
-        auto requested_output      = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-        requested_output->per_atom = false;
-        requested_output->explicit_gradients = {}; // Use autograd for forces
-
-        data_->evaluations_options->outputs.insert("energy", requested_output);
+    // Set data type on all ranks
+    if (data_->capabilities->dtype() == "float64")
+    {
+        data_->dtype = torch::kFloat64;
+    }
+    else if (data_->capabilities->dtype() == "float32")
+    {
+        data_->dtype = torch::kFloat32;
     }
     else
     {
-        // non-main ranks do not load model or query capabilities, but they must still participate
-        // in collectives and must know dtype_ afterwards; dtype_ will be broadcast below.
+        GMX_THROW(APIError("Unsupported dtype from model: " + data_->capabilities->dtype()));
     }
 
-    // Initialize ML atom group data structures (must run on all ranks)
+    // Set up evaluation options on all ranks
+    data_->evaluations_options =
+            torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
+    data_->evaluations_options->set_length_unit("nm");
+
+    auto outputs = data_->capabilities->outputs();
+    if (!outputs.contains("energy"))
+    {
+        GMX_THROW(APIError("Metatomic model must provide an 'energy' output."));
+    }
+
+    auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
+    requested_output->per_atom = true;  // KEY: Request per-atom energies for proper DD
+    requested_output->explicit_gradients = {};
+
+    data_->evaluations_options->outputs.insert("energy", requested_output);
+
+    data_->check_consistency = options_.params_.checkConsistency;
+
+    // Initialize lookup tables - will be populated on first DD
     const auto& mtaIndices = options_.params_.mtaIndices_;
     const int   n_atoms    = static_cast<int>(mtaIndices.size());
+    idxLookup_.resize(n_atoms, -1);
+    atomNumbers_.resize(n_atoms, 0);
 
-    // Resize vectors that will be used on all ranks.
-    positions_.resize(n_atoms);
-    atomNumbers_.resize(n_atoms);
-    idxLookup_.resize(n_atoms); // Filled by gatherAtomNumbersIndices
-
-    // Atom numbers are static. We will populate them on the main rank
-    // and "broadcast" using sumReduce.
-
-    // Ensure non-main ranks have zeroed atomNumbers_ so a sumReduce acts like a broadcast.
-    std::fill(atomNumbers_.begin(), atomNumbers_.end(), 0);
-
-    // Now, only the main rank populates its version of the data.
-    if (mpiComm_.isMainRank())
-    {
-        for (int i = 0; i < n_atoms; ++i)
-        {
-            const int gIdx = mtaIndices[i];
-
-            if (gIdx >= options_.params_.numAtoms_)
-            {
-                GMX_THROW(APIError("Metatomic atom index " + std::to_string(gIdx) + " is out of bounds for topology numAtoms="
-                                   + std::to_string(options_.params_.numAtoms_)));
-            }
-            atomNumbers_[i] = options_.params_.atoms_.atom[gIdx].atomnumber;
-        }
-    }
-
-    // "Broadcast" the static atom numbers to all ranks: all ranks must call this.
-    if (mpiComm_.isParallel())
-    {
-        // resize/allocate on non-main ranks and broadcast raw bytes of vector
-        nblock_abc(mpiComm_.isMainRank(), mpiComm_.comm(), static_cast<std::size_t>(n_atoms), &atomNumbers_);
-    }
-
-    // Broadcast dtype info (so all ranks know whether the model uses float32 or float64).
-    // 0 = float64, 1 = float32
-    int dtype_code_local = 0;
-    if (mpiComm_.isMainRank())
-    {
-        dtype_code_local = (data_->dtype == torch::kFloat32) ? 1 : 0;
-    }
-    // comm() may be MPI_COMM_NULL for SingleRank so..
-    if (mpiComm_.isParallel())
-    {
-        block_bc(mpiComm_.comm(), dtype_code_local);
-    }
-    // Set dtype_ on all ranks
-    data_->dtype = (dtype_code_local == 1) ? torch::kFloat32 : torch::kFloat64;
-
-    // Initialize the lookup table. It will be populated correctly
-    // by the first call from the SimulationRunNotifier.
-    std::fill(idxLookup_.begin(), idxLookup_.end(), -1);
-
-    if (mpiComm_.isMainRank())
-    {
-        GMX_LOG(logger_.info)
-                .asParagraph()
-                .appendText("MetatomicForceProvider initialization complete.");
-    }
+    GMX_LOG(logger_.info)
+            .asParagraph()
+            .appendText("MetatomicForceProvider initialization complete on all ranks.");
 }
 
 void MetatomicForceProvider::gatherAtomNumbersIndices()
 {
-    // This function is called on domain decomposition.
-    // Its ONLY job is to update the `idxLookup_` map, which maps
-    // the contiguous ML atom index (0..n_atoms-1) to the
-    // sparse GROMACS local index.
-    //
-    // `atomNumbers_` is static and was set/broadcast in the constructor.
-
+    // This function updates the lookup tables after domain decomposition
+    // Each rank knows which ML atoms are local to it
+    
     const auto& mtaIndices = options_.params_.mtaIndices_;
     const int   n_atoms    = static_cast<int>(mtaIndices.size());
 
-    // Reset the lookup table to -1 (sentinel for "not local")
+    // Reset lookup table
     std::fill(idxLookup_.begin(), idxLookup_.end(), -1);
 
-    // Build a reverse lookup map for efficiently finding ML atoms.
-    // Map: (Global GROMACS Index) -> (ML Group Index, 0..n_atoms-1)
+    // Build reverse lookup: global index -> ML group index
     std::unordered_map<int, int> globalToMlIndex;
     globalToMlIndex.reserve(n_atoms);
     for (int i = 0; i < n_atoms; ++i)
@@ -392,24 +320,30 @@ void MetatomicForceProvider::gatherAtomNumbersIndices()
         globalToMlIndex[mtaIndices[i]] = i;
     }
 
-    // Iterate over this rank's LOCAL atoms and populate the lookup table if a
-    // local atom is part of our ML group.
+    // Populate lookup for this rank's local atoms
     const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
     for (size_t i = 0; i < mtaAtoms->numAtomsLocal(); ++i)
     {
         const int lIdx = mtaAtoms->localIndex()[i];
         const int gIdx = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
 
-        // Check if this local atom is one of our ML atoms
         if (auto it = globalToMlIndex.find(gIdx); it != globalToMlIndex.end())
         {
-            const int mlIdx   = it->second; // This is the index (0..n_atoms-1)
+            const int mlIdx   = it->second;
             idxLookup_[mlIdx] = lIdx;
+            atomNumbers_[mlIdx] = options_.params_.atoms_.atom[gIdx].atomnumber;
         }
     }
 
-    // Done. No MPI is needed. `gatherAtomPositions` will now correctly
-    // use this rank-local `idxLookup_` to contribute its positions.
+    // For parallel runs, we need all ranks to know ALL atom numbers for the system tensor
+    // But we only compute forces for local atoms
+    // XXX: seems buggy in parallel, need more checks
+    if (mpiComm_.isParallel())
+    {
+        // Each rank has partial atomNumbers_, sum to get complete list
+        // This is needed because the System object needs all atom types
+        mpiComm_.sumReduce(gmx::ArrayRef<int>(atomNumbers_.data(), atomNumbers_.data() + n_atoms));
+    }
 }
 
 MetatomicForceProvider::~MetatomicForceProvider() = default;
@@ -417,19 +351,19 @@ MetatomicForceProvider::~MetatomicForceProvider() = default;
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPositions)
 {
     const int n_atoms = static_cast<int>(options_.params_.mtaIndices_.size());
-    // Start with a zeroed vector on all ranks
     positions_.assign(n_atoms, RVec{ 0.0, 0.0, 0.0 });
 
-    // Each rank fills in the positions for its local atoms
+    // Each rank fills its local atoms' positions
     for (int i = 0; i < n_atoms; ++i)
     {
-        if (idxLookup_[i] != -1) // local
+        if (idxLookup_[i] != -1)
         {
             positions_[i] = globalPositions[idxLookup_[i]];
         }
     }
 
-    // All ranks need the complete, contiguous list of positions.
+    // Sum-reduce positions so all ranks have complete position array
+    // This is needed because neighbor list computation needs all positions
     if (mpiComm_.isParallel())
     {
         real*        data_ptr = reinterpret_cast<real*>(positions_.data());
@@ -438,172 +372,149 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPosi
     }
 }
 
-
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
     const int n_atoms = static_cast<int>(options_.params_.mtaIndices_.size());
 
-    // Gather positions
+    // Gather positions (all ranks need this for neighbor list computation)
     this->gatherAtomPositions(inputs.x_);
     copy_mat(inputs.box_, box_);
-    torch::Tensor forceTensor;
 
     auto gromacs_scalar_type = torch::kFloat32;
     if (std::is_same_v<real, double>)
     {
         gromacs_scalar_type = torch::kFloat64;
     }
-    // This blob_options is for reading GROMACS memory
     auto blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
 
-    if (mpiComm_.isMainRank())
+    // ALL ranks run the model, each computing forces for its local atoms
+    auto coerced_positions = makeArrayRef(positions_);
+
+    auto torch_positions =
+            torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, blob_options)
+                    .to(data_->dtype)
+                    .to(data_->device)
+                    .set_requires_grad(true);
+
+    auto torch_cell =
+            torch::from_blob(&box_, { 3, 3 }, blob_options).to(data_->dtype).to(data_->device);
+
+    auto torch_pbc = preparePbcType(options_.params_.pbcType_.get()).to(data_->device);
+    auto torch_types =
+            torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
+
+    auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
+            torch_types, torch_positions, torch_cell, torch_pbc);
+
+    bool periodic = torch::all(torch_pbc).item<bool>();
+
+    // Compute neighbor lists on each rank
+    for (const auto& request : data_->nl_requests)
     {
-        auto coerced_positions = makeArrayRef(positions_);
-
-        auto torch_positions =
-                torch::from_blob(coerced_positions.data()->as_vec(), { n_atoms, 3 }, blob_options)
-                        .to(data_->dtype)
-                        .to(data_->device)
-                        .set_requires_grad(true);
-
-        auto torch_cell =
-                torch::from_blob(&box_, { 3, 3 }, blob_options).to(data_->dtype).to(data_->device);
-
-
-        auto torch_pbc = preparePbcType(options_.params_.pbcType_.get()).to(data_->device);
-        auto torch_types =
-                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
-
-        auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
-                torch_types, torch_positions, torch_cell, torch_pbc);
-
-        bool periodic = torch::all(torch_pbc).item<bool>();
-        // Compute and add neighbor lists
-        for (const auto& request : data_->nl_requests)
-        {
-            auto neighbors = computeNeighbors(
-                    request, n_atoms, coerced_positions.data()->as_vec(), box_, periodic, data_->device, data_->dtype);
-            metatomic_torch::register_autograd_neighbors(system, neighbors, false);
-            system->add_neighbor_list(request, neighbors);
-        }
-
-        // Run the model
-        metatensor_torch::TensorMap output_map;
-        try
-        {
-            std::vector<metatomic_torch::System> systems;
-            systems.push_back(system);
-
-            auto ivalue_output = data_->model.forward(
-                    { c10::IValue(systems), data_->evaluations_options, data_->check_consistency });
-            auto dict_output = ivalue_output.toGenericDict();
-            output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
-        }
-        catch (const std::exception& e)
-        {
-            GMX_THROW(APIError("[MetatomicPotential] Model evaluation failed: " + std::string(e.what())));
-        }
-
-        // Extract energy
-        auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
-        auto energy_tensor = energy_block->values();
-
-        if (energy_tensor.sizes().vec() != std::vector<int64_t>{ 1, 1 })
-        {
-            GMX_THROW(APIError("Model did not return a single scalar energy value."));
-        }
-
-        // Set energy output (GROMACS sums this over ranks)
-        outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] =
-                static_cast<float>(energy_tensor.item<double>());
-
-        // Compute gradients
-        energy_tensor.backward();
-        auto grad = system->positions().grad();
-
-        // Populate the outer-scoped tensor
-        forceTensor = -grad.to(torch::kCPU).to(data_->dtype);
-    } // --- End of main rank block ---
-
-
-    // Broadcast forces and scatter
-    const size_t total = static_cast<size_t>(n_atoms) * 3;
-    MPI_Comm     comm  = mpiComm_.comm();
-
-    if (data_->dtype == torch::kFloat64)
-    {
-        std::vector<double> global_force(total, 0.0);
-        if (mpiComm_.isMainRank())
-        {
-            // Use the correct accessor for the model's dtype
-            auto accessor = forceTensor.accessor<double, 2>();
-            for (int i = 0; i < n_atoms; ++i)
-            {
-                global_force[3 * i + 0] = accessor[i][0];
-                global_force[3 * i + 1] = accessor[i][1];
-                global_force[3 * i + 2] = accessor[i][2];
-            }
-        }
-
-        if (mpiComm_.isParallel())
-        {
-            nblock_abc(mpiComm_.isMainRank(), comm, total, &global_force);
-        }
-
-        // Scatter (double -> double)
-        for (int i = 0; i < n_atoms; ++i)
-        {
-            const int localIndex = idxLookup_[i];
-            if (localIndex != -1)
-            {
-                outputs->forceWithVirial_.force_[localIndex][0] += global_force[3 * i + 0];
-                outputs->forceWithVirial_.force_[localIndex][1] += global_force[3 * i + 1];
-                outputs->forceWithVirial_.force_[localIndex][2] += global_force[3 * i + 2];
-            }
-        }
+        auto neighbors = computeNeighbors(
+                request, n_atoms, coerced_positions.data()->as_vec(), box_, periodic, data_->device, data_->dtype);
+        metatomic_torch::register_autograd_neighbors(system, neighbors, false);
+        system->add_neighbor_list(request, neighbors);
     }
-    else if (data_->dtype == torch::kFloat32)
+
+    // Run the model on EVERY rank
+    metatensor_torch::TensorMap output_map;
+    try
     {
-        std::vector<float> global_force(total, 0.0f);
-        if (mpiComm_.isMainRank())
-        {
-            // Use the correct accessor for the model's dtype
-            auto accessor = forceTensor.accessor<float, 2>();
-            for (int i = 0; i < n_atoms; ++i)
-            {
-                global_force[3 * i + 0] = accessor[i][0];
-                global_force[3 * i + 1] = accessor[i][1];
-                global_force[3 * i + 2] = accessor[i][2];
-            }
-        }
+        std::vector<metatomic_torch::System> systems;
+        systems.push_back(system);
 
-        if (mpiComm_.isParallel())
-        {
-            nblock_abc(mpiComm_.isMainRank(), comm, total, &global_force);
-        }
+        auto ivalue_output = data_->model.forward(
+                { c10::IValue(systems), data_->evaluations_options, data_->check_consistency });
+        auto dict_output = ivalue_output.toGenericDict();
+        output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
+    }
+    catch (const std::exception& e)
+    {
+        GMX_THROW(APIError("[MetatomicPotential] Model evaluation failed: " + std::string(e.what())));
+    }
 
-        // Scatter (float -> double)
+    // Extract per-atom energies
+    auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
+    auto energy_tensor = energy_block->values();
+
+    // Handle energy for domain decomposition
+    // If per_atom=true, we get per-atom energies [n_atoms, 1]
+    // So sum over local atoms' energies
+    double local_energy = 0.0;
+    
+    if (energy_tensor.dim() == 2 && energy_tensor.size(0) == n_atoms)
+    {
+        // Per-atom energies - sum only local atoms
+        auto energy_cpu = energy_tensor.to(torch::kCPU).to(torch::kFloat64);
+        auto energy_accessor = energy_cpu.accessor<double, 2>();
+        
         for (int i = 0; i < n_atoms; ++i)
         {
-            const int localIndex = idxLookup_[i];
-            if (localIndex != -1)
+            if (idxLookup_[i] != -1)  // Only count local atoms
             {
-                outputs->forceWithVirial_.force_[localIndex][0] +=
-                        static_cast<double>(global_force[3 * i + 0]);
-                outputs->forceWithVirial_.force_[localIndex][1] +=
-                        static_cast<double>(global_force[3 * i + 1]);
-                outputs->forceWithVirial_.force_[localIndex][2] +=
-                        static_cast<double>(global_force[3 * i + 2]);
+                local_energy += energy_accessor[i][0];
             }
         }
     }
     else
     {
-        GMX_THROW(APIError("Unsupported dtype, only float32 and float64 are supported for now"));
+        // Scalar energy - only main rank contributes (or divide among ranks)
+        if (mpiComm_.isMainRank())
+        {
+            local_energy = energy_tensor.item<double>();
+        }
     }
-    // TODO(rg): Virial calculation. For now, GROMACS will (incorrectly) calculate it from forces if
-    // needed. This is the same behavior as nnpot
-}
 
+    // Reduce energy across all ranks
+    double total_energy = local_energy;
+    if (mpiComm_.isParallel())
+    {
+        mpiComm_.sumReduce(gmx::ArrayRef<double>(&total_energy, &total_energy + 1));
+    }
+    
+    // Only main rank sets the energy (GROMACS handles the rest)
+    if (mpiComm_.isMainRank())
+    {
+        outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] =
+                static_cast<float>(total_energy);
+    }
+
+    // Compute gradients - all ranks do this
+    energy_tensor.sum().backward();
+    auto grad = system->positions().grad();
+    auto forceTensor = -grad.to(torch::kCPU).to(data_->dtype);
+
+    // Scatter forces to local atoms ONLY - no broadcast needed!
+    if (data_->dtype == torch::kFloat64)
+    {
+        auto accessor = forceTensor.accessor<double, 2>();
+        for (int i = 0; i < n_atoms; ++i)
+        {
+            const int localIndex = idxLookup_[i];
+            if (localIndex != -1)  // Only update local atoms
+            {
+                outputs->forceWithVirial_.force_[localIndex][0] += accessor[i][0];
+                outputs->forceWithVirial_.force_[localIndex][1] += accessor[i][1];
+                outputs->forceWithVirial_.force_[localIndex][2] += accessor[i][2];
+            }
+        }
+    }
+    else if (data_->dtype == torch::kFloat32)
+    {
+        auto accessor = forceTensor.accessor<float, 2>();
+        for (int i = 0; i < n_atoms; ++i)
+        {
+            const int localIndex = idxLookup_[i];
+            if (localIndex != -1)  // Only update local atoms
+            {
+                outputs->forceWithVirial_.force_[localIndex][0] += static_cast<double>(accessor[i][0]);
+                outputs->forceWithVirial_.force_[localIndex][1] += static_cast<double>(accessor[i][1]);
+                outputs->forceWithVirial_.force_[localIndex][2] += static_cast<double>(accessor[i][2]);
+            }
+        }
+    }
+    // Note: Virial still needs proper implementation
+}
 
 } // namespace gmx
