@@ -111,9 +111,6 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
     set(METATOMIC_TORCH_VERSION "0.1.7")
     set(METATOMIC_TORCH_SHA256 "726f5711b70c4b8cc80d9bc6c3ce6f3449f31d20acc644ab68dab083aa4ea572")
 
-    set(VESIN_VERSION "0.4.1")
-    set(VESIN_GIT_TAG "87dcad999fec47b29ab21be9662ef283edc7530b")
-
     set(DOWNLOAD_METATENSOR_DEFAULT ON)
     find_package(metatensor_torch ${METATENSOR_TORCH_VERSION} QUIET)
     if (metatensor_torch_FOUND)
@@ -168,23 +165,7 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
         find_package(metatomic_torch REQUIRED ${METATOMIC_TORCH_VERSION})
     endif()
 
-    # always fetch vesin
-    FetchContent_Declare(
-        vesin
-        GIT_REPOSITORY https://github.com/Luthaf/vesin.git
-        GIT_TAG ${VESIN_GIT_TAG}
-    )
-
-    FetchContent_MakeAvailable(vesin)
-    install(TARGETS vesin EXPORT libgromacs
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    )
-
     list(APPEND GMX_COMMON_LIBRARIES
-        vesin
         metatensor
         metatomic_torch
         metatensor_torch

@@ -3,6 +3,6 @@
 <ReferenceData>
   <String Name="Mdp output">
 ; Machine learning potential using metatomic
-metatomic-active             = false
+metatomic-active         = false
 </String>
 </ReferenceData>
