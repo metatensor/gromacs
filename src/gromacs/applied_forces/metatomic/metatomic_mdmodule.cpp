@@ -47,6 +47,7 @@
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/domdec/localatomsetmanager.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
+#include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/imdmodule.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 
@@ -167,6 +168,14 @@ public:
                 [](MDModulesEnergyOutputToMetatomicPotRequestChecker* energyOutputRequest)
         { energyOutputRequest->energyOutputToMetatomicPot_ = true; };
         notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
+
+        const auto setPlainPairlistRangeFunction = [this](PlainPairlistRanges* ranges)
+        {
+            // XXX: take the real cutoff..
+            float cutoff = 0.576;
+            ranges->addRange(cutoff);
+        };
+        notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);
     }
 
     /*! \brief Requests to be notified during the simulation.
