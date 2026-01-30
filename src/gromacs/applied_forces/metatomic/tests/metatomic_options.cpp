@@ -34,9 +34,9 @@
  */
 /*! \internal \file
  * \brief
- * Tests for functionality of the NNPotOptions
+ * Tests for functionality of the MetatomicOptions
  *
- * \author Lukas Müllender <lukas.muellender@gmail.com>
+ * \author Metatensor developers <https://github.com/metatensor>
  * \ingroup module_applied_forces
  */
 
