@@ -298,6 +298,11 @@ EnergyOutput::EnergyOutput(ener_file*                fp_ene,
     bEner_[InteractionFunction::NeuralNetworkPotentialEnergy] =
             mdModulesAddOutputToNNPotFieldRequest.energyOutputToNNPot_;
 
+    MDModulesEnergyOutputToMetatomicPotRequestChecker mdModulesAddOutputToMetatomicPotFieldRequest;
+    mdModulesNotifiers.simulationSetupNotifier_.notify(&mdModulesAddOutputToMetatomicPotFieldRequest);
+
+    bEner_[InteractionFunction::MetatomicPotentialEnergy] = mdModulesAddOutputToMetatomicPotFieldRequest.energyOutputToMetatomicPot_;
+
     // Counting the energy terms that will be printed and saving their names
     f_nre_ = 0;
     for (const auto i : gmx::EnumerationWrapper<InteractionFunction>{})

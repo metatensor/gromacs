@@ -625,7 +625,7 @@ if (GMX_HWLOC)
     if (HWLOC_FIND_QUIETLY_AFTER_FIRST_RUN)
         set(HWLOC_FIND_QUIETLY TRUE)
     endif()
-    find_package(HWLOC 1.5) 
+    find_package(HWLOC 1.5)
 
     if (HWLOC_FOUND)
         if (HWLOC_LIBRARIES MATCHES ".a$")
@@ -841,6 +841,12 @@ include(gmxManageNvshmem)
 #Process NNPot settings (do it after our GPU detection)
 ########################################################################
 include(gmxManageNNPot)
+
+
+########################################################################
+# Process metatomic settings
+########################################################################
+include(gmxManageMetatomic)
 
 if(WIN32)
     set(GMX_NATIVE_WINDOWS 1)

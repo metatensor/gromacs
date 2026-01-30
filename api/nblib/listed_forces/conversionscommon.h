@@ -156,6 +156,7 @@ using GmxToNblibMapping =
                    Unimplemented, //    InteractionFunction::DensityFitting,
                    Unimplemented, //    InteractionFunction::QuantumMechanicalRegionEnergy,
                    Unimplemented, //    InteractionFunction::NeuralNetworkPotentialEnergy,
+                   Unimplemented, //    InteractionFunction::MetatomicPotentialEnergy,
                    Unimplemented, //    InteractionFunction::PotentialEnergy,
                    Unimplemented, //    InteractionFunction::KineticEnergy,
                    Unimplemented, //    InteractionFunction::TotalEnergy,
