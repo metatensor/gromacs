@@ -248,7 +248,17 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                     request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>());
         }
 
-        torch::optional<std::string> desired = options_.params_.device;
+        torch::optional<std::string> desired;
+        if (const char* env = std::getenv("GMX_METATOMIC_DEVICE")) {
+            GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendText("Using device from GMX_METATOMIC_DEVICE environment variable: ")
+                .appendText(env);
+            desired = std::string(env);
+        } else {
+            desired = options_.params_.device;
+        }
+
         c10::DeviceType              device_type_ =
                 metatomic_torch::pick_device(data_->capabilities->supported_devices, desired);
         data_->device = torch::Device(device_type_);
