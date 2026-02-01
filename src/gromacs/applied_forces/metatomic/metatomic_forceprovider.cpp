@@ -59,7 +59,7 @@
 #include "gromacs/utility/stringutil.h"
 
 #ifdef DIM
-#    undef DIM
+#undef DIM
 #endif
 
 #include <metatensor/torch.hpp>
@@ -471,6 +471,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     torch::Tensor forceTensor =
             torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64));
 
+    // Virial tensor for pressure/stress calculations
+    torch::Tensor virialTensor = torch::zeros({ 3, 3 }, torch::TensorOptions().dtype(torch::kFloat64));
+
     if (mpiComm_.isMainRank())
     {
         auto gromacs_scalar_type = torch::kFloat32;
@@ -488,12 +491,19 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto torch_cell =
                 torch::from_blob(&box_, { 3, 3 }, blob_options).to(data_->dtype).to(data_->device);
 
+        // Create strain tensor for virial computation (like LAMMPS does)
+        auto strain = torch::eye(
+                3, torch::TensorOptions().dtype(data_->dtype).device(data_->device).requires_grad(true));
+
+        // Apply strain to cell: strained_cell = cell @ strain
+        auto strained_cell = torch::matmul(torch_cell, strain);
+
         auto torch_pbc = preparePbcType(options_.params_.pbcType_.get(), data_->device);
         auto torch_types =
                 torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
-                torch_types, torch_positions, torch_cell, torch_pbc);
+                torch_types, torch_positions, strained_cell, torch_pbc);
 
         // Build neighbor list from GROMACS pairlist
         for (const auto& request : data_->nl_requests)
@@ -526,18 +536,28 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] =
                 static_cast<real>(energy_tensor.item<double>());
 
-        energy_tensor.backward();
-        auto grad   = system->positions().grad();
-        forceTensor = -grad.to(torch::kCPU).to(torch::kFloat64);
+        // Reset gradients before backward
+        torch_positions.mutable_grad() = torch::Tensor();
+        strain.mutable_grad()          = torch::Tensor();
+
+        // Compute forces and virial via backward propagation
+        energy_tensor.backward(-torch::ones_like(energy_tensor));
+
+        auto grad   = torch_positions.grad();
+        forceTensor = grad.to(torch::kCPU).to(torch::kFloat64);
+
+        // Get virial from strain gradient
+        virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
     }
 
     // Distribute forces (sumReduce acts as broadcast since non-main ranks have zeros)
     if (mpiComm_.isParallel())
     {
         mpiComm_.sumReduce(n_atoms * 3, static_cast<double*>(forceTensor.data_ptr()));
+        mpiComm_.sumReduce(9, static_cast<double*>(virialTensor.data_ptr()));
     }
 
-    // Apply to local atoms only
+    // Apply forces to local atoms only
     auto forceAccessor = forceTensor.accessor<double, 2>();
     for (int i = 0; i < n_atoms; ++i)
     {
@@ -546,6 +566,17 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             outputs->forceWithVirial_.force_[inputToLocalIndex_[i]][0] += forceAccessor[i][0];
             outputs->forceWithVirial_.force_[inputToLocalIndex_[i]][1] += forceAccessor[i][1];
             outputs->forceWithVirial_.force_[inputToLocalIndex_[i]][2] += forceAccessor[i][2];
+        }
+    }
+
+    // Apply virial contribution
+    // GROMACS uses a 3x3 virial tensor in forceWithVirial_
+    auto virialAccessor = virialTensor.accessor<double, 2>();
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
+            outputs->forceWithVirial_.virial_[i][j] += virialAccessor[i][j];
         }
     }
 }
