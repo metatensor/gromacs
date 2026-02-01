@@ -65,6 +65,10 @@
 #include <metatensor/torch.hpp>
 #include <metatomic/torch.hpp>
 
+#if GMX_GPU_CUDA || (GMX_SYCL_ACPP && GMX_ACPP_HAVE_CUDA_TARGET)
+#include <cuda_runtime.h>
+#endif
+
 
 namespace gmx
 {
