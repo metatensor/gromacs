@@ -497,13 +497,15 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         // Apply strain to cell: strained_cell = cell @ strain
         auto strained_cell = torch::matmul(torch_cell, strain);
+        // Apply strain to positions: r' = r @ strain
+        auto strained_positions = torch::matmul(torch_positions, strain);
 
         auto torch_pbc = preparePbcType(options_.params_.pbcType_.get(), data_->device);
         auto torch_types =
                 torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
-                torch_types, torch_positions, strained_cell, torch_pbc);
+                torch_types, strained_positions, strained_cell, torch_pbc);
 
         // Build neighbor list from GROMACS pairlist
         for (const auto& request : data_->nl_requests)
