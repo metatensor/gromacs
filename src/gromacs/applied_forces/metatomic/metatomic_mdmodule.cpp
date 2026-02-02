@@ -49,6 +49,7 @@
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/imdmodule.h"
+#include "gromacs/utility/basenetwork.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 
 #include "metatomic_forceprovider.h"
@@ -56,6 +57,8 @@
 #ifdef DIM
 #    undef DIM
 #endif
+
+#include <cmath>
 
 #include <metatensor/torch.hpp>
 #include <metatomic/torch.hpp>
@@ -178,18 +181,41 @@ public:
         const auto setPlainPairlistRangeFunction = [this](PlainPairlistRanges* ranges)
         {
             // Temporary: Load model just to peek at cutoff.
-            // Optimization: move this to MetatomicOptions::checkNNPotModel equivalent later.
-            double req_cutoff = 0.0;
+            // TODO: can the whole model be loaded earlier..? 
+            double max_cutoff{ 0.0 };
             try
             {
                 auto model = metatomic_torch::load_atomistic_model(options_.parameters().modelPath_);
-                auto requests = model.run_method("requested_neighbor_lists");
-                for (const auto& req : requests.toList())
+                auto capabilities =
+                        model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
+                double interaction_range = capabilities->engine_interaction_range("nm");
+                if (interaction_range < 0.0)
                 {
-                    auto opts = req.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
-                    double c = opts->engine_cutoff("nm");
-                    if (c > req_cutoff)
-                        req_cutoff = c;
+                    GMX_THROW(InconsistentInputError(
+                            "interaction_range is negative for this model."));
+                }
+
+                if (!std::isfinite(interaction_range))
+                {
+                    if (gmx_node_num() > 1)
+                    {
+                        GMX_THROW(NotImplementedError(
+                                "interaction_range is infinite for this model; "
+                                "using multiple MPI domains is not supported."));
+                    }
+
+                    auto requested_nl = model.run_method("requested_neighbor_lists");
+                    for (const auto& ivalue : requested_nl.toList())
+                    {
+                        auto options =
+                                ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
+                        double cutoff = options->engine_cutoff("nm");
+                        max_cutoff    = std::max(max_cutoff, cutoff);
+                    }
+                }
+                else
+                {
+                    max_cutoff = interaction_range;
                 }
             }
             catch (const std::exception& e)
@@ -197,14 +223,13 @@ public:
                 GMX_THROW(InternalError("Failed to read cutoff from model: " + std::string(e.what())));
             }
 
-            if (req_cutoff <= 0.0)
+            if (max_cutoff <= 0.0 || !std::isfinite(max_cutoff))
             {
-                // Fallback or error
                 GMX_THROW(InconsistentInputError(
                         "Metatomic model requested 0.0 or negative cutoff."));
             }
 
-            ranges->addRange(req_cutoff);
+            ranges->addRange(max_cutoff);
         };
         notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);
     }
