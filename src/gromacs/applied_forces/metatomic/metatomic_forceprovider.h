@@ -59,7 +59,7 @@ class MpiComm;
 /*! For compatibility with pairlist data structure in MDModulesPairlistConstructedSignal.
  * Contains pairs like ((atom1, atom2), shiftIndex).
  */
-using PairlistEntry = std::pair<std::pair<int, int>, int>;
+using PairlistEntry = std::pair<std::pair<int32_t, int32_t>, int32_t>;
 
 /*! \brief \internal
  * MetatomicForceProvider class
@@ -101,19 +101,19 @@ private:
     std::vector<RVec> positions_;
 
     //! vector storing all atomic numbers
-    std::vector<int> atomNumbers_;
+    std::vector<int32_t> atomNumbers_;
 
     //! lookup table to map model input indices [0...numInput) to local atom indices
-    std::vector<int> inputToLocalIndex_;
+    std::vector<int32_t> inputToLocalIndex_;
 
     //! lookup table to map model input indices to global atom indices
-    std::vector<int> inputToGlobalIndex_;
+    std::vector<int32_t> inputToGlobalIndex_;
 
     //! Full pairlist from MDModules notification
     std::vector<PairlistEntry> fullPairlist_;
 
     //! Interacting pairs of MTA atoms within cutoff, for model input
-    std::vector<int> pairlistForModel_;
+    std::vector<int32_t> pairlistForModel_;
 
     //! Shift vectors for each atom pair in pairlistForModel_
     std::vector<RVec> shiftVectors_;

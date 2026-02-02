@@ -73,7 +73,7 @@
 namespace gmx
 {
 
-static std::optional<ptrdiff_t> indexOf(ArrayRef<const int> vec, const int val)
+static std::optional<ptrdiff_t> indexOf(ArrayRef<const int32_t> vec, const int32_t val)
 {
     auto it = std::find(vec.begin(), vec.end(), val);
     if (it == vec.end())
@@ -83,11 +83,11 @@ static std::optional<ptrdiff_t> indexOf(ArrayRef<const int> vec, const int val)
     return std::distance(vec.begin(), it);
 }
 
-static std::tuple<std::string, std::optional<int>> getMdrunActiveDevice()
+static std::tuple<std::string, std::optional<int32_t>> getMdrunActiveDevice()
 {
 #if GMX_GPU_CUDA || (GMX_SYCL_ACPP && GMX_ACPP_HAVE_CUDA_TARGET)
     GMX_RELEASE_ASSERT(torch::hasCUDA(), "Libtorch not compiled with CUDA support.");
-    int activeDevice;
+    int32_t activeDevice;
     if (cudaGetDevice(&activeDevice) != cudaSuccess)
     {
         GMX_THROW(InternalError("cudaGetDevice failed."));
@@ -97,7 +97,7 @@ static std::tuple<std::string, std::optional<int>> getMdrunActiveDevice()
 #    ifndef USE_ROCM
     GMX_THROW(InternalError("Libtorch not compiled with HIP support."));
 #    endif
-    int activeDevice;
+    int32_t activeDevice;
     if (hipGetDevice(&activeDevice) != hipSuccess)
     {
         GMX_THROW(InternalError("hipGetDevice failed."));
@@ -173,7 +173,7 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     return pbcTensor.to(device);
 }
 
-static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int> pairlist,
+static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int32_t> pairlist,
                                                                    ArrayRef<const RVec> shiftVectors,
                                                                    ArrayRef<const RVec> positions,
                                                                    torch::Device        device,
@@ -192,8 +192,8 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
 
     for (int64_t i = 0; i < n_pairs; i++)
     {
-        int atom_i = pairlist[2 * i];
-        int atom_j = pairlist[2 * i + 1];
+        int32_t atom_i = pairlist[2 * i];
+        int32_t atom_j = pairlist[2 * i + 1];
 
         pair_samples_ptr[i][0] = static_cast<int32_t>(atom_i);
         pair_samples_ptr[i][1] = static_cast<int32_t>(atom_j);
@@ -329,7 +329,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
 
     const auto& mtaIndices = options_.params_.mtaIndices_;
-    const int   n_atoms    = static_cast<int>(mtaIndices.size());
+    const int32_t   n_atoms    = static_cast<int32_t>(mtaIndices.size());
 
     positions_.resize(n_atoms);
     atomNumbers_.resize(n_atoms, 0);
@@ -346,7 +346,7 @@ MetatomicForceProvider::~MetatomicForceProvider() = default;
 void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedistributedSignal& signal)
 {
     const auto& mtaIndices = options_.params_.mtaIndices_;
-    const int   numInput   = static_cast<int>(mtaIndices.size());
+    const int32_t   numInput   = static_cast<int32_t>(mtaIndices.size());
 
     inputToLocalIndex_.assign(numInput, -1);
     inputToGlobalIndex_.assign(numInput, -1);
@@ -357,12 +357,12 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
         GMX_RELEASE_ASSERT(signal.globalAtomIndices_.has_value(),
                            "Global atom indices required for DD.");
         auto      globalAtomIndices = signal.globalAtomIndices_.value();
-        const int numLocal          = signal.x_.size();
+        const int32_t numLocal          = signal.x_.size();
 
-        for (int i = 0; i < static_cast<int>(globalAtomIndices.size()); i++)
+        for (int32_t i = 0; i < static_cast<int32_t>(globalAtomIndices.size()); i++)
         {
-            int globalIdx = globalAtomIndices[i];
-            for (int j = 0; j < numInput; j++)
+            int32_t globalIdx = globalAtomIndices[i];
+            for (int32_t j = 0; j < numInput; j++)
             {
                 if (options_.params_.mtaAtoms_->globalIndex()[j] == globalIdx)
                 {
@@ -381,10 +381,10 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     else
     {
         const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
-        for (int i = 0; i < numInput; i++)
+        for (int32_t i = 0; i < numInput; i++)
         {
-            int localIndex         = mtaAtoms->localIndex()[i];
-            int globalIdx          = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
+            int32_t localIndex         = mtaAtoms->localIndex()[i];
+            int32_t globalIdx          = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
             inputToLocalIndex_[i]  = localIndex;
             inputToGlobalIndex_[i] = globalIdx;
             atomNumbers_[i]        = options_.params_.atoms_.atom[globalIdx].atomnumber;
@@ -429,13 +429,13 @@ void MetatomicForceProvider::preparePairlistInput()
 
     GMX_ASSERT(!fullPairlist_.empty(), "Pairlist empty!");
 
-    const int numPairs = gmx::ssize(fullPairlist_);
+    const int32_t numPairs = gmx::ssize(fullPairlist_);
     pairlistForModel_.clear();
     pairlistForModel_.reserve(2 * numPairs);
     shiftVectors_.clear();
     shiftVectors_.reserve(numPairs);
 
-    for (int i = 0; i < numPairs; i++)
+    for (int32_t i = 0; i < numPairs; i++)
     {
         const auto [atomPair, shiftIndex] = fullPairlist_[i];
 
@@ -448,8 +448,8 @@ void MetatomicForceProvider::preparePairlistInput()
             const IVec unitShift = shiftIndexToXYZ(shiftIndex);
             mvmul_ur0(box_, unitShift.toRVec(), shift);
 
-            pairlistForModel_.push_back(static_cast<int>(inputIdxA.value()));
-            pairlistForModel_.push_back(static_cast<int>(inputIdxB.value()));
+            pairlistForModel_.push_back(static_cast<int32_t>(inputIdxA.value()));
+            pairlistForModel_.push_back(static_cast<int32_t>(inputIdxB.value()));
             shiftVectors_.push_back(shift);
         }
     }
@@ -461,7 +461,7 @@ void MetatomicForceProvider::preparePairlistInput()
 
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
-    const int n_atoms = static_cast<int>(options_.params_.mtaIndices_.size());
+    const int32_t n_atoms = static_cast<int32_t>(options_.params_.mtaIndices_.size());
 
     gatherAtomPositions(inputs.x_);
     copy_mat(inputs.box_, box_);
@@ -561,7 +561,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     // Apply forces to local atoms only
     auto forceAccessor = forceTensor.accessor<double, 2>();
-    for (int i = 0; i < n_atoms; ++i)
+    for (int32_t i = 0; i < n_atoms; ++i)
     {
         if (inputToLocalIndex_[i] != -1)
         {
@@ -577,9 +577,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     matrix virialMatrix;
     auto   virialAccessor = virialTensor.accessor<double, 2>();
     // TODO: technically this is DIM, not 3...
-    for (int i = 0; i < 3; ++i)
+    for (int32_t i = 0; i < 3; ++i)
     {
-        for (int j = 0; j < 3; ++j)
+        for (int32_t j = 0; j < 3; ++j)
         {
             virialMatrix[i][j] = virialAccessor[i][j];
         }
