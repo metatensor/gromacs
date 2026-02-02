@@ -44,8 +44,6 @@
 
 #include <cstdint>
 
-#include <unordered_map>
-
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
@@ -81,81 +79,6 @@ static std::optional<ptrdiff_t> indexOf(ArrayRef<const int32_t> vec, const int32
         return std::nullopt;
     }
     return std::distance(vec.begin(), it);
-}
-
-static std::tuple<std::string, std::optional<int32_t>> getMdrunActiveDevice()
-{
-#if GMX_GPU_CUDA || (GMX_SYCL_ACPP && GMX_ACPP_HAVE_CUDA_TARGET)
-    GMX_RELEASE_ASSERT(torch::hasCUDA(), "Libtorch not compiled with CUDA support.");
-    int32_t activeDevice;
-    if (cudaGetDevice(&activeDevice) != cudaSuccess)
-    {
-        GMX_THROW(InternalError("cudaGetDevice failed."));
-    }
-    return { "cuda", activeDevice };
-#elif GMX_GPU_HIP || (GMX_SYCL_ACPP && GMX_ACPP_HAVE_HIP_TARGET)
-#    ifndef USE_ROCM
-    GMX_THROW(InternalError("Libtorch not compiled with HIP support."));
-#    endif
-    int32_t activeDevice;
-    if (hipGetDevice(&activeDevice) != hipSuccess)
-    {
-        GMX_THROW(InternalError("hipGetDevice failed."));
-    }
-    return { "hip", activeDevice };
-#else
-    return { "cpu", std::nullopt };
-#endif
-}
-
-static torch::Device determineDevice(const MDLogger& logger, const MpiComm& mpiComm)
-{
-    torch::Device device(torch::kCPU);
-
-    // Non-main ranks don't run model, return CPU
-    if (!mpiComm.isMainRank())
-    {
-        return device;
-    }
-
-    auto [torchDeviceType, activeDevice] = getMdrunActiveDevice();
-
-    if (const char* env = std::getenv("GMX_METATOMIC_DEVICE"))
-    {
-        const std::string devLC = toLowerCase(env);
-        if (devLC == "gpu" || devLC == "cuda")
-        {
-            if (!torch::cuda::is_available())
-            {
-                GMX_THROW(InternalError(
-                        formatString("GMX_METATOMIC_DEVICE='%s' but no device available.", env)));
-            }
-            GMX_RELEASE_ASSERT(activeDevice.has_value(), "Could not determine active device.");
-            device = torch::Device(torch::kCUDA, activeDevice.value());
-        }
-        else if (devLC != "cpu")
-        {
-            GMX_THROW(InvalidInputError(formatString("GMX_METATOMIC_DEVICE invalid value: '%s'.", env)));
-        }
-        GMX_LOG(logger.info)
-                .asParagraph()
-                .appendTextFormatted("Using device from GMX_METATOMIC_DEVICE: '%s'.", env);
-    }
-    else
-    {
-        if (torch::cuda::is_available() && activeDevice.has_value())
-        {
-            GMX_LOG(logger.info)
-                    .asParagraph()
-                    .appendText("Using " + toUpperCase(torchDeviceType) + " for Metatomic.");
-            device = torch::Device(torch::kCUDA, activeDevice.value());
-        }
-        else
-        {
-            GMX_LOG(logger.info).asParagraph().appendText("Using CPU for Metatomic.");
-        }
-    }
-    return device;
 }
 
 static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
@@ -255,7 +178,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 {
     GMX_LOG(logger_.info).asParagraph().appendText("Initializing MetatomicForceProvider...");
 
-    // Pairlist-based neighbor lists don't work with DD yet (indices are local)
+    // Pairlist-based neighbor lists don't work with domain decomposition yet (indices are local)
     // Matches NNPot's limitation
     if (mpiComm_.isParallel())
     {
@@ -263,8 +186,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 "Metatomic does not yet support domain decomposition. "
                 "Use thread-MPI (gmx mdrun) instead of MPI (mpirun gmx_mpi mdrun)."));
     }
-
-    data_->device = determineDevice(logger_, mpiComm_);
 
     // Only main rank loads model
     if (mpiComm_.isMainRank())
@@ -287,6 +208,21 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
         data_->capabilities =
                 data_->model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
+
+        // Determine device using capabilities and optional environment variable
+        torch::optional<std::string> desiredDevice = torch::nullopt;
+        if (const char* env = std::getenv("GMX_METATOMIC_DEVICE"))
+        {
+            desiredDevice = std::string(env);
+        }
+
+        const auto deviceType =
+                metatomic_torch::pick_device(data_->capabilities->supported_devices, desiredDevice);
+        data_->device = torch::Device(deviceType);
+
+        GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendTextFormatted("Metatomic using device: %s", data_->device.str().c_str());
 
         auto requests_ivalue = data_->model.run_method("requested_neighbor_lists");
         for (const auto& request_ivalue : requests_ivalue.toList())
@@ -328,8 +264,8 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         data_->check_consistency = options_.params_.checkConsistency;
     }
 
-    const auto& mtaIndices = options_.params_.mtaIndices_;
-    const int32_t   n_atoms    = static_cast<int32_t>(mtaIndices.size());
+    const auto&   mtaIndices = options_.params_.mtaIndices_;
+    const int32_t n_atoms    = static_cast<int32_t>(mtaIndices.size());
 
     positions_.resize(n_atoms);
     atomNumbers_.resize(n_atoms, 0);
@@ -345,8 +281,8 @@ MetatomicForceProvider::~MetatomicForceProvider() = default;
 
 void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedistributedSignal& signal)
 {
-    const auto& mtaIndices = options_.params_.mtaIndices_;
-    const int32_t   numInput   = static_cast<int32_t>(mtaIndices.size());
+    const auto&   mtaIndices = options_.params_.mtaIndices_;
+    const int32_t numInput   = static_cast<int32_t>(mtaIndices.size());
 
     inputToLocalIndex_.assign(numInput, -1);
     inputToGlobalIndex_.assign(numInput, -1);
@@ -356,7 +292,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     {
         GMX_RELEASE_ASSERT(signal.globalAtomIndices_.has_value(),
                            "Global atom indices required for DD.");
-        auto      globalAtomIndices = signal.globalAtomIndices_.value();
+        auto          globalAtomIndices = signal.globalAtomIndices_.value();
         const int32_t numLocal          = signal.x_.size();
 
         for (int32_t i = 0; i < static_cast<int32_t>(globalAtomIndices.size()); i++)
@@ -383,8 +319,8 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
         const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
         for (int32_t i = 0; i < numInput; i++)
         {
-            int32_t localIndex         = mtaAtoms->localIndex()[i];
-            int32_t globalIdx          = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
+            int32_t localIndex     = mtaAtoms->localIndex()[i];
+            int32_t globalIdx      = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
             inputToLocalIndex_[i]  = localIndex;
             inputToGlobalIndex_[i] = globalIdx;
             atomNumbers_[i]        = options_.params_.atoms_.atom[globalIdx].atomnumber;
@@ -512,7 +448,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         {
             auto neighbors = buildNeighborListFromPairlist(
                     pairlistForModel_, shiftVectors_, positions_, data_->device, data_->dtype);
-            metatomic_torch::register_autograd_neighbors(system, neighbors, false);
+            // TODO: take from the user / model
+            metatomic_torch::register_autograd_neighbors(system, neighbors, /*check_consistency*/ true);
             system->add_neighbor_list(request, neighbors);
         }
 
