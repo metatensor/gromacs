@@ -84,7 +84,7 @@ static std::optional<ptrdiff_t> indexOf(ArrayRef<const int32_t> vec, const int32
 static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
 {
     torch::Tensor pbcTensor =
-            torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool));
+            torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool)).device(device);
     if (*pbcType == PbcType::XY)
     {
         pbcTensor[2] = false;
@@ -105,13 +105,16 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
 {
     const int64_t n_pairs = static_cast<int64_t>(pairlist.size() / 2);
 
-    auto pair_samples_values = torch::zeros({ n_pairs, 5 }, torch::TensorOptions().dtype(torch::kInt32));
+    auto pair_samples_values =
+            torch::zeros({ n_pairs, 5 }, torch::TensorOptions().dtype(torch::kInt32)).device(device);
     auto pair_samples_ptr = pair_samples_values.accessor<int32_t, 2>();
 
     // Full interatomic vectors (rj - ri + shift), not just shifts.
-    auto pair_vectors = torch::zeros({ n_pairs, 3, 1 }, torch::TensorOptions().dtype(torch::kFloat64));
+    auto pair_vectors =
+            torch::zeros({ n_pairs, 3, 1 }, torch::TensorOptions().dtype(torch::kFloat64)).device(device);
 
-    auto vectors_cpu = torch::zeros({ n_pairs, 3, 1 }, torch::TensorOptions().dtype(torch::kFloat64));
+    auto vectors_cpu =
+            torch::zeros({ n_pairs, 3, 1 }, torch::TensorOptions().dtype(torch::kFloat64)).device(device);
     auto vectors_accessor = vectors_cpu.accessor<double, 3>();
 
     for (int64_t i = 0; i < n_pairs; i++)
@@ -409,7 +412,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     // Force tensor - main rank fills, others have zeros
     torch::Tensor forceTensor =
-            torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64));
+            torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64)).device(data_->device);
 
     // Virial tensor for pressure/stress calculations
     torch::Tensor virialTensor = torch::zeros({ 3, 3 }, torch::TensorOptions().dtype(torch::kFloat64));
@@ -421,7 +424,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         {
             gromacs_scalar_type = torch::kFloat64;
         }
-        auto blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
+        auto blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(data_->device);
 
         auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { n_atoms, 3 }, blob_options)
                                        .to(data_->dtype)
