@@ -59,14 +59,14 @@
 #include "gromacs/utility/stringutil.h"
 
 #ifdef DIM
-#undef DIM
+#    undef DIM
 #endif
 
 #include <metatensor/torch.hpp>
 #include <metatomic/torch.hpp>
 
 #if GMX_GPU_CUDA || (GMX_SYCL_ACPP && GMX_ACPP_HAVE_CUDA_TARGET)
-#include <cuda_runtime.h>
+#    include <cuda_runtime.h>
 #endif
 
 
@@ -571,14 +571,18 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     // Apply virial contribution
     // GROMACS uses a 3x3 virial tensor in forceWithVirial_
-    auto virialAccessor = virialTensor.accessor<double, 2>();
+    // Copy the tensor data into a GROMACS matrix and use the public API
+    matrix virialMatrix;
+    auto   virialAccessor = virialTensor.accessor<double, 2>();
+    // TODO: technically this is DIM, not 3...
     for (int i = 0; i < 3; ++i)
     {
         for (int j = 0; j < 3; ++j)
         {
-            outputs->forceWithVirial_.virial_[i][j] += virialAccessor[i][j];
+            virialMatrix[i][j] = virialAccessor[i][j];
         }
     }
+    outputs->forceWithVirial_.addVirialContribution(virialMatrix);
 }
 
 } // namespace gmx
