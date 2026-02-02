@@ -98,6 +98,7 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
 
 static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int32_t> pairlist,
                                                                    ArrayRef<const RVec> shiftVectors,
+                                                                   ArrayRef<const RVec> cellShifts,
                                                                    ArrayRef<const RVec> positions,
                                                                    torch::Device        device,
                                                                    torch::ScalarType    dtype)
@@ -120,9 +121,9 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
 
         pair_samples_ptr[i][0] = static_cast<int32_t>(atom_i);
         pair_samples_ptr[i][1] = static_cast<int32_t>(atom_j);
-        pair_samples_ptr[i][2] = 0;
-        pair_samples_ptr[i][3] = 0;
-        pair_samples_ptr[i][4] = 0;
+        pair_samples_ptr[i][2] = cellShifts[i][0];
+        pair_samples_ptr[i][3] = cellShifts[i][1];
+        pair_samples_ptr[i][4] = cellShifts[i][2];
 
         // Calculate r_ij = r_j - r_i + shift
         double r_ij_x = positions[atom_j][0] - positions[atom_i][0] + shiftVectors[i][0];
@@ -291,7 +292,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     if (mpiComm_.isParallel())
     {
         GMX_RELEASE_ASSERT(signal.globalAtomIndices_.has_value(),
-                           "Global atom indices required for DD.");
+                           "Global atom indices required for domain decomposition.");
         auto          globalAtomIndices = signal.globalAtomIndices_.value();
         const int32_t numLocal          = signal.x_.size();
 
@@ -370,6 +371,8 @@ void MetatomicForceProvider::preparePairlistInput()
     pairlistForModel_.reserve(2 * numPairs);
     shiftVectors_.clear();
     shiftVectors_.reserve(numPairs);
+    cellShifts_.clear();
+    cellShifts_.reserve(numPairs);
 
     for (int32_t i = 0; i < numPairs; i++)
     {
@@ -387,6 +390,7 @@ void MetatomicForceProvider::preparePairlistInput()
             pairlistForModel_.push_back(static_cast<int32_t>(inputIdxA.value()));
             pairlistForModel_.push_back(static_cast<int32_t>(inputIdxB.value()));
             shiftVectors_.push_back(shift);
+            cellShifts_.push_back(unitShift);
         }
     }
 
@@ -447,7 +451,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         for (const auto& request : data_->nl_requests)
         {
             auto neighbors = buildNeighborListFromPairlist(
-                    pairlistForModel_, shiftVectors_, positions_, data_->device, data_->dtype);
+                    pairlistForModel_, shiftVectors_, cellShifts_, positions_, data_->device, data_->dtype);
             // TODO: take from the user / model
             metatomic_torch::register_autograd_neighbors(system, neighbors, /*check_consistency*/ true);
             system->add_neighbor_list(request, neighbors);

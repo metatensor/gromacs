@@ -118,6 +118,9 @@ private:
     //! Shift vectors for each atom pair in pairlistForModel_
     std::vector<RVec> shiftVectors_;
 
+    //! Cell shifts
+    std::vector<RVec> cellShifts_;
+
     //! local copy of simulation box
     matrix box_;
 
