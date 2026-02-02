@@ -83,38 +83,40 @@ static std::optional<ptrdiff_t> indexOf(ArrayRef<const int32_t> vec, const int32
 
 static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
 {
-    torch::Tensor pbcTensor =
-            torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool)).device(device);
+    auto options = torch::TensorOptions().dtype(torch::kBool).device(device);
+
     if (*pbcType == PbcType::XY)
     {
-        pbcTensor[2] = false;
+        return torch::tensor({ true, true, false }, options);
+    }
+    else if (*pbcType == PbcType::No)
+    {
+        return torch::tensor({ false, false, false }, options);
     }
     else if (*pbcType != PbcType::Xyz)
     {
         GMX_THROW(InconsistentInputError("PBC type not supported."));
     }
-    return pbcTensor.to(device);
+    return torch::tensor({ true, true, true }, options);
 }
 
 static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int32_t> pairlist,
                                                                    ArrayRef<const RVec> shiftVectors,
-                                                                   ArrayRef<const RVec> cellShifts,
+                                                                   ArrayRef<const IVec> cellShifts,
                                                                    ArrayRef<const RVec> positions,
                                                                    torch::Device        device,
                                                                    torch::ScalarType    dtype)
 {
     const int64_t n_pairs = static_cast<int64_t>(pairlist.size() / 2);
 
-    auto pair_samples_values =
-            torch::zeros({ n_pairs, 5 }, torch::TensorOptions().dtype(torch::kInt32)).device(device);
-    auto pair_samples_ptr = pair_samples_values.accessor<int32_t, 2>();
+    auto cpu_int_options   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    auto cpu_float_options = torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU);
 
-    // Full interatomic vectors (rj - ri + shift), not just shifts.
-    auto pair_vectors =
-            torch::zeros({ n_pairs, 3, 1 }, torch::TensorOptions().dtype(torch::kFloat64)).device(device);
+    auto pair_samples_values = torch::zeros({ n_pairs, 5 }, cpu_int_options);
+    auto pair_samples_ptr    = pair_samples_values.accessor<int32_t, 2>();
 
-    auto vectors_cpu =
-            torch::zeros({ n_pairs, 3, 1 }, torch::TensorOptions().dtype(torch::kFloat64)).device(device);
+    // Full interatomic vectors (rj - ri + shift)
+    auto vectors_cpu      = torch::zeros({ n_pairs, 3, 1 }, cpu_float_options);
     auto vectors_accessor = vectors_cpu.accessor<double, 3>();
 
     for (int64_t i = 0; i < n_pairs; i++)
