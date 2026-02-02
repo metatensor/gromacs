@@ -119,7 +119,7 @@ private:
     std::vector<RVec> shiftVectors_;
 
     //! Cell shifts
-    std::vector<RVec> cellShifts_;
+    std::vector<IVec> cellShifts_;
 
     //! local copy of simulation box
     matrix box_;

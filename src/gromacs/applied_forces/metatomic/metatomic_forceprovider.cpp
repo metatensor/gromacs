@@ -124,6 +124,7 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
         int32_t atom_i = pairlist[2 * i];
         int32_t atom_j = pairlist[2 * i + 1];
 
+        // Access IVec elements (integers)
         pair_samples_ptr[i][0] = static_cast<int32_t>(atom_i);
         pair_samples_ptr[i][1] = static_cast<int32_t>(atom_j);
         pair_samples_ptr[i][2] = cellShifts[i][0];
@@ -131,19 +132,25 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
         pair_samples_ptr[i][4] = cellShifts[i][2];
 
         // Calculate r_ij = r_j - r_i + shift
-        double r_ij_x = positions[atom_j][0] - positions[atom_i][0] + shiftVectors[i][0];
-        double r_ij_y = positions[atom_j][1] - positions[atom_i][1] + shiftVectors[i][1];
-        double r_ij_z = positions[atom_j][2] - positions[atom_i][2] + shiftVectors[i][2];
+        double r_ij_x =
+                static_cast<double>(positions[atom_j][0] - positions[atom_i][0] + shiftVectors[i][0]);
+        double r_ij_y =
+                static_cast<double>(positions[atom_j][1] - positions[atom_i][1] + shiftVectors[i][1]);
+        double r_ij_z =
+                static_cast<double>(positions[atom_j][2] - positions[atom_i][2] + shiftVectors[i][2]);
 
         vectors_accessor[i][0][0] = r_ij_x;
         vectors_accessor[i][1][0] = r_ij_y;
         vectors_accessor[i][2][0] = r_ij_z;
     }
 
+    auto final_samples_values = pair_samples_values.to(device);
+    auto final_vectors        = vectors_cpu.to(dtype).to(device);
+
     auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
             std::vector<std::string>{
                     "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c" },
-            pair_samples_values.to(device));
+            final_samples_values);
 
     auto neighbor_component = torch::make_intrusive<metatensor_torch::LabelsHolder>(
             std::vector<std::string>{ "xyz" },
@@ -155,7 +162,7 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
             torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device)));
 
     return torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
-            vectors_cpu.to(dtype).to(device),
+            final_vectors,
             neighbor_samples,
             std::vector<metatensor_torch::Labels>{ neighbor_component },
             neighbor_properties);
@@ -442,7 +449,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     // Force tensor - main rank fills, others have zeros
     torch::Tensor forceTensor =
-            torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64)).device(data_->device);
+            torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64).device(data_->device));
 
     // Virial tensor for pressure/stress calculations
     torch::Tensor virialTensor = torch::zeros({ 3, 3 }, torch::TensorOptions().dtype(torch::kFloat64));
