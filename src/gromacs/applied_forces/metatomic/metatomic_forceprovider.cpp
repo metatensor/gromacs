@@ -283,6 +283,22 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
 MetatomicForceProvider::~MetatomicForceProvider() = default;
 
+/*! \brief Updates the mapping between GROMACS local/global atom indices and the Metatomic model's input atoms.
+ *
+ * This function is subscribed to the `MDModulesAtomsRedistributedSignal`. It is called whenever
+ * atoms are redistributed across MPI ranks (Domain Decomposition) or reordered in memory (sorting).
+ *
+ * Its primary responsibilities are:
+ * 1. **Locate Input Atoms**: It iterates through the local atoms on the current rank to find
+ * which atoms correspond to the "input atoms" defined for the Metatomic model (via `mtaIndices`).
+ * 2. **Update Maps**: It populates `inputToLocalIndex_` (mapping model input index -> GROMACS local index)
+ * and `inputToGlobalIndex_` (mapping model input index -> GROMACS global tag).
+ * 3. **Gather Atomic Numbers**: It ensures `atomNumbers_` (Z numbers) are correctly associated with
+ * the current local atoms, performing an MPI reduction if necessary to gather data from
+ * distributed ranks.
+ *
+ * \param[in] signal Contains the new mapping of global atom indices to local buffer indices after redistribution.
+ */
 void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedistributedSignal& signal)
 {
     const auto&   mtaIndices = options_.params_.mtaIndices_;
@@ -335,6 +351,18 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
                        "Some atom numbers not set.");
 }
 
+/*! \brief Updates the internal position buffer with the coordinates of the Metatomic atoms.
+ *
+ * This function extracts the coordinates of the atoms relevant to the Metatomic model
+ * from the full GROMACS local atom array (`pos`).
+ *
+ * 1. **Filtering:** `pos` contains all local atoms (solute, solvent, ions).
+ * This function copies only the atoms defined in `mtaIndices` to `positions_`.
+ * 2. **Ordering/Packing:** GROMACS reorders atoms dynamically for Domain Decomposition.
+ * This function uses `inputToLocalIndex_` to collect atoms and pack them into a contiguous, ordered buffer
+ *
+ * \param[in] pos The array of all local atom coordinates for the current step.
+ */
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
 {
     const size_t numInput = inputToLocalIndex_.size();
