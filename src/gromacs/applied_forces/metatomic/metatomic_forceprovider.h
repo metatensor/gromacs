@@ -50,9 +50,16 @@ namespace gmx
 
 struct MetatomicParameters;
 struct MetatomicData;
+struct MDModulesAtomsRedistributedSignal;
+struct MDModulesPairlistConstructedSignal;
 
 class MDLogger;
 class MpiComm;
+
+/*! For compatibility with pairlist data structure in MDModulesPairlistConstructedSignal.
+ * Contains pairs like ((atom1, atom2), shiftIndex).
+ */
+using PairlistEntry = std::pair<std::pair<int32_t, int32_t>, int32_t>;
 
 /*! \brief \internal
  * MetatomicForceProvider class
@@ -72,28 +79,56 @@ public:
      * \param[out] fOutput output for force provider
      */
     void calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs) override;
-    void updateLocalAtoms();
-    void gatherAtomPositions(ArrayRef<const RVec> globalPositions);
-    void gatherAtomNumbersIndices();
+
+    //! Gather atom numbers and indices. Triggered on AtomsRedistributed signal.
+    void gatherAtomNumbersIndices(const MDModulesAtomsRedistributedSignal& signal);
+
+    //! Set pairlist from notification and filter to MTA atom pairs.
+    void setPairlist(const MDModulesPairlistConstructedSignal& signal);
 
 private:
+    //! Gather atom positions for MTA input.
+    void gatherAtomPositions(ArrayRef<const RVec> globalPositions);
+
+    //! Prepare pairlist input for model
+    void preparePairlistInput();
+
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
     const MpiComm&          mpiComm_;
 
-    //! vector storing all atom positions
+    //! vector storing all MTA atom positions
     std::vector<RVec> positions_;
 
     //! vector storing all atomic numbers
-    std::vector<int> atomNumbers_;
+    std::vector<int32_t> atomNumbers_;
 
-    //! global index lookup table to map indices from model input to global atom indices
-    std::vector<int> idxLookup_;
+    //! lookup table to map model input indices [0...numInput) to local atom indices
+    std::vector<int32_t> inputToLocalIndex_;
+
+    //! lookup table to map model input indices to global atom indices
+    std::vector<int32_t> inputToGlobalIndex_;
+
+    //! Full pairlist from MDModules notification
+    std::vector<PairlistEntry> fullPairlist_;
+
+    //! Interacting pairs of MTA atoms within cutoff, for model input
+    std::vector<int32_t> pairlistForModel_;
+
+    //! Shift vectors for each atom pair in pairlistForModel_
+    std::vector<RVec> shiftVectors_;
+
+    //! Cell shifts
+    std::vector<IVec> cellShifts_;
 
     //! local copy of simulation box
     matrix box_;
+
     //! Data required for metatomic calculations
     std::unique_ptr<MetatomicData> data_;
+
+    //! flag to check if pairlist data should be prepared
+    bool doPairlist_ = false;
 };
 
 } // namespace gmx
