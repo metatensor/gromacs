@@ -71,6 +71,19 @@
 namespace gmx
 {
 
+static torch::optional<std::string> normalize_variant(std::string variant_string)
+{
+    if (variant_string == "no" || variant_string.empty())
+    {
+        return torch::nullopt;
+    }
+    else
+    {
+        return variant_string;
+    }
+}
+
+
 static std::optional<ptrdiff_t> indexOf(ArrayRef<const int32_t> vec, const int32_t val)
 {
     auto it = std::find(vec.begin(), vec.end(), val);
@@ -263,17 +276,23 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
         data_->evaluations_options->set_length_unit("nm");
 
-        auto outputs = data_->capabilities->outputs();
-        if (!outputs.contains("energy"))
+        auto outputs    = data_->capabilities->outputs();
+        auto v_energy   = normalize_variant(options_.params_.variant);
+        auto energy_key = pick_output("energy", outputs, v_energy);
+
+        if (!outputs.contains(energy_key))
         {
-            GMX_THROW(APIError("Metatomic model must provide 'energy' output."));
+            GMX_THROW(APIError("the model at '" + options_.params_.modelPath_
+                               + "' does not provide "
+                                 "an '"
+                               + energy_key + "' output, we can not use the metatomic interface."));
         }
 
         auto requested_output      = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
         requested_output->per_atom = false;
         requested_output->explicit_gradients = {};
 
-        data_->evaluations_options->outputs.insert("energy", requested_output);
+        data_->evaluations_options->outputs.insert(energy_key, requested_output);
         data_->check_consistency = options_.params_.checkConsistency;
     }
 
@@ -448,8 +467,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     preparePairlistInput();
 
     // Force tensor - main rank fills, others have zeros
-    torch::Tensor forceTensor =
-            torch::zeros({ n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64).device(data_->device));
+    torch::Tensor forceTensor = torch::zeros(
+            { n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64).device(data_->device));
 
     // Virial tensor for pressure/stress calculations
     torch::Tensor virialTensor = torch::zeros({ 3, 3 }, torch::TensorOptions().dtype(torch::kFloat64));

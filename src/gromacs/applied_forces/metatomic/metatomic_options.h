@@ -81,6 +81,9 @@ struct MetatomicParameters
     //! Torch device to use to run the model. If left empty, this is defined
     //! based on the model declared preferences
     std::string device;
+    //! specifies which variant of the model outputs should be uses for making
+    //! predictions
+    std::string variant;
 
     // TODO: how should we translate atomic types?
 
