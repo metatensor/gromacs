@@ -1,7 +1,7 @@
 Highlights
 ^^^^^^^^^^
 
-|Gromacs| 2026 was released on INSERT DATE HERE. Patch releases may
+|Gromacs| 2026 was released on January 19th, 2026. Patch releases may
 have been made since then, please use the updated versions!  Here are
 some highlights of what you can expect, along with more detail in the
 links below!
@@ -21,6 +21,8 @@ simulations and hardware. The new features are:
   embedding models.
 
 * Experimental support for `H5MD`_ as a trajectory output format for ``mdrun``.
+
+* Full support for using HIP as the GPU backend for AMD devices.
 
 .. Note to developers!
    Please use """"""" to underline the individual entries for fixed issues in the subfolders,

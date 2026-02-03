@@ -1,7 +1,7 @@
 /*
  * This file is part of the GROMACS molecular simulation package.
  *
- * Copyright 2019- The GROMACS Authors
+ * Copyright 2021- The GROMACS Authors
  * and the project initiators Erik Lindahl, Berk Hess and David van der Spoel.
  * Consult the AUTHORS/COPYING files and https://www.gromacs.org for details.
  *
@@ -31,53 +31,68 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
-
 /*! \internal \file
- *
  * \brief
- * Declares the GridSetData struct which holds grid data that is shared over all grids
+ * Implements QMMM force provider state for checkpointing
  *
- * Also declares a struct for work data that is shared over grids.
- *
- * \author Berk Hess <hess@kth.se>
- * \ingroup module_nbnxm
+ * \author Dmitry Morozov <dmitry.morozov@jyu.fi>
+ * \ingroup module_applied_forces
  */
 
-#ifndef GMX_NBNXM_GRIDSETDATA_H
-#define GMX_NBNXM_GRIDSETDATA_H
+#include "gmxpre.h"
 
-#include <vector>
+#include "qmmmforceproviderstate.h"
 
-#include "gromacs/gpu_utils/hostallocator.h"
+#include <string_view>
+
+#include "gromacs/mdrunutility/mdmodulesnotifiers.h"
+#include "gromacs/utility/keyvaluetree.h"
+#include "gromacs/utility/keyvaluetreebuilder.h"
+
 
 namespace gmx
 {
 
-/*! \internal
- * \brief Struct that holds grid data that is shared over all grids
- *
- * To enable a single coordinate and force array, a single bin range
- * is needed which covers all grids.
- */
-struct GridSetData
+namespace
 {
-    //! The bin indices for all atoms, the bin indices number contiguously over all grids
-    HostVector<int> bins;
-    //! The atom indices for all atoms stored in bin order
-    HostVector<int> atomIndices;
-};
 
-/*! \internal
- * \brief Working arrays for constructing a grid
+/*! \brief This tags for parameters which will be stored/read to/from checkpoint file
  */
-struct GridWork
+//! \{
+const std::string c_qmTransTag_ = "qmtrans";
+//! \}
+
+} // namespace
+
+void QMMMForceProviderState::writeState(KeyValueTreeObjectBuilder kvtBuilder, std::string_view identifier) const
 {
-    //! Number of atoms for each grid column
-    std::vector<int> numAtomsPerColumn;
-    //! Buffer for sorting integers
-    std::vector<int> sortBuffer;
-};
+    // Write QM Translation vector
+    auto doubleArrayAdder =
+            kvtBuilder.addUniformArray<double>(std::string(identifier) + "-" + c_qmTransTag_);
+    for (int i = 0; i < DIM; i++)
+    {
+        doubleArrayAdder.addValue(static_cast<double>(qmTrans_[i]));
+    }
+}
+
+void QMMMForceProviderState::readState(const KeyValueTreeObject& kvtData, std::string_view identifier)
+{
+    stateRead_ = true;
+
+    // Try to read QM translation vector
+    if (kvtData.keyExists(std::string(identifier) + "-" + c_qmTransTag_))
+    {
+        auto kvtDoubleArray = kvtData[std::string(identifier) + "-" + c_qmTransTag_].asArray().values();
+        for (int i = 0; i < DIM; i++)
+        {
+            qmTrans_[i] = static_cast<real>(kvtDoubleArray[i].cast<double>());
+        }
+    }
+    else
+    {
+        stateRead_ = false;
+        return;
+    }
+}
 
 } // namespace gmx
-
-#endif

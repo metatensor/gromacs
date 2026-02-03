@@ -1818,9 +1818,9 @@ static void do_inputrec(gmx::ISerializer* serializer, t_inputrec* ir, int file_v
      */
     {
         serializer->doBool(&ir->bQMMM);
-        int qmmmScheme;
-        serializer->doInt(&qmmmScheme);
-        real unusedScalefactor;
+        int unusedQmmmScheme = -1;
+        serializer->doInt(&unusedQmmmScheme);
+        real unusedScalefactor = -1.0;
         serializer->doReal(&unusedScalefactor);
 
         // this is still used in Mimic
@@ -2688,9 +2688,9 @@ static void do_cmap(gmx::ISerializer* serializer, gmx_cmap_t* cmap_grid)
 
     int ngrid = cmap_grid->cmapdata.size();
     serializer->doInt(&ngrid);
-    serializer->doInt(&cmap_grid->grid_spacing);
+    serializer->doInt(&cmap_grid->gridExtent);
 
-    int gs    = cmap_grid->grid_spacing;
+    int gs    = cmap_grid->gridExtent;
     int nelem = gs * gs;
 
     if (serializer->reading())
@@ -2858,7 +2858,7 @@ static void do_mtop(gmx::ISerializer* serializer, gmx_mtop_t* mtop, int file_ver
     }
     else
     {
-        mtop->ffparams.cmap_grid.grid_spacing = 0;
+        mtop->ffparams.cmap_grid.gridExtent = 0;
         mtop->ffparams.cmap_grid.cmapdata.clear();
     }
 

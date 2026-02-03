@@ -44,6 +44,8 @@
 
 #include <array>
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "gromacs/topology/idef.h"
@@ -135,7 +137,7 @@ public:
     int numInterUpdategroupVirtualSites() const;
 
     //! Set VSites and distribute VSite work over threads, should be called after each DD partitioning
-    void setVirtualSites(const gmx::EnumerationArray<InteractionFunction, InteractionList>* ilist,
+    void setVirtualSites(const gmx::EnumerationArray<InteractionFunction, InteractionList>& ilists,
                          int                          numAtoms,
                          int                          homenr,
                          ArrayRef<const ParticleType> ptype);
@@ -187,11 +189,11 @@ private:
  *
  * \param[in,out] x        The coordinates
  * \param[in]     ip       Interaction parameters
- * \param[in]     ilist    The interaction list
+ * \param[in]     ilists   The interaction lists
  */
 void constructVirtualSites(ArrayRef<RVec>            x,
                            ArrayRef<const t_iparams> ip,
-                           const gmx::EnumerationArray<InteractionFunction, InteractionList>* ilist);
+                           const gmx::EnumerationArray<InteractionFunction, InteractionList>& ilists);
 
 /*! \brief Create positions of vsite atoms for the whole system assuming all molecules are wholex
  *
@@ -234,6 +236,14 @@ makeVirtualSitesHandler(const gmx_mtop_t&                 mtop,
                         gmx_domdec_t*                     domdec,
                         PbcType                           pbcType,
                         ArrayRef<const RangePartitioning> updateGroupingPerMoleculeType);
+
+/*! \brief Checks whether constructing atom are vsites with the same or higher function type
+ *
+ * Also checks whether vsites are used as constructing atoms for VsiteN (not allowed).
+ *
+ * \returns an error string when the restrictions are not satisfied
+ */
+std::optional<std::string> checkVsiteHierarchy(const gmx_mtop_t& mtop);
 
 } // namespace gmx
 

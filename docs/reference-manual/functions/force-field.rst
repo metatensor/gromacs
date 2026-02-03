@@ -193,8 +193,9 @@ where:
 
 - first five columns are pairs of atom and residue types,
 - sixth coulumn is function type (presently only ``1`` is supported),
-- seventh and eighth coulumns are grid size in ``x`` and ``y`` dimensions,
-- following ``grid size x * grid size y`` values constitute the CMAP grid.
+- seventh and eighth coulumns are grid extent in ``x`` and ``y`` dimensions,
+- the following ``grid extent x * grid extent y`` values constitute
+  the CMAP grid.
 
 Note that AMBER19SB and newer versions require residue names to express
 the residue type so that CMAP angle terms can be correctly assigned in
@@ -202,6 +203,10 @@ the residue type so that CMAP angle terms can be correctly assigned in
 ``-rtpres auto`` for that option of :ref:`pdb2gmx <gmx pdb2gmx>` in
 concert with the ``[ bondedtypes ]`` for the residue types for such
 forcefields.
+
+Note also that in the current implementation the grid extent must be
+identical for ``x`` and ``y`` dimensions and the same for all CMAP type
+entries.
 
 .. _charmmff:
 

@@ -38,3 +38,18 @@ When using the experimental direct halo communication feature combined with 8-wi
 non-bonded kernels and OpenMP threading, non-bonded interactions could be missing.
 
 :issue:`5509`
+
+Allow atoms involved intermolecular-exclusion to be perturbed
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+:issue:`5527`
+
+Added check for constructing atoms of virtual sites
+"""""""""""""""""""""""""""""""""""""""""""""""""""
+
+Constructing atoms for virtual sites can themselves be virtual sites, but only when
+those constructing atoms are virtual sites are higher up in the function type list
+(i.e. simpler constructions). This was documented in the manual. Now``grompp``
+and ``mdrun`` will throw an error when these restrictions are violated.
+
+:issue:`5535`

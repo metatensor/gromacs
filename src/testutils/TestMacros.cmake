@@ -71,6 +71,11 @@ function (gmx_add_unit_test_library NAME)
         target_compile_definitions(${NAME} PRIVATE HAVE_CONFIG_H)
         target_include_directories(${NAME} SYSTEM BEFORE PRIVATE ${PROJECT_SOURCE_DIR}/src/external/thread_mpi/include)
         target_compile_definitions(${NAME} PRIVATE TMPI_USE_VISIBILITY)
+        # These two include directories are supplied by the gmock target below
+        # but can be added after global include directories added e.g. for
+        # FFTW, which leads to unexpected mismatches. See #5141 and #5531.
+        target_include_directories(${NAME} SYSTEM BEFORE PRIVATE ${PROJECT_SOURCE_DIR}/src/external/googletest/googletest/include)
+        target_include_directories(${NAME} SYSTEM BEFORE PRIVATE ${PROJECT_SOURCE_DIR}/src/external/googletest/googlemock/include)
         target_link_libraries(${NAME} PRIVATE testutils gmock)
         if (GMX_BUILD_FOR_COVERAGE)
             target_link_libraries(${NAME} PRIVATE gcov)
@@ -209,20 +214,12 @@ function (gmx_add_gtest_executable EXENAME)
         elseif (GMX_GPU_SYCL)
             target_sources(${EXENAME} PRIVATE ${ARG_SYCL_CPP_SOURCE_FILES} ${ARG_GPU_CPP_SOURCE_FILES})
             # Ensure that libsycl is properly linked when GPU source
-            # files are compiled directly into ${EXENAME}, and when
-            # libgromacs is a static library.
-            #
-            # TODO The third predicate is used in release-2025 branch
-            # to maximize stability of the default shared-library
-            # build configuration. After merging to main branch,
-            # remove the third predicate, because it may be useful and
-            # seems unlikely to cause harm.
-            if(ARG_SYCL_CPP_SOURCE_FILES OR ARG_GPU_CPP_SOURCE_FILES OR NOT BUILD_SHARED_LIBS)
-                add_sycl_to_target(
-                    TARGET ${EXENAME}
-                    SOURCES ${ARG_SYCL_CPP_SOURCE_FILES} ${ARG_GPU_CPP_SOURCE_FILES}
-                    )
-            endif()
+            # files are compiled directly into ${EXENAME}, and also
+            # when libgromacs is linked statically to e.g. MKL
+            add_sycl_to_target(
+                TARGET ${EXENAME}
+                SOURCES ${ARG_SYCL_CPP_SOURCE_FILES} ${ARG_GPU_CPP_SOURCE_FILES}
+                )
         else()
             target_sources(${EXENAME} PRIVATE ${ARG_NON_GPU_CPP_SOURCE_FILES} ${ARG_GPU_CPP_SOURCE_FILES})
         endif()
@@ -242,6 +239,11 @@ function (gmx_add_gtest_executable EXENAME)
             target_compile_definitions(${EXENAME} PRIVATE _POSIX_C_SOURCE=200809L)
         endif()
 
+        # These two include directories are supplied by the gmock target below
+        # but can be added after global include directories added e.g. for
+        # FFTW, which leads to unexpected mismatches. See #5141 and #5531.
+        target_include_directories(${EXENAME} SYSTEM BEFORE PRIVATE ${PROJECT_SOURCE_DIR}/src/external/googletest/googletest/include)
+        target_include_directories(${EXENAME} SYSTEM BEFORE PRIVATE ${PROJECT_SOURCE_DIR}/src/external/googletest/googlemock/include)
         target_link_libraries(${EXENAME} PRIVATE
             testutils common libgromacs gmock
             ${GMX_COMMON_LIBRARIES} ${GMX_EXE_LINKER_FLAGS})
