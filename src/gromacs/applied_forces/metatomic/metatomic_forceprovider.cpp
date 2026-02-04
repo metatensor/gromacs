@@ -289,8 +289,10 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         }
 
         auto requested_output      = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
+        // TODO: take from the user
         requested_output->per_atom = false;
         requested_output->explicit_gradients = {};
+        requested_output->set_unit("kJ/mol");
 
         data_->evaluations_options->outputs.insert(energy_key, requested_output);
         data_->check_consistency = options_.params_.checkConsistency;
@@ -536,7 +538,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto energy_tensor = energy_block->values();
 
         outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] =
-                static_cast<real>(energy_tensor.item<double>());
+                static_cast<real>(energy_tensor.sum().item<double>());
 
         // Reset gradients before backward
         torch_positions.mutable_grad() = torch::Tensor();
