@@ -406,6 +406,15 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
                 // Match current local atom to one of the requested Metatomic input atoms
                 if (options_.params_.mtaAtoms_->globalIndex()[j] == globalIdx)
                 {
+                    // [DEBUG] Print distribution info
+        GMX_LOG(logger_.info)
+                .asParagraph().appendTextFormatted(
+                            "Rank %d: Found ModelAtom %d (Global %d) at Local %d (%s)\n",
+                            mpiComm_.rank(),
+                            j,
+                            globalIdx,
+                            i,
+                            (i < numLocal) ? "HOME" : "HALO");
                     if (i < numLocal)
                     {
                         inputToLocalIndex_[j]  = i;
