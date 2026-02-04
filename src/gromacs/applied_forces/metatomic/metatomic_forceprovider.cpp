@@ -288,9 +288,9 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                + energy_key + "' output, we can not use the metatomic interface."));
         }
 
-        auto requested_output      = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
+        auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
         // TODO: take from the user
-        requested_output->per_atom = false;
+        requested_output->per_atom           = false;
         requested_output->explicit_gradients = {};
         requested_output->set_unit("kJ/mol");
 
@@ -513,8 +513,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         {
             auto neighbors = buildNeighborListFromPairlist(
                     pairlistForModel_, shiftVectors_, cellShifts_, positions_, data_->device, data_->dtype);
-            // TODO: take from the user / model
-            metatomic_torch::register_autograd_neighbors(system, neighbors, /*check_consistency*/ true);
+            metatomic_torch::register_autograd_neighbors(system, neighbors, data_->check_consistency);
             system->add_neighbor_list(request, neighbors);
         }
 
@@ -525,7 +524,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             systems.push_back(system);
 
             auto ivalue_output = data_->model.forward(
-                    { c10::IValue(systems), data_->evaluations_options, data_->check_consistency });
+                    { systems, data_->evaluations_options, data_->check_consistency });
             auto dict_output = ivalue_output.toGenericDict();
             output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
         }
