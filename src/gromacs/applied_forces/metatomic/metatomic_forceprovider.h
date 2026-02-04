@@ -85,6 +85,7 @@ public:
 
     //! Set pairlist from notification and filter to MTA atom pairs.
     void setPairlist(const MDModulesPairlistConstructedSignal& signal);
+    void augmentGhostPairs(const ArrayRef<const RVec> x, const matrix box);
 
 private:
     //! Gather atom positions for MTA input.
@@ -105,7 +106,7 @@ private:
 
     //! lookup table to map model input indices [0...numInput) to local atom indices
     std::vector<int32_t> inputToLocalIndex_;
-
+    std::vector<int32_t> localToModelIndex_;
     //! lookup table to map model input indices to global atom indices
     std::vector<int32_t> inputToGlobalIndex_;
 

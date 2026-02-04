@@ -53,6 +53,8 @@
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/mdtypes/forceoutput.h"
 #include "gromacs/pbcutil/ishift.h"
+#include "gromacs/pbcutil/pbc.h"
+#include "gromacs/selection/nbsearch.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/logger.h"
@@ -89,24 +91,6 @@ static torch::optional<std::string> normalize_variant(std::string variant_string
     {
         return variant_string;
     }
-}
-
-/*! \brief Finds the index of a value in a vector.
- *
- * Performs a linear search to locate a specific value within a vector.
- *
- * \param[in] vec The vector to search.
- * \param[in] val The value to find.
- * \return The index of the value if found, otherwise std::nullopt.
- */
-static std::optional<ptrdiff_t> indexOf(ArrayRef<const int32_t> vec, const int32_t val)
-{
-    auto it = std::find(vec.begin(), vec.end(), val);
-    if (it == vec.end())
-    {
-        return std::nullopt;
-    }
-    return std::distance(vec.begin(), it);
 }
 
 /*! \brief Converts GROMACS PbcType to a boolean tensor for Metatomic.
@@ -389,6 +373,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     inputToLocalIndex_.assign(numInput, -1);
     inputToGlobalIndex_.assign(numInput, -1);
     atomNumbers_.assign(numInput, 0);
+    localToModelIndex_.assign(signal.x_.size(), -1);
 
     // GROMACS domain decomposition logic
     if (mpiComm_.isParallel())
@@ -406,6 +391,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
                 // Match current local atom to one of the requested Metatomic input atoms
                 if (options_.params_.mtaAtoms_->globalIndex()[j] == globalIdx)
                 {
+                    localToModelIndex_[i] = j;
                     std::fprintf(stderr,
                                  "Rank %d: Found ModelAtom %d (Global %d) at Local %d (%s)\n",
                                  mpiComm_.rank(),
@@ -532,13 +518,13 @@ void MetatomicForceProvider::preparePairlistInput()
         // Map these local indices back to the model's input indices [0, N_model_atoms).
         // `inputToLocalIndex_` maps ModelIdx -> LocalIdx.
         // indexOf reverses the map: Find ModelIdx k such that inputToLocalIndex_[k] == LocalIdx.
-        auto inputIdxA = indexOf(inputToLocalIndex_, atomPair.first);
+        const int32_t inputIdxA = localToModelIndex_[atomPair.first];
 
-        if (inputIdxA.has_value())
+        if (inputIdxA != -1)
         {
-            auto inputIdxB = indexOf(inputToLocalIndex_, atomPair.second);
+            const int32_t inputIdxB = localToModelIndex_[atomPair.second];
 
-            if (inputIdxB.has_value())
+            if (inputIdxB != -1)
             {
                 // Both atoms belong to the Metatomic subsystem.
                 // Calculate the shift vector due to PBC.
@@ -546,11 +532,11 @@ void MetatomicForceProvider::preparePairlistInput()
                 const IVec unitShift = shiftIndexToXYZ(shiftIndex);
                 mvmul_ur0(box_, unitShift.toRVec(), shift);
 
-                pairlistForModel_.push_back(static_cast<int32_t>(inputIdxA.value()));
-                pairlistForModel_.push_back(static_cast<int32_t>(inputIdxB.value()));
-                std::fprintf(stderr, "Rank %d: Signal pair (Local %d, %d) -> Model (%ld, %ld)\n",
+                pairlistForModel_.push_back(inputIdxA);
+                pairlistForModel_.push_back(inputIdxB);
+                std::fprintf(stderr, "Rank %d: Signal pair (Local %d, %d) -> Model (%d, %d)\n",
                              mpiComm_.rank(), atomPair.first, atomPair.second,
-                             inputIdxA.value(), inputIdxB.value());
+                             inputIdxA, inputIdxB);
                 shiftVectors_.push_back(shift);
                 cellShifts_.push_back(unitShift);
             }
@@ -562,6 +548,87 @@ void MetatomicForceProvider::preparePairlistInput()
     doPairlist_ = false;
 }
 
+void MetatomicForceProvider::augmentGhostPairs(const ArrayRef<const RVec> x, const matrix box)
+{
+    const int32_t nHome  = options_.params_.mtaAtoms_->localIndex().size();
+    const int32_t nTotal = x.size();
+
+    if (nTotal <= nHome)
+    {
+        return;
+    }
+
+    t_pbc pbc;
+    set_pbc(&pbc, *options_.params_.pbcType_, box);
+
+    const auto ghostCoords = x.subArray(nHome, nTotal - nHome);
+
+    gmx::AnalysisNeighborhood nb;
+    nb.setCutoff(data_->nl_requests[0]->cutoff());
+
+    gmx::AnalysisNeighborhoodPositions ghostPositions(as_rvec_array(ghostCoords.data()),
+                                                      ghostCoords.size());
+
+    gmx::AnalysisNeighborhoodSearch     search      = nb.initSearch(&pbc, ghostPositions);
+    gmx::AnalysisNeighborhoodPairSearch ghostSearch = search.startSelfPairSearch();
+    gmx::AnalysisNeighborhoodPair       pair;
+
+    while (ghostSearch.findNextPair(&pair))
+    {
+        const int32_t localIdxA = pair.refIndex() + nHome;
+        const int32_t localIdxB = pair.testIndex() + nHome;
+
+        const int32_t inputIdxA = localToModelIndex_[localIdxA];
+        const int32_t inputIdxB = localToModelIndex_[localIdxB];
+
+        if (inputIdxA != -1 && inputIdxB != -1)
+        {
+            rvec rij_raw, shift;
+            rvec_sub(x[localIdxA], x[localIdxB], rij_raw);
+
+            // PBC shift calculation: S = r_ij_corrected - (x_j - x_i)
+            // XXX: there's got to be a better way........
+            rvec_sub(pair.dx(), rij_raw, shift);
+
+            // Explicit 3x3 inversion for box matrix to find integer shifts
+            double det = box[0][0] * (box[1][1] * box[2][2] - box[1][2] * box[2][1]) -
+                         box[0][1] * (box[1][0] * box[2][2] - box[1][2] * box[2][0]) +
+                         box[0][2] * (box[1][0] * box[2][1] - box[1][1] * box[2][0]);
+            
+            double invDet = 1.0 / det;
+            rvec unitShiftRvec;
+            unitShiftRvec[0] = invDet * (shift[0] * (box[1][1] * box[2][2] - box[1][2] * box[2][1]) +
+                                         shift[1] * (box[0][2] * box[2][1] - box[0][1] * box[2][2]) +
+                                         shift[2] * (box[0][1] * box[1][2] - box[0][2] * box[1][1]));
+            unitShiftRvec[1] = invDet * (shift[0] * (box[1][2] * box[2][0] - box[1][0] * box[2][2]) +
+                                         shift[1] * (box[0][0] * box[2][2] - box[0][2] * box[2][0]) +
+                                         shift[2] * (box[0][2] * box[1][0] - box[0][0] * box[1][2]));
+            unitShiftRvec[2] = invDet * (shift[0] * (box[1][0] * box[2][1] - box[1][1] * box[2][0]) +
+                                         shift[1] * (box[0][1] * box[2][0] - box[0][0] * box[2][1]) +
+                                         shift[2] * (box[0][0] * box[1][1] - box[0][1] * box[1][0]));
+
+            IVec unitShift;
+            unitShift[0] = static_cast<int>(std::round(unitShiftRvec[0]));
+            unitShift[1] = static_cast<int>(std::round(unitShiftRvec[1]));
+            unitShift[2] = static_cast<int>(std::round(unitShiftRvec[2]));
+
+            pairlistForModel_.push_back(inputIdxA);
+            pairlistForModel_.push_back(inputIdxB);
+            shiftVectors_.push_back(RVec(shift));
+            cellShifts_.push_back(unitShift);
+
+            std::fprintf(stderr,
+                         "[Augmented] Rank %d: Halo pair (Local %d, %d) -> Model (%d, %d)\n",
+                         mpiComm_.rank(),
+                         localIdxA,
+                         localIdxB,
+                         inputIdxA,
+                         inputIdxB);
+        }
+    }
+}
+
+
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
     const int32_t n_atoms = static_cast<int32_t>(options_.params_.mtaIndices_.size());
@@ -570,6 +637,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     gatherAtomPositions(inputs.x_);
     copy_mat(inputs.box_, box_);
     preparePairlistInput();
+    augmentGhostPairs(inputs.x_, inputs.box_);
 
     // Force tensor - main rank fills this, others hold zeros until reduction
     torch::Tensor forceTensor = torch::zeros(
