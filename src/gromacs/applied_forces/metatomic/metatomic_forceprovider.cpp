@@ -418,6 +418,22 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
         }
         // Reduce atomic numbers across ranks to ensure the main rank has the full set
         mpiComm_.sumReduce(numInput, atomNumbers_.data());
+
+        // Debug logging for domain decomposition distribution
+        int32_t localCount = 0;
+        for (const int32_t idx : inputToLocalIndex_)
+        {
+            if (idx != -1)
+            {
+                localCount++;
+            }
+        }
+        GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendTextFormatted("Rank %d: Mapped %d / %d Metatomic atoms (Home+Halo).",
+                                     mpiComm_.rank(),
+                                     localCount,
+                                     numInput);
     }
     else
     {
