@@ -44,6 +44,9 @@
 
 #include <cstdint>
 
+#include <algorithm>
+#include <optional>
+
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
@@ -71,6 +74,11 @@
 namespace gmx
 {
 
+/*! \brief Normalizes the variant string for Metatomic output selection.
+ *
+ * \param[in] variant_string The raw variant string from options.
+ * \return A torch::optional containing the string if valid, or nullopt if empty/"no".
+ */
 static torch::optional<std::string> normalize_variant(std::string variant_string)
 {
     if (variant_string == "no" || variant_string.empty())
@@ -83,7 +91,14 @@ static torch::optional<std::string> normalize_variant(std::string variant_string
     }
 }
 
-
+/*! \brief Finds the index of a value in a vector.
+ *
+ * Performs a linear search to locate a specific value within a vector.
+ *
+ * \param[in] vec The vector to search.
+ * \param[in] val The value to find.
+ * \return The index of the value if found, otherwise std::nullopt.
+ */
 static std::optional<ptrdiff_t> indexOf(ArrayRef<const int32_t> vec, const int32_t val)
 {
     auto it = std::find(vec.begin(), vec.end(), val);
@@ -94,6 +109,12 @@ static std::optional<ptrdiff_t> indexOf(ArrayRef<const int32_t> vec, const int32
     return std::distance(vec.begin(), it);
 }
 
+/*! \brief Converts GROMACS PbcType to a boolean tensor for Metatomic.
+ *
+ * \param[in] pbcType The GROMACS periodic boundary condition type.
+ * \param[in] device  The torch device where the tensor should reside.
+ * \return A boolean tensor of shape {3} indicating periodicity in X, Y, Z.
+ */
 static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
 {
     auto options = torch::TensorOptions().dtype(torch::kBool).device(device);
@@ -108,11 +129,25 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     }
     else if (*pbcType != PbcType::Xyz)
     {
-        GMX_THROW(InconsistentInputError("PBC type not supported."));
+        GMX_THROW(InconsistentInputError("PBC type not supported by Metatomic interface."));
     }
     return torch::tensor({ true, true, true }, options);
 }
 
+/*! \brief Constructs a Metatensor TensorBlock representing the neighbor list.
+ *
+ * This function takes the filtered pairlist (atoms participating in the model interaction)
+ * and constructs the corresponding neighbor list in the format required by Metatensor/Torch.
+ * It computes the interatomic vectors, applying periodic boundary shifts where necessary.
+ *
+ * \param[in] pairlist     Flat array of atom pairs (indices into the model's atom list).
+ * \param[in] shiftVectors Geometric shift vectors (RVec) for each pair.
+ * \param[in] cellShifts   Integer cell shift indices for each pair (for metadata).
+ * \param[in] positions    Positions of the atoms (ordered by model index).
+ * \param[in] device       The torch device for the output tensors.
+ * \param[in] dtype        The torch scalar type (float32/float64).
+ * \return A TensorBlockHolder containing the neighbor list data.
+ */
 static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int32_t> pairlist,
                                                                    ArrayRef<const RVec> shiftVectors,
                                                                    ArrayRef<const IVec> cellShifts,
@@ -122,22 +157,24 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
 {
     const int64_t n_pairs = static_cast<int64_t>(pairlist.size() / 2);
 
+    // Prepare CPU tensors first to facilitate efficient element access
     auto cpu_int_options   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
     auto cpu_float_options = torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU);
 
+    // Samples: [first_atom, second_atom, cell_shift_a, cell_shift_b, cell_shift_c]
     auto pair_samples_values = torch::zeros({ n_pairs, 5 }, cpu_int_options);
     auto pair_samples_ptr    = pair_samples_values.accessor<int32_t, 2>();
 
-    // Full interatomic vectors (rj - ri + shift)
+    // Values: Full interatomic vectors (rj - ri + shift)
     auto vectors_cpu      = torch::zeros({ n_pairs, 3, 1 }, cpu_float_options);
     auto vectors_accessor = vectors_cpu.accessor<double, 3>();
 
     for (int64_t i = 0; i < n_pairs; i++)
     {
-        int32_t atom_i = pairlist[2 * i];
-        int32_t atom_j = pairlist[2 * i + 1];
+        const int32_t atom_i = pairlist[2 * i];
+        const int32_t atom_j = pairlist[2 * i + 1];
 
-        // Access IVec elements (integers)
+        // Fill sample metadata
         pair_samples_ptr[i][0] = static_cast<int32_t>(atom_i);
         pair_samples_ptr[i][1] = static_cast<int32_t>(atom_j);
         pair_samples_ptr[i][2] = cellShifts[i][0];
@@ -145,11 +182,11 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
         pair_samples_ptr[i][4] = cellShifts[i][2];
 
         // Calculate r_ij = r_j - r_i + shift
-        double r_ij_x =
+        const double r_ij_x =
                 static_cast<double>(positions[atom_j][0] - positions[atom_i][0] + shiftVectors[i][0]);
-        double r_ij_y =
+        const double r_ij_y =
                 static_cast<double>(positions[atom_j][1] - positions[atom_i][1] + shiftVectors[i][1]);
-        double r_ij_z =
+        const double r_ij_z =
                 static_cast<double>(positions[atom_j][2] - positions[atom_i][2] + shiftVectors[i][2]);
 
         vectors_accessor[i][0][0] = r_ij_x;
@@ -157,6 +194,7 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
         vectors_accessor[i][2][0] = r_ij_z;
     }
 
+    // Move data to target device and type
     auto final_samples_values = pair_samples_values.to(device);
     auto final_vectors        = vectors_cpu.to(dtype).to(device);
 
@@ -182,6 +220,11 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
 }
 
 
+/*! \brief Internal data structure for Metatomic runtime states.
+ *
+ * Encapsulates the Torch model, device configurations, capabilities, and options
+ * required for model evaluation.
+ */
 struct MetatomicData
 {
     metatensor_torch::Module           model = metatensor_torch::Module(torch::jit::Module());
@@ -208,12 +251,13 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // Matches NNPot's limitation
     if (mpiComm_.isParallel())
     {
-        GMX_THROW(NotImplementedError(
-                "Metatomic does not yet support domain decomposition. "
-                "Use thread-MPI (gmx mdrun) instead of MPI (mpirun gmx_mpi mdrun)."));
+        GMX_THROW(
+                NotImplementedError("Metatomic does not yet support domain decomposition (MPI). "
+                                    "Please use thread-MPI (gmx mdrun -ntmpi X) instead of MPI "
+                                    "(mpirun -np X gmx_mpi mdrun)."));
     }
 
-    // Only main rank loads model
+    // Only the main rank loads the model to avoid file contention and redundant loading on the same node.
     if (mpiComm_.isMainRank())
     {
         try
@@ -235,7 +279,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         data_->capabilities =
                 data_->model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
 
-        // Determine device using capabilities and optional environment variable
+        // Determine computation device
         torch::optional<std::string> desiredDevice = torch::nullopt;
         if (const char* env = std::getenv("GMX_METATOMIC_DEVICE"))
         {
@@ -250,6 +294,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 .asParagraph()
                 .appendTextFormatted("Metatomic using device: %s", data_->device.str().c_str());
 
+        // Process neighbor list requests from the model
         auto requests_ivalue = data_->model.run_method("requested_neighbor_lists");
         for (const auto& request_ivalue : requests_ivalue.toList())
         {
@@ -259,6 +304,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
         data_->model.to(data_->device);
 
+        // Configure precision
         if (data_->capabilities->dtype() == "float64")
         {
             data_->dtype = torch::kFloat64;
@@ -269,23 +315,26 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         }
         else
         {
-            GMX_THROW(APIError("Unsupported dtype: " + data_->capabilities->dtype()));
+            GMX_THROW(APIError("Unsupported dtype from model capabilities: "
+                               + data_->capabilities->dtype()));
         }
 
         data_->evaluations_options =
                 torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
         data_->evaluations_options->set_length_unit("nm");
 
+        // Validate energy output existence
         auto outputs    = data_->capabilities->outputs();
         auto v_energy   = normalize_variant(options_.params_.variant);
         auto energy_key = pick_output("energy", outputs, v_energy);
 
         if (!outputs.contains(energy_key))
         {
-            GMX_THROW(APIError("the model at '" + options_.params_.modelPath_
-                               + "' does not provide "
-                                 "an '"
-                               + energy_key + "' output, we can not use the metatomic interface."));
+            GMX_THROW(
+                    APIError(formatString("The model at '%s' does not provide an '%s' output. "
+                                          "Metatomic interface cannot proceed.",
+                                          options_.params_.modelPath_.c_str(),
+                                          energy_key.c_str())));
         }
 
         auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
@@ -298,6 +347,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         data_->check_consistency = options_.params_.checkConsistency;
     }
 
+    // Initialize vectors for atom mapping
     const auto&   mtaIndices = options_.params_.mtaIndices_;
     const int32_t n_atoms    = static_cast<int32_t>(mtaIndices.size());
 
@@ -334,10 +384,12 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     const auto&   mtaIndices = options_.params_.mtaIndices_;
     const int32_t numInput   = static_cast<int32_t>(mtaIndices.size());
 
+    // Reset mappings
     inputToLocalIndex_.assign(numInput, -1);
     inputToGlobalIndex_.assign(numInput, -1);
     atomNumbers_.assign(numInput, 0);
 
+    // GROMACS domain decomposition logic
     if (mpiComm_.isParallel())
     {
         GMX_RELEASE_ASSERT(signal.globalAtomIndices_.has_value(),
@@ -350,6 +402,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             int32_t globalIdx = globalAtomIndices[i];
             for (int32_t j = 0; j < numInput; j++)
             {
+                // Match current local atom to one of the requested Metatomic input atoms
                 if (options_.params_.mtaAtoms_->globalIndex()[j] == globalIdx)
                 {
                     if (i < numLocal)
@@ -362,10 +415,12 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
                 }
             }
         }
+        // Reduce atomic numbers across ranks to ensure the main rank has the full set
         mpiComm_.sumReduce(numInput, atomNumbers_.data());
     }
     else
     {
+        // Thread-MPI or Serial execution
         const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
         for (int32_t i = 0; i < numInput; i++)
         {
@@ -414,10 +469,21 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
 
 void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& signal)
 {
+    // Capture the pairlist signal. Processing is deferred to
+    // calculateForces/preparePairlistInput to keep this callback fast.
     fullPairlist_.assign(signal.excludedPairlist_.begin(), signal.excludedPairlist_.end());
     doPairlist_ = true;
 }
 
+/*! \brief Converts the GROMACS neighbor list to a model-compatible list.
+ *
+ * This function iterates over the full GROMACS excluded pairlist (which contains pairs in
+ * GROMACS local atom indices). It filters this list to retain only pairs where *both* atoms
+ * are part of the Metatomic model's input set.
+ *
+ * It populates `pairlistForModel_` (using model-relative indices), `shiftVectors_`,
+ * and `cellShifts_`.
+ */
 void MetatomicForceProvider::preparePairlistInput()
 {
     if (!doPairlist_)
@@ -425,7 +491,10 @@ void MetatomicForceProvider::preparePairlistInput()
         return;
     }
 
-    GMX_ASSERT(!fullPairlist_.empty(), "Pairlist empty!");
+    // Although the assert catches empty pairlists, in a real simulation with a very large cutoff,
+    // this might happen legitimately if only 1 atom exists. However, for standard MD, it indicates
+    // an issue. Assert here to catch initialization ordering bugs.
+    GMX_ASSERT(!fullPairlist_.empty(), "Pairlist for Metatomic is empty!");
 
     const int32_t numPairs = gmx::ssize(fullPairlist_);
     pairlistForModel_.clear();
@@ -439,19 +508,29 @@ void MetatomicForceProvider::preparePairlistInput()
     {
         const auto [atomPair, shiftIndex] = fullPairlist_[i];
 
-        auto inputIdxA = indexOf(inputToGlobalIndex_, atomPair.first);
-        auto inputIdxB = indexOf(inputToGlobalIndex_, atomPair.second);
+        // GROMACS pairlists use local atom indices.
+        // Map these local indices back to the model's input indices [0, N_model_atoms).
+        // `inputToLocalIndex_` maps ModelIdx -> LocalIdx.
+        // indexOf reverses the map: Find ModelIdx k such that inputToLocalIndex_[k] == LocalIdx.
+        auto inputIdxA = indexOf(inputToLocalIndex_, atomPair.first);
 
-        if (inputIdxA.has_value() && inputIdxB.has_value())
+        if (inputIdxA.has_value())
         {
-            RVec       shift;
-            const IVec unitShift = shiftIndexToXYZ(shiftIndex);
-            mvmul_ur0(box_, unitShift.toRVec(), shift);
+            auto inputIdxB = indexOf(inputToLocalIndex_, atomPair.second);
 
-            pairlistForModel_.push_back(static_cast<int32_t>(inputIdxA.value()));
-            pairlistForModel_.push_back(static_cast<int32_t>(inputIdxB.value()));
-            shiftVectors_.push_back(shift);
-            cellShifts_.push_back(unitShift);
+            if (inputIdxB.has_value())
+            {
+                // Both atoms belong to the Metatomic subsystem.
+                // Calculate the shift vector due to PBC.
+                RVec       shift;
+                const IVec unitShift = shiftIndexToXYZ(shiftIndex);
+                mvmul_ur0(box_, unitShift.toRVec(), shift);
+
+                pairlistForModel_.push_back(static_cast<int32_t>(inputIdxA.value()));
+                pairlistForModel_.push_back(static_cast<int32_t>(inputIdxB.value()));
+                shiftVectors_.push_back(shift);
+                cellShifts_.push_back(unitShift);
+            }
         }
     }
 
@@ -464,11 +543,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 {
     const int32_t n_atoms = static_cast<int32_t>(options_.params_.mtaIndices_.size());
 
+    // Update positions and box for the current step
     gatherAtomPositions(inputs.x_);
     copy_mat(inputs.box_, box_);
     preparePairlistInput();
 
-    // Force tensor - main rank fills, others have zeros
+    // Force tensor - main rank fills this, others hold zeros until reduction
     torch::Tensor forceTensor = torch::zeros(
             { n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64).device(data_->device));
 
@@ -477,6 +557,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     if (mpiComm_.isMainRank())
     {
+        // Select appropriate precision for GROMACS data conversion
         auto gromacs_scalar_type = torch::kFloat32;
         if (std::is_same_v<real, double>)
         {
@@ -492,7 +573,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto torch_cell =
                 torch::from_blob(&box_, { 3, 3 }, cpu_blob_options).to(data_->dtype).to(data_->device);
 
-        // Create strain tensor for virial computation (like LAMMPS does)
+        // Create strain tensor (identity matrix) for virial computation via autodiff
         auto strain = torch::eye(
                 3, torch::TensorOptions().dtype(data_->dtype).device(data_->device).requires_grad(true));
 
@@ -523,6 +604,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             std::vector<metatomic_torch::System> systems;
             systems.push_back(system);
 
+            // Forward pass
             auto ivalue_output = data_->model.forward(
                     { systems, data_->evaluations_options, data_->check_consistency });
             auto dict_output = ivalue_output.toGenericDict();
@@ -533,6 +615,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             GMX_THROW(APIError("[Metatomic] Model evaluation failed: " + std::string(e.what())));
         }
 
+        // Extract Energy
         auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
         auto energy_tensor = energy_block->values();
 
@@ -543,7 +626,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         torch_positions.mutable_grad() = torch::Tensor();
         strain.mutable_grad()          = torch::Tensor();
 
-        // Compute forces and virial via backward propagation
+        // Backward pass: Compute forces (-dE/dr) and virial (-dE/dStrain)
         energy_tensor.backward(-torch::ones_like(energy_tensor));
 
         auto grad   = torch_positions.grad();
@@ -553,17 +636,18 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
     }
 
-    // Distribute forces (sumReduce acts as broadcast since non-main ranks have zeros)
+    // Distribute results to all ranks if necessary (sumReduce broadcasts if ranks > 1)
     if (mpiComm_.isParallel())
     {
         mpiComm_.sumReduce(n_atoms * 3, static_cast<double*>(forceTensor.data_ptr()));
         mpiComm_.sumReduce(9, static_cast<double*>(virialTensor.data_ptr()));
     }
 
-    // Apply forces to local atoms only
+    // Accumulate forces into the GROMACS force output
     auto forceAccessor = forceTensor.accessor<double, 2>();
     for (int32_t i = 0; i < n_atoms; ++i)
     {
+        // Only apply force if this atom is local to this rank
         if (inputToLocalIndex_[i] != -1)
         {
             outputs->forceWithVirial_.force_[inputToLocalIndex_[i]][0] += forceAccessor[i][0];
