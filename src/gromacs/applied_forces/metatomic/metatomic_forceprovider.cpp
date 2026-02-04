@@ -251,15 +251,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // Matches NNPot's limitation
     if (mpiComm_.isParallel())
     {
-        GMX_THROW(
-                NotImplementedError("Metatomic does not yet support domain decomposition (MPI). "
+        GMX_LOG(logger_.warning)
+
+                .asParagraph()
+
+                .appendText(
+                        "Metatomic support domain decomposition is EXPERIMENTAL (MPI). "
                                     "Please use thread-MPI (gmx mdrun -ntmpi X) instead of MPI "
-                                    "(mpirun -np X gmx_mpi mdrun)."));
+                                    "(mpirun -np X gmx_mpi mdrun).");
     }
 
-    // Only the main rank loads the model to avoid file contention and redundant loading on the same node.
-    if (mpiComm_.isMainRank())
-    {
         try
         {
             torch::optional<std::string> extensions_directory = torch::nullopt;
@@ -345,7 +346,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
         data_->evaluations_options->outputs.insert(energy_key, requested_output);
         data_->check_consistency = options_.params_.checkConsistency;
-    }
+    
 
     // Initialize vectors for atom mapping
     const auto&   mtaIndices = options_.params_.mtaIndices_;
