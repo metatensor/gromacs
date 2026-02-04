@@ -548,6 +548,9 @@ void MetatomicForceProvider::preparePairlistInput()
 
                 pairlistForModel_.push_back(static_cast<int32_t>(inputIdxA.value()));
                 pairlistForModel_.push_back(static_cast<int32_t>(inputIdxB.value()));
+                std::fprintf(stderr, "Rank %d: Signal pair (Local %d, %d) -> Model (%ld, %ld)\n",
+                             mpiComm_.rank(), atomPair.first, atomPair.second,
+                             inputIdxA.value(), inputIdxB.value());
                 shiftVectors_.push_back(shift);
                 cellShifts_.push_back(unitShift);
             }
