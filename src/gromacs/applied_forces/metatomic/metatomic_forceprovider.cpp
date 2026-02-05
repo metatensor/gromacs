@@ -206,12 +206,14 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     // Pairlist-based neighbor lists don't work with domain decomposition yet (indices are local)
     // Matches NNPot's limitation
+#if !GMX_THREAD_MPI
     if (mpiComm_.isParallel())
     {
         GMX_THROW(NotImplementedError(
                 "Metatomic does not yet support domain decomposition. "
                 "Use thread-MPI (gmx mdrun) instead of MPI (mpirun gmx_mpi mdrun)."));
     }
+#endif
 
     // Only main rank loads model
     if (mpiComm_.isMainRank())
