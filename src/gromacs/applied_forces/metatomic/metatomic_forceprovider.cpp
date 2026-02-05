@@ -484,15 +484,15 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         {
             gromacs_scalar_type = torch::kFloat64;
         }
-        auto blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(data_->device);
+        auto cpu_blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
 
-        auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { n_atoms, 3 }, blob_options)
+        auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { n_atoms, 3 }, cpu_blob_options)
                                        .to(data_->dtype)
                                        .to(data_->device)
                                        .set_requires_grad(true);
 
         auto torch_cell =
-                torch::from_blob(&box_, { 3, 3 }, blob_options).to(data_->dtype).to(data_->device);
+                torch::from_blob(&box_, { 3, 3 }, cpu_blob_options).to(data_->dtype).to(data_->device);
 
         // Create strain tensor for virial computation (like LAMMPS does)
         auto strain = torch::eye(
