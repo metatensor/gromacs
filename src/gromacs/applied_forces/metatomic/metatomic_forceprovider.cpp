@@ -189,7 +189,7 @@ struct MetatomicData
     std::vector<metatomic_torch::NeighborListOptions> nl_requests;
     metatomic_torch::ModelEvaluationOptions           evaluations_options;
     torch::ScalarType                                 dtype             = torch::kFloat32;
-    bool                                              check_consistency = true;
+    bool                                              check_consistency = false;
     torch::Device                                     device            = torch::kCPU;
 };
 

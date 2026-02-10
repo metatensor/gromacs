@@ -3,11 +3,12 @@
 <ReferenceData>
   <String Name="Mdp output">
 ; Machine learning potential using metatomic
-metatomic-active         = true
-metatomic-input-group    = System
-metatomic-model          = 
-metatomic-extensions     = 
-metatomic-device         = 
+metatomic-active            = true
+metatomic-input-group       = System
+metatomic-model             = 
+metatomic-extensions        = 
 metatomic-check-consistency = true
+metatomic-device            = 
+metatomic-variant           = 
 </String>
 </ReferenceData>
