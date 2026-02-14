@@ -94,6 +94,9 @@ private:
     //! Prepare pairlist input for model
     void preparePairlistInput();
 
+    //! Build full neighbor list on main rank from gathered positions
+    void buildFullPairlist(const matrix box);
+
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
     const MpiComm&          mpiComm_;

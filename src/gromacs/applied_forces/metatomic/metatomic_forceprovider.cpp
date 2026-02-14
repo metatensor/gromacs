@@ -47,8 +47,6 @@
 
 #include <algorithm>
 #include <optional>
-#include <set>
-#include <tuple>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
@@ -704,6 +702,87 @@ void MetatomicForceProvider::augmentGhostPairs(const ArrayRef<const RVec> x, con
     std::fprintf(stderr, "Rank %d: augmentGhostPairs added %d halo-halo pairs\n", mpiComm_.rank(), augmentedCount);
 }
 
+void MetatomicForceProvider::buildFullPairlist(const matrix box)
+{
+    pairlistForModel_.clear();
+    shiftVectors_.clear();
+    cellShifts_.clear();
+
+    const int32_t n_atoms = static_cast<int32_t>(positions_.size());
+    if (n_atoms < 2)
+    {
+        return;
+    }
+
+    t_pbc pbc;
+    set_pbc(&pbc, *options_.params_.pbcType_, box);
+
+    gmx::AnalysisNeighborhood nb;
+    nb.setCutoff(data_->nl_requests[0]->cutoff());
+
+    gmx::AnalysisNeighborhoodPositions allPositions(as_rvec_array(positions_.data()), n_atoms);
+
+    gmx::AnalysisNeighborhoodSearch     search     = nb.initSearch(&pbc, allPositions);
+    gmx::AnalysisNeighborhoodPairSearch pairSearch = search.startSelfPairSearch();
+    gmx::AnalysisNeighborhoodPair       pair;
+
+    while (pairSearch.findNextPair(&pair))
+    {
+        const int32_t atomA = pair.refIndex();
+        const int32_t atomB = pair.testIndex();
+
+        // pair.dx() = PBC-correct vector from ref to test
+        // buildNeighborListFromPairlist computes: r_ij = positions_[B] - positions_[A] + shift
+        // So: shift = pair.dx() - (positions_[B] - positions_[A])
+        rvec modelDiff;
+        rvec_sub(positions_[atomB].as_vec(), positions_[atomA].as_vec(), modelDiff);
+
+        rvec shift;
+        rvec_sub(pair.dx(), modelDiff, shift);
+
+        // Compute integer cell shifts via box matrix inversion
+        double det = box[0][0] * (box[1][1] * box[2][2] - box[1][2] * box[2][1])
+                     - box[0][1] * (box[1][0] * box[2][2] - box[1][2] * box[2][0])
+                     + box[0][2] * (box[1][0] * box[2][1] - box[1][1] * box[2][0]);
+
+        IVec unitShift;
+        if (std::abs(det) > 1e-10)
+        {
+            double invDet = 1.0 / det;
+            rvec   unitShiftRvec;
+            unitShiftRvec[0] = invDet
+                               * (shift[0] * (box[1][1] * box[2][2] - box[1][2] * box[2][1])
+                                  + shift[1] * (box[0][2] * box[2][1] - box[0][1] * box[2][2])
+                                  + shift[2] * (box[0][1] * box[1][2] - box[0][2] * box[1][1]));
+            unitShiftRvec[1] = invDet
+                               * (shift[0] * (box[1][2] * box[2][0] - box[1][0] * box[2][2])
+                                  + shift[1] * (box[0][0] * box[2][2] - box[0][2] * box[2][0])
+                                  + shift[2] * (box[0][2] * box[1][0] - box[0][0] * box[1][2]));
+            unitShiftRvec[2] = invDet
+                               * (shift[0] * (box[1][0] * box[2][1] - box[1][1] * box[2][0])
+                                  + shift[1] * (box[0][1] * box[2][0] - box[0][0] * box[2][1])
+                                  + shift[2] * (box[0][0] * box[1][1] - box[0][1] * box[1][0]));
+
+            unitShift[0] = static_cast<int>(std::round(unitShiftRvec[0]));
+            unitShift[1] = static_cast<int>(std::round(unitShiftRvec[1]));
+            unitShift[2] = static_cast<int>(std::round(unitShiftRvec[2]));
+        }
+        else
+        {
+            unitShift = { 0, 0, 0 };
+        }
+
+        // Recompute shift from integer cell shifts for exact consistency
+        RVec finalShift;
+        mvmul_ur0(box, unitShift.toRVec(), finalShift);
+
+        pairlistForModel_.push_back(atomA);
+        pairlistForModel_.push_back(atomB);
+        shiftVectors_.push_back(finalShift);
+        cellShifts_.push_back(unitShift);
+    }
+}
+
 
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
@@ -718,86 +797,33 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     copy_mat(inputs.box_, box_);
 
+    // Build the full neighbor list on the main rank from gathered positions.
+    // Every rank has all positions after gatherAtomPositions()/sumReduce, so rank 0
+    // can find ALL pairs via AnalysisNeighborhoodSearch. This avoids the fundamental
+    // problem of per-rank signal pairs only covering that rank's local view.
     {
-        MetatomicTimer timer("preparePairlistInput", mpiComm_);
-        preparePairlistInput();
-    }
-
-    const int32_t signalPairs = static_cast<int32_t>(pairlistForModel_.size() / 2);
-
-    {
-        MetatomicTimer timer("augmentGhostPairs", mpiComm_);
-        augmentGhostPairs(inputs.x_, inputs.box_);
-    }
-
-    const int32_t totalPairsBeforeDedup = static_cast<int32_t>(pairlistForModel_.size() / 2);
-
-    // Deduplicate pairs: the signal may already include some halo-halo pairs
-    // that augmentGhostPairs also finds. Metatensor requires unique labels.
-    {
-        MetatomicTimer timer("deduplicatePairs", mpiComm_);
-
-        using PairKey = std::tuple<int32_t, int32_t, int, int, int>;
-        std::set<PairKey>    seen;
-        std::vector<int32_t> dedupPairlist;
-        std::vector<RVec>    dedupShifts;
-        std::vector<IVec>    dedupCellShifts;
-
-        const int32_t nPairs = static_cast<int32_t>(pairlistForModel_.size() / 2);
-        dedupPairlist.reserve(pairlistForModel_.size());
-        dedupShifts.reserve(nPairs);
-        dedupCellShifts.reserve(nPairs);
-
-        for (int32_t i = 0; i < nPairs; i++)
-        {
-            int32_t a = pairlistForModel_[2 * i];
-            int32_t b = pairlistForModel_[2 * i + 1];
-            PairKey key(a, b, cellShifts_[i][0], cellShifts_[i][1], cellShifts_[i][2]);
-
-            if (seen.insert(key).second)
-            {
-                dedupPairlist.push_back(a);
-                dedupPairlist.push_back(b);
-                dedupShifts.push_back(shiftVectors_[i]);
-                dedupCellShifts.push_back(cellShifts_[i]);
-            }
-        }
-
-        const int32_t removed = nPairs - static_cast<int32_t>(dedupShifts.size());
-        if (removed > 0)
-        {
-            std::fprintf(stderr, "Rank %d: Removed %d duplicate pairs\n", mpiComm_.rank(), removed);
-        }
-
-        pairlistForModel_ = std::move(dedupPairlist);
-        shiftVectors_     = std::move(dedupShifts);
-        cellShifts_       = std::move(dedupCellShifts);
+        MetatomicTimer timer("buildFullPairlist", mpiComm_);
+        buildFullPairlist(inputs.box_);
     }
 
     const int32_t totalPairs = static_cast<int32_t>(pairlistForModel_.size() / 2);
     std::fprintf(stderr,
-                 "Rank %d Step %ld: %d signal + %d augmented - %d dupes = %d unique pairs, "
-                 "%d model atoms, homenr=%d, x.size=%zu\n",
+                 "Rank %d Step %ld: %d pairs, %d model atoms, homenr=%d, x.size=%zu\n",
                  mpiComm_.rank(),
                  inputs.step_,
-                 signalPairs,
-                 totalPairsBeforeDedup - signalPairs,
-                 totalPairsBeforeDedup - totalPairs,
                  totalPairs,
                  n_atoms,
                  inputs.homenr_,
                  inputs.x_.size());
 
-    // Force tensor - main rank fills this, others hold zeros until reduction
-    torch::Tensor forceTensor = torch::zeros(
-            { n_atoms, 3 }, torch::TensorOptions().dtype(torch::kFloat64).device(data_->device));
+    // Every rank runs the model independently with the same gathered positions.
+    // This avoids MPI force/virial reduction entirely.
+    torch::Tensor forceTensor;
+    torch::Tensor virialTensor;
+    double        energy = 0.0;
 
-    // Virial tensor for pressure/stress calculations
-    torch::Tensor virialTensor = torch::zeros({ 3, 3 }, torch::TensorOptions().dtype(torch::kFloat64));
-
-    if (mpiComm_.isMainRank())
     {
-        MetatomicTimer modelTimer("model inference (main rank)", mpiComm_);
+        MetatomicTimer modelTimer("model inference", mpiComm_);
 
         // Select appropriate precision for GROMACS data conversion
         auto gromacs_scalar_type = torch::kFloat32;
@@ -861,8 +887,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
         auto energy_tensor = energy_block->values();
 
-        outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] =
-                static_cast<real>(energy_tensor.sum().item<double>());
+        energy = energy_tensor.sum().item<double>();
 
         // Reset gradients before backward
         torch_positions.mutable_grad() = torch::Tensor();
@@ -871,26 +896,15 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         // Backward pass: Compute forces (-dE/dr) and virial (-dE/dStrain)
         energy_tensor.backward(-torch::ones_like(energy_tensor));
 
-        auto grad   = torch_positions.grad();
-        forceTensor = grad.to(torch::kCPU).to(torch::kFloat64);
-
-        // Get virial from strain gradient
+        forceTensor  = torch_positions.grad().to(torch::kCPU).to(torch::kFloat64);
         virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
     }
 
-    // Distribute results to all ranks if necessary (sumReduce broadcasts if ranks > 1)
-    if (mpiComm_.isParallel())
-    {
-        MetatomicTimer mpiTimer("MPI force/virial reduction", mpiComm_);
-        mpiComm_.sumReduce(n_atoms * 3, static_cast<double*>(forceTensor.data_ptr()));
-        mpiComm_.sumReduce(9, static_cast<double*>(virialTensor.data_ptr()));
-    }
-
-    // Accumulate forces into the GROMACS force output
+    // Accumulate forces into the GROMACS force output.
+    // Each rank applies forces only to its home atoms (no double-counting).
     auto forceAccessor = forceTensor.accessor<double, 2>();
     for (int32_t i = 0; i < n_atoms; ++i)
     {
-        // Only apply force if this atom is local to this rank
         if (inputToLocalIndex_[i] != -1)
         {
             outputs->forceWithVirial_.force_[inputToLocalIndex_[i]][0] += forceAccessor[i][0];
@@ -899,20 +913,22 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
     }
 
-    // Apply virial contribution
-    // GROMACS uses a 3x3 virial tensor in forceWithVirial_
-    // Copy the tensor data into a GROMACS matrix and use the public API
-    matrix virialMatrix;
-    auto   virialAccessor = virialTensor.accessor<double, 2>();
-    // TODO: technically this is DIM, not 3...
-    for (int32_t i = 0; i < 3; ++i)
+    // Energy and virial: only main rank contributes since GROMACS sums across ranks.
+    if (mpiComm_.isMainRank() || !mpiComm_.isParallel())
     {
-        for (int32_t j = 0; j < 3; ++j)
+        outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] = static_cast<real>(energy);
+
+        matrix virialMatrix;
+        auto   virialAccessor = virialTensor.accessor<double, 2>();
+        for (int32_t i = 0; i < 3; ++i)
         {
-            virialMatrix[i][j] = virialAccessor[i][j];
+            for (int32_t j = 0; j < 3; ++j)
+            {
+                virialMatrix[i][j] = virialAccessor[i][j];
+            }
         }
+        outputs->forceWithVirial_.addVirialContribution(virialMatrix);
     }
-    outputs->forceWithVirial_.addVirialContribution(virialMatrix);
 }
 
 } // namespace gmx
