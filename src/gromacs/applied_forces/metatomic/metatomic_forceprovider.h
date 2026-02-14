@@ -106,9 +106,13 @@ private:
 
     //! lookup table to map model input indices [0...numInput) to local atom indices
     std::vector<int32_t> inputToLocalIndex_;
+    //! reverse map: local atom index -> model input index (sized to home+halo)
     std::vector<int32_t> localToModelIndex_;
     //! lookup table to map model input indices to global atom indices
     std::vector<int32_t> inputToGlobalIndex_;
+
+    //! Number of home atoms on this rank (from last DD redistribution)
+    int32_t numLocalAtoms_ = 0;
 
     //! Full pairlist from MDModules notification
     std::vector<PairlistEntry> fullPairlist_;
