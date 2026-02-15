@@ -58,7 +58,7 @@ namespace gmx
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static std::mutex METATOMIC_TIMER_MUTEX = {};
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-static int64_t METATOMIC_TIMER_DEPTH = -1;
+static thread_local int64_t METATOMIC_TIMER_DEPTH = -1;
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static bool METATOMIC_TIMER_ENABLED = false;
 

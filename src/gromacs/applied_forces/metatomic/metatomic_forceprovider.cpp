@@ -165,6 +165,15 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         MetatomicTimer::enable(std::string(timerEnv) == "1");
     }
 
+    // With thread-MPI, each rank is a thread sharing the same process.
+    // PyTorch's internal OpenMP would spawn N threads per rank, causing
+    // massive oversubscription (e.g. 12 ranks × 12 OMP threads = 144
+    // threads on 12 cores).  Force single-threaded torch operations.
+    if (GMX_THREAD_MPI && mpiComm_.isParallel())
+    {
+        at::set_num_threads(1);
+    }
+
     try
     {
         torch::optional<std::string> extensions_directory = torch::nullopt;
