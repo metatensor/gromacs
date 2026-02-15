@@ -90,6 +90,25 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
         endif()
 
         set(GMX_TORCH ON)
+
+        # Ensure the torch library directory is in RPATH so that libtorch.so,
+        # libc10.so, etc. can be found at runtime. CMAKE_INSTALL_RPATH_USE_LINK_PATH
+        # doesn't always extract paths from imported targets, so we add it explicitly.
+        # Guard prevents duplicate additions if gmxManageNNPot already added it.
+        if(TORCH_INSTALL_PREFIX AND NOT _torch_rpath_added)
+            list(APPEND CMAKE_INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib")
+            set(_torch_rpath_added TRUE)
+
+            # Use RPATH instead of RUNPATH. Modern linkers default to RUNPATH
+            # (--enable-new-dtags), but RUNPATH doesn't propagate to transitive
+            # dependencies: gmx -> libgromacs.so -> libtorch.so -> libc10.so.
+            include(CheckLinkerFlag)
+            check_linker_flag(CXX "-Wl,--disable-new-dtags" _linker_supports_disable_new_dtags)
+            if(_linker_supports_disable_new_dtags)
+                add_link_options("-Wl,--disable-new-dtags")
+            endif()
+        endif()
+
     elseif(GMX_METATOMIC STREQUAL "TORCH")
         message(FATAL_ERROR "Torch not found. Please install libtorch and add its installation prefix"
                             " to CMAKE_PREFIX_PATH or set Torch_DIR to a directory containing "
