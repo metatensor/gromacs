@@ -35,12 +35,22 @@
  * \brief
  * Implements the Metatomic Force Provider class with per-rank model evaluation.
  *
- * Each rank evaluates the model on its local (home + halo) MTA atoms,
- * using the GROMACS pairlist (excludedPairlist) as the neighbor list.
- * Each pair is assigned to exactly one rank by GROMACS, so summing all
- * per-atom energies (home + halo) gives the correct pair contribution
- * without double counting. Forces from backward() are combined via MPI
- * all-reduce on a global force buffer.
+ * Uses the GROMACS plain pairlist (excludedPairlist) as the neighbor list
+ * source.  MTA-MTA nonbonded pairs are excluded from the classical force
+ * calculation via intermolecularExclusionGroup, causing them to appear in
+ * excludedPairlist_ instead of pairlist_.  Each pair is assigned to exactly
+ * one rank by the GROMACS nbnxm pairlist builder.
+ *
+ * Key design points:
+ *  - Neighbor list: built from excludedPairlist_, not AnalysisNeighborhood.
+ *    Cell shifts are negated (GROMACS shifts first atom, metatensor shifts
+ *    second atom).  Models requesting full_list get both (i,j) and (j,i).
+ *  - Energy: selected_atoms = nullopt (sum all per-atom energies, home +
+ *    halo).  No double counting because each pair is on one rank.
+ *  - Forces: all-reduce on a global buffer because ForceWithVirial is not
+ *    communicated by dd_move_f.  Only home atom forces are applied.
+ *  - Ghost deduplication: periodic ghost images share the same model index
+ *    but all GROMACS local indices are mapped via gmxLocalToMtaIdx_.
  *
  * \author Metatensor developers <https://github.com/metatensor>
  * \ingroup module_applied_forces
@@ -119,7 +129,21 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     return torch::tensor({ true, true, true }, options);
 }
 
-/*! \brief Constructs a Metatensor TensorBlock representing the neighbor list. */
+/*! \brief Constructs a Metatensor TensorBlock representing the neighbor list.
+ *
+ * Builds the metatensor neighbor list from flat pairlist arrays.  The
+ * displacement vector for pair k is:
+ *   r_ij = positions[j] - positions[i] + shiftVectors[k]
+ * which matches the metatensor convention when cellShifts follow the
+ * metatensor sign convention (shift applied to second atom j).
+ *
+ * \param[in] pairlist      Flat [i0,j0, i1,j1, ...] model-index pairs
+ * \param[in] shiftVectors  Real-space shift vectors (box * cellShifts)
+ * \param[in] cellShifts    Integer cell shifts (metatensor convention)
+ * \param[in] positions     Atom positions indexed by model index
+ * \param[in] device        Torch device for output tensors
+ * \param[in] dtype         Torch scalar type for output tensors
+ */
 static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int32_t> pairlist,
                                                                    ArrayRef<const RVec> shiftVectors,
                                                                    ArrayRef<const IVec> cellShifts,
@@ -597,7 +621,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 torch_types, strained_positions, strained_cell, torch_pbc);
 
-        // Build neighbor list from GROMACS pairlist (each pair on exactly one rank)
+        // Build neighbor list from GROMACS pairlist (each pair on exactly one rank).
+        // The stored pairlistMta_ is a half list.  If the model requests
+        // full_list, we double it by adding the reverse pair (j,i) with
+        // negated cell shifts for each (i,j).
         for (const auto& request : data_->nl_requests)
         {
             std::vector<int32_t> finalPairlist;
@@ -606,7 +633,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
             if (request->full_list())
             {
-                // Full list: add both (i,j) and (j,i) for each pair
+                // Full list needed (e.g. message-passing GNNs like MACE, NequIP)
                 const int64_t nHalf = static_cast<int64_t>(pairlistMta_.size() / 2);
                 finalPairlist.reserve(4 * nHalf);
                 finalShiftVectors.reserve(2 * nHalf);
@@ -703,12 +730,16 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
     }
 
-    // Force distribution via all-reduce
+    // Force distribution via all-reduce.
+    // backward() produces forces on ALL local atoms (home + halo).  Since
+    // ForceWithVirial forces are NOT communicated by dd_move_f (which only
+    // handles ForceWithShiftForces), we must all-reduce ourselves.  Each rank
+    // scatters its local forces into a global buffer indexed by global MTA
+    // index.  After all-reduce, each rank reads back only its home atoms.
     auto forceAccessor = forceTensor.accessor<double, 2>();
 
     if (mpiComm_.isParallel())
     {
-        // Scatter local forces into global buffer, all-reduce, then apply
         globalForceBuffer_.assign(numTotalMta, RVec({ 0.0, 0.0, 0.0 }));
 
         for (int32_t i = 0; i < numLocalMta_; i++)
@@ -743,10 +774,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
     }
 
-    // Energy: every rank contributes its portion, GROMACS sums globally via global_stat
+    // Energy: each rank's energy is the sum of per-atom energies for all local
+    // atoms (home + halo) from the pairs assigned to this rank.  GROMACS
+    // global_stat sums across ranks to get the system total.
     outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] = static_cast<real>(energy);
 
-    // Virial: every rank contributes its portion, GROMACS sums globally
+    // Virial: same decomposition as energy — per-rank portion, summed by GROMACS.
     matrix virialMatrix;
     auto   virialAccessor = virialTensor.accessor<double, 2>();
     for (int32_t i = 0; i < 3; ++i)
