@@ -41,6 +41,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include "gromacs/mdtypes/iforceprovider.h"
 
 #include "metatomic_options.h"
@@ -56,15 +58,14 @@ struct MDModulesPairlistConstructedSignal;
 class MDLogger;
 class MpiComm;
 
-/*! For compatibility with pairlist data structure in MDModulesPairlistConstructedSignal.
- * Contains pairs like ((atom1, atom2), shiftIndex).
- */
-using PairlistEntry = std::pair<std::pair<int32_t, int32_t>, int32_t>;
-
 /*! \brief \internal
  * MetatomicForceProvider class
  *
  * Implements the IForceProvider interface for the Metatomic force provider.
+ * Each rank evaluates the model on its local (home + halo) MTA atoms.
+ * The neighbor list comes from the GROMACS pairlist (excludedPairlist),
+ * which assigns each pair to exactly one rank — no double counting.
+ * Forces are combined via MPI all-reduce on a global force buffer.
  */
 class MetatomicForceProvider final : public IForceProvider
 {
@@ -83,60 +84,49 @@ public:
     //! Gather atom numbers and indices. Triggered on AtomsRedistributed signal.
     void gatherAtomNumbersIndices(const MDModulesAtomsRedistributedSignal& signal);
 
-    //! Set pairlist from notification and filter to MTA atom pairs.
+    //! Store GROMACS pairlist and convert to MTA model indices.
     void setPairlist(const MDModulesPairlistConstructedSignal& signal);
-    void augmentGhostPairs(const ArrayRef<const RVec> x, const matrix box);
 
 private:
-    //! Gather atom positions for MTA input.
-    void gatherAtomPositions(ArrayRef<const RVec> globalPositions);
-
-    //! Prepare pairlist input for model
-    void preparePairlistInput();
-
-    //! Build full neighbor list on main rank from gathered positions
-    void buildFullPairlist(const matrix box);
+    //! Gather atom positions for MTA input (local only, no MPI).
+    void gatherAtomPositions(ArrayRef<const RVec> positions);
 
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
     const MpiComm&          mpiComm_;
 
-    //! vector storing all MTA atom positions
+    //! vector storing local MTA atom positions (home + halo)
     std::vector<RVec> positions_;
 
-    //! vector storing all atomic numbers
+    //! vector storing local MTA atomic numbers (home + halo)
     std::vector<int32_t> atomNumbers_;
 
-    //! lookup table to map model input indices [0...numInput) to local atom indices
-    std::vector<int32_t> inputToLocalIndex_;
-    //! reverse map: local atom index -> model input index (sized to home+halo)
-    std::vector<int32_t> localToModelIndex_;
-    //! lookup table to map model input indices to global atom indices
-    std::vector<int32_t> inputToGlobalIndex_;
+    //! Number of home MTA atoms on this rank
+    int32_t numHomeMta_ = 0;
+    //! Number of home + halo MTA atoms on this rank
+    int32_t numLocalMta_ = 0;
 
-    //! Number of home atoms on this rank (from last DD redistribution)
-    int32_t numLocalAtoms_ = 0;
+    //! Maps local model index [0, numLocalMta_) -> GROMACS local buffer index
+    std::vector<int32_t> mtaToGmxLocal_;
+    //! Maps local model index [0, numLocalMta_) -> global MTA index [0, N_total_mta)
+    std::vector<int32_t> mtaToGlobalMta_;
+    //! Maps ANY GROMACS local buffer index (including periodic ghosts) -> MTA model index
+    //! Used by setPairlist to resolve pairlist entries that reference ghost images.
+    std::unordered_map<int32_t, int32_t> gmxLocalToMtaIdx_;
 
-    //! Full pairlist from MDModules notification
-    std::vector<PairlistEntry> fullPairlist_;
+    //! Global force buffer sized [N_total_mta] for MPI all-reduce
+    std::vector<RVec> globalForceBuffer_;
 
-    //! Interacting pairs of MTA atoms within cutoff, for model input
-    std::vector<int32_t> pairlistForModel_;
-
-    //! Shift vectors for each atom pair in pairlistForModel_
-    std::vector<RVec> shiftVectors_;
-
-    //! Cell shifts
-    std::vector<IVec> cellShifts_;
+    //! Pairlist from GROMACS (MTA model indices), flat [A0,B0,A1,B1,...]
+    std::vector<int32_t> pairlistMta_;
+    //! Integer cell shifts for each pair in pairlistMta_
+    std::vector<IVec> cellShiftsMta_;
 
     //! local copy of simulation box
     matrix box_;
 
     //! Data required for metatomic calculations
     std::unique_ptr<MetatomicData> data_;
-
-    //! flag to check if pairlist data should be prepared
-    bool doPairlist_ = false;
 };
 
 } // namespace gmx

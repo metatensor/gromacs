@@ -33,7 +33,14 @@
  */
 /*! \internal \file
  * \brief
- * Implements the Metatomic Force Provider class with proper domain decomposition support.
+ * Implements the Metatomic Force Provider class with per-rank model evaluation.
+ *
+ * Each rank evaluates the model on its local (home + halo) MTA atoms,
+ * using the GROMACS pairlist (excludedPairlist) as the neighbor list.
+ * Each pair is assigned to exactly one rank by GROMACS, so summing all
+ * per-atom energies (home + halo) gives the correct pair contribution
+ * without double counting. Forces from backward() are combined via MPI
+ * all-reduce on a global force buffer.
  *
  * \author Metatensor developers <https://github.com/metatensor>
  * \ingroup module_applied_forces
@@ -42,11 +49,12 @@
 
 #include "metatomic_forceprovider.h"
 
-#include <cmath>
 #include <cstdint>
+#include <cstdio>
 
 #include <algorithm>
-#include <optional>
+#include <string>
+#include <unordered_map>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
@@ -55,7 +63,6 @@
 #include "gromacs/mdtypes/forceoutput.h"
 #include "gromacs/pbcutil/ishift.h"
 #include "gromacs/pbcutil/pbc.h"
-#include "gromacs/selection/nbsearch.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/logger.h"
@@ -79,11 +86,7 @@
 namespace gmx
 {
 
-/*! \brief Normalizes the variant string for Metatomic output selection.
- *
- * \param[in] variant_string The raw variant string from options.
- * \return A torch::optional containing the string if valid, or nullopt if empty/"no".
- */
+/*! \brief Normalizes the variant string for Metatomic output selection. */
 static torch::optional<std::string> normalize_variant(std::string variant_string)
 {
     if (variant_string == "no" || variant_string.empty())
@@ -96,12 +99,7 @@ static torch::optional<std::string> normalize_variant(std::string variant_string
     }
 }
 
-/*! \brief Converts GROMACS PbcType to a boolean tensor for Metatomic.
- *
- * \param[in] pbcType The GROMACS periodic boundary condition type.
- * \param[in] device  The torch device where the tensor should reside.
- * \return A boolean tensor of shape {3} indicating periodicity in X, Y, Z.
- */
+/*! \brief Converts GROMACS PbcType to a boolean tensor for Metatomic. */
 static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
 {
     auto options = torch::TensorOptions().dtype(torch::kBool).device(device);
@@ -121,20 +119,7 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     return torch::tensor({ true, true, true }, options);
 }
 
-/*! \brief Constructs a Metatensor TensorBlock representing the neighbor list.
- *
- * This function takes the filtered pairlist (atoms participating in the model interaction)
- * and constructs the corresponding neighbor list in the format required by Metatensor/Torch.
- * It computes the interatomic vectors, applying periodic boundary shifts where necessary.
- *
- * \param[in] pairlist     Flat array of atom pairs (indices into the model's atom list).
- * \param[in] shiftVectors Geometric shift vectors (RVec) for each pair.
- * \param[in] cellShifts   Integer cell shift indices for each pair (for metadata).
- * \param[in] positions    Positions of the atoms (ordered by model index).
- * \param[in] device       The torch device for the output tensors.
- * \param[in] dtype        The torch scalar type (float32/float64).
- * \return A TensorBlockHolder containing the neighbor list data.
- */
+/*! \brief Constructs a Metatensor TensorBlock representing the neighbor list. */
 static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int32_t> pairlist,
                                                                    ArrayRef<const RVec> shiftVectors,
                                                                    ArrayRef<const IVec> cellShifts,
@@ -144,15 +129,12 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
 {
     const int64_t n_pairs = static_cast<int64_t>(pairlist.size() / 2);
 
-    // Prepare CPU tensors first to facilitate efficient element access
     auto cpu_int_options   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
     auto cpu_float_options = torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU);
 
-    // Samples: [first_atom, second_atom, cell_shift_a, cell_shift_b, cell_shift_c]
     auto pair_samples_values = torch::zeros({ n_pairs, 5 }, cpu_int_options);
     auto pair_samples_ptr    = pair_samples_values.accessor<int32_t, 2>();
 
-    // Values: Full interatomic vectors (rj - ri + shift)
     auto vectors_cpu      = torch::zeros({ n_pairs, 3, 1 }, cpu_float_options);
     auto vectors_accessor = vectors_cpu.accessor<double, 3>();
 
@@ -161,14 +143,12 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
         const int32_t atom_i = pairlist[2 * i];
         const int32_t atom_j = pairlist[2 * i + 1];
 
-        // Fill sample metadata
-        pair_samples_ptr[i][0] = static_cast<int32_t>(atom_i);
-        pair_samples_ptr[i][1] = static_cast<int32_t>(atom_j);
+        pair_samples_ptr[i][0] = atom_i;
+        pair_samples_ptr[i][1] = atom_j;
         pair_samples_ptr[i][2] = cellShifts[i][0];
         pair_samples_ptr[i][3] = cellShifts[i][1];
         pair_samples_ptr[i][4] = cellShifts[i][2];
 
-        // Calculate r_ij = r_j - r_i + shift
         const double r_ij_x =
                 static_cast<double>(positions[atom_j][0] - positions[atom_i][0] + shiftVectors[i][0]);
         const double r_ij_y =
@@ -181,7 +161,6 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
         vectors_accessor[i][2][0] = r_ij_z;
     }
 
-    // Move data to target device and type
     auto final_samples_values = pair_samples_values.to(device);
     auto final_vectors        = vectors_cpu.to(dtype).to(device);
 
@@ -207,11 +186,7 @@ static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<cons
 }
 
 
-/*! \brief Internal data structure for Metatomic runtime states.
- *
- * Encapsulates the Torch model, device configurations, capabilities, and options
- * required for model evaluation.
- */
+/*! \brief Internal data structure for Metatomic runtime states. */
 struct MetatomicData
 {
     metatensor_torch::Module           model = metatensor_torch::Module(torch::jit::Module());
@@ -234,24 +209,9 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 {
     GMX_LOG(logger_.info).asParagraph().appendText("Initializing MetatomicForceProvider...");
 
-    // Enable profiling via environment variable GMX_METATOMIC_TIMER=1
     if (const char* timerEnv = std::getenv("GMX_METATOMIC_TIMER"))
     {
         MetatomicTimer::enable(std::string(timerEnv) == "1");
-    }
-
-    // Pairlist-based neighbor lists don't work with domain decomposition yet (indices are local)
-    // Matches NNPot's limitation
-    if (mpiComm_.isParallel())
-    {
-        GMX_LOG(logger_.warning)
-
-                .asParagraph()
-
-                .appendText(
-                        "Metatomic support domain decomposition is EXPERIMENTAL (MPI). "
-                        "Please use thread-MPI (gmx mdrun -ntmpi X) instead of MPI "
-                        "(mpirun -np X gmx_mpi mdrun).");
     }
 
     try
@@ -273,7 +233,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     data_->capabilities =
             data_->model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
 
-    // Determine computation device
     torch::optional<std::string> desiredDevice = torch::nullopt;
     if (const char* env = std::getenv("GMX_METATOMIC_DEVICE"))
     {
@@ -288,17 +247,43 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             .asParagraph()
             .appendTextFormatted("Metatomic using device: %s", data_->device.str().c_str());
 
-    // Process neighbor list requests from the model
+    {
+        double interactionRange = data_->capabilities->engine_interaction_range("nm");
+        std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
+        FILE*       fp    = std::fopen(fname.c_str(), "w");
+        if (fp)
+        {
+            std::fprintf(fp,
+                         "=== Metatomic init (rank %d) ===\n"
+                         "interaction_range(nm)=%.6f\n",
+                         mpiComm_.rank(),
+                         interactionRange);
+            std::fclose(fp);
+        }
+    }
+
     auto requests_ivalue = data_->model.run_method("requested_neighbor_lists");
     for (const auto& request_ivalue : requests_ivalue.toList())
     {
-        data_->nl_requests.push_back(
-                request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>());
+        auto nl_opt = request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
+        {
+            std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
+            FILE*       fp    = std::fopen(fname.c_str(), "a");
+            if (fp)
+            {
+                std::fprintf(fp,
+                             "NL request: cutoff()=%.6f, engine_cutoff(nm)=%.6f, full_list=%s\n",
+                             nl_opt->cutoff(),
+                             nl_opt->engine_cutoff("nm"),
+                             nl_opt->full_list() ? "true" : "false");
+                std::fclose(fp);
+            }
+        }
+        data_->nl_requests.push_back(nl_opt);
     }
 
     data_->model.to(data_->device);
 
-    // Configure precision
     if (data_->capabilities->dtype() == "float64")
     {
         data_->dtype = torch::kFloat64;
@@ -315,7 +300,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     data_->evaluations_options = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
     data_->evaluations_options->set_length_unit("nm");
 
-    // Validate energy output existence
     auto outputs    = data_->capabilities->outputs();
     auto v_energy   = normalize_variant(options_.params_.variant);
     auto energy_key = pick_output("energy", outputs, v_energy);
@@ -330,23 +314,19 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
 
     auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-    // TODO: take from the user
-    requested_output->per_atom           = false;
+    // per_atom=true so the model returns per-atom energies (needed for
+    // correct energy decomposition when using the GROMACS pairlist in DD)
+    requested_output->per_atom           = true;
     requested_output->explicit_gradients = {};
     requested_output->set_unit("kJ/mol");
 
     data_->evaluations_options->outputs.insert(energy_key, requested_output);
     data_->check_consistency = options_.params_.checkConsistency;
 
-
-    // Initialize vectors for atom mapping
+    // Allocate global force buffer sized to total MTA atoms
     const auto&   mtaIndices = options_.params_.mtaIndices_;
-    const int32_t n_atoms    = static_cast<int32_t>(mtaIndices.size());
-
-    positions_.resize(n_atoms);
-    atomNumbers_.resize(n_atoms, 0);
-    inputToLocalIndex_.resize(n_atoms, -1);
-    inputToGlobalIndex_.resize(n_atoms, -1);
+    const int32_t n_total    = static_cast<int32_t>(mtaIndices.size());
+    globalForceBuffer_.resize(n_total, RVec({ 0.0, 0.0, 0.0 }));
 
     GMX_LOG(logger_.info)
             .asParagraph()
@@ -355,33 +335,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
 MetatomicForceProvider::~MetatomicForceProvider() = default;
 
-/*! \brief Updates the mapping between GROMACS local/global atom indices and the Metatomic model's input atoms.
- *
- * This function is subscribed to the `MDModulesAtomsRedistributedSignal`. It is called whenever
- * atoms are redistributed across MPI ranks (Domain Decomposition) or reordered in memory (sorting).
- *
- * Its primary responsibilities are:
- * 1. **Locate Input Atoms**: It iterates through the local atoms on the current rank to find
- * which atoms correspond to the "input atoms" defined for the Metatomic model (via `mtaIndices`).
- * 2. **Update Maps**: It populates `inputToLocalIndex_` (mapping model input index -> GROMACS local index)
- * and `inputToGlobalIndex_` (mapping model input index -> GROMACS global tag).
- * 3. **Gather Atomic Numbers**: It ensures `atomNumbers_` (Z numbers) are correctly associated with
- * the current local atoms, performing an MPI reduction if necessary to gather data from
- * distributed ranks.
- *
- * \param[in] signal Contains the new mapping of global atom indices to local buffer indices after redistribution.
- */
 void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedistributedSignal& signal)
 {
-    const auto&   mtaIndices = options_.params_.mtaIndices_;
-    const int32_t numInput   = static_cast<int32_t>(mtaIndices.size());
+    const auto&   mtaIndices  = options_.params_.mtaIndices_;
+    const int32_t numTotalMta = static_cast<int32_t>(mtaIndices.size());
 
-    // Reset mappings
-    inputToLocalIndex_.assign(numInput, -1);
-    inputToGlobalIndex_.assign(numInput, -1);
-    atomNumbers_.assign(numInput, 0);
+    mtaToGmxLocal_.clear();
+    mtaToGlobalMta_.clear();
+    atomNumbers_.clear();
+    gmxLocalToMtaIdx_.clear();
 
-    // GROMACS domain decomposition logic
     if (mpiComm_.isParallel())
     {
         GMX_RELEASE_ASSERT(signal.globalAtomIndices_.has_value(),
@@ -390,77 +353,145 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
         const int32_t numLocal          = signal.x_.size();
         const int32_t numLocalPlusHalo  = globalAtomIndices.size();
 
-        // Size to include both home and halo atoms
-        localToModelIndex_.assign(numLocalPlusHalo, -1);
-        numLocalAtoms_ = numLocal;
+        // Build a map from global atom index to MTA index for fast lookup
+        std::unordered_map<int32_t, int32_t> globalToMtaIdx;
+        for (int32_t j = 0; j < numTotalMta; j++)
+        {
+            globalToMtaIdx[static_cast<int32_t>(mtaIndices[j])] = j;
+        }
+
+        // Separate home and halo MTA atoms, deduplicating periodic ghosts.
+        // Each unique MTA atom gets one model index. Periodic ghost images
+        // are NOT added as separate model atoms, but their GROMACS local
+        // buffer indices ARE recorded in gmxLocalToMtaIdx_ so that
+        // setPairlist can resolve pairlist entries referencing any image.
+        std::vector<int32_t> homeGmxLocal;
+        std::vector<int32_t> homeGlobalMta;
+        std::vector<int32_t> haloGmxLocal;
+        std::vector<int32_t> haloGlobalMta;
+
+        // First pass: assign model indices to unique MTA atoms
+        std::unordered_map<int32_t, int32_t> mtaIdxToModelIdx;
+        int32_t                              numDuplicatesSkipped = 0;
 
         for (int32_t i = 0; i < numLocalPlusHalo; i++)
         {
             int32_t globalIdx = globalAtomIndices[i];
-            for (int32_t j = 0; j < numInput; j++)
+            auto    it        = globalToMtaIdx.find(globalIdx);
+            if (it != globalToMtaIdx.end())
             {
-                // Match current local atom to one of the requested Metatomic input atoms
-                if (options_.params_.mtaAtoms_->globalIndex()[j] == globalIdx)
-                {
-                    localToModelIndex_[i] = j;
-                    std::fprintf(stderr,
-                                 "Rank %d: Found ModelAtom %d (Global %d) at Local %d (%s)\n",
-                                 mpiComm_.rank(),
-                                 j,
-                                 globalIdx,
-                                 i,
-                                 (i < numLocal) ? "HOME" : "HALO");
-                    if (i < numLocal)
-                    {
-                        inputToLocalIndex_[j]  = i;
-                        inputToGlobalIndex_[j] = globalIdx;
-                        atomNumbers_[j]        = options_.params_.atoms_.atom[globalIdx].atomnumber;
-                    }
-                    break;
-                }
-            }
-        }
-        // Reduce atomic numbers across ranks to ensure the main rank has the full set
-        mpiComm_.sumReduce(numInput, atomNumbers_.data());
+                int32_t mtaIdx = it->second;
 
-        // Debug logging for domain decomposition distribution
-        int32_t homeCount = 0;
-        int32_t haloCount = 0;
-        for (int32_t i = 0; i < numLocalPlusHalo; i++)
-        {
-            if (localToModelIndex_[i] != -1)
-            {
-                if (i < numLocal)
+                if (mtaIdxToModelIdx.count(mtaIdx))
                 {
-                    homeCount++;
+                    // Periodic ghost: record mapping but don't create new model atom
+                    numDuplicatesSkipped++;
                 }
                 else
                 {
-                    haloCount++;
+                    if (i < numLocal)
+                    {
+                        // Will be assigned model index = homeGmxLocal.size() (filled later)
+                        homeGmxLocal.push_back(i);
+                        homeGlobalMta.push_back(mtaIdx);
+                    }
+                    else
+                    {
+                        haloGmxLocal.push_back(i);
+                        haloGlobalMta.push_back(mtaIdx);
+                    }
+                    // Placeholder: model index will be set after we know numHomeMta_
+                    mtaIdxToModelIdx[mtaIdx] = -1;
                 }
             }
         }
-        std::fprintf(stderr,
-                     "Rank %d: Mapped %d HOME + %d HALO = %d / %d Metatomic atoms.\n",
-                     mpiComm_.rank(),
-                     homeCount,
-                     haloCount,
-                     homeCount + haloCount,
-                     numInput);
+
+        // Assign final model indices: home [0, numHome), halo [numHome, numLocal)
+        int32_t modelIdx = 0;
+        for (int32_t k = 0; k < static_cast<int32_t>(homeGmxLocal.size()); k++)
+        {
+            mtaIdxToModelIdx[homeGlobalMta[k]] = modelIdx++;
+        }
+        for (int32_t k = 0; k < static_cast<int32_t>(haloGmxLocal.size()); k++)
+        {
+            mtaIdxToModelIdx[haloGlobalMta[k]] = modelIdx++;
+        }
+
+        // Second pass: build complete gmxLocal → modelIdx mapping for ALL images
+        for (int32_t i = 0; i < numLocalPlusHalo; i++)
+        {
+            int32_t globalIdx = globalAtomIndices[i];
+            auto    it        = globalToMtaIdx.find(globalIdx);
+            if (it != globalToMtaIdx.end())
+            {
+                gmxLocalToMtaIdx_[i] = mtaIdxToModelIdx[it->second];
+            }
+        }
+
+        {
+            std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
+            FILE*       fp    = std::fopen(fname.c_str(), "a");
+            if (fp)
+            {
+                std::fprintf(fp,
+                             "gatherAtoms: home=%zu halo=%zu duplicatesSkipped=%d gmxLocalEntries=%zu\n",
+                             homeGmxLocal.size(),
+                             haloGmxLocal.size(),
+                             numDuplicatesSkipped,
+                             gmxLocalToMtaIdx_.size());
+                std::fclose(fp);
+            }
+        }
+
+        numHomeMta_  = static_cast<int32_t>(homeGmxLocal.size());
+        numLocalMta_ = numHomeMta_ + static_cast<int32_t>(haloGmxLocal.size());
+
+        // Assign local model indices: home -> [0, numHomeMta_), halo -> [numHomeMta_, numLocalMta_)
+        mtaToGmxLocal_.resize(numLocalMta_);
+        mtaToGlobalMta_.resize(numLocalMta_);
+        atomNumbers_.resize(numLocalMta_);
+
+        for (int32_t k = 0; k < numHomeMta_; k++)
+        {
+            int32_t gmxLocal  = homeGmxLocal[k];
+            int32_t globalIdx = globalAtomIndices[gmxLocal];
+
+            mtaToGmxLocal_[k]  = gmxLocal;
+            mtaToGlobalMta_[k] = homeGlobalMta[k];
+            atomNumbers_[k]    = options_.params_.atoms_.atom[globalIdx].atomnumber;
+        }
+
+        for (int32_t k = 0; k < static_cast<int32_t>(haloGmxLocal.size()); k++)
+        {
+            int32_t modelIdx  = numHomeMta_ + k;
+            int32_t gmxLocal  = haloGmxLocal[k];
+            int32_t globalIdx = globalAtomIndices[gmxLocal];
+
+            mtaToGmxLocal_[modelIdx]  = gmxLocal;
+            mtaToGlobalMta_[modelIdx] = haloGlobalMta[k];
+            atomNumbers_[modelIdx]    = options_.params_.atoms_.atom[globalIdx].atomnumber;
+        }
     }
     else
     {
-        // Thread-MPI or Serial execution
+        // Serial / thread-MPI: all MTA atoms are home, no halos
         const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
-        localToModelIndex_.clear();
-        numLocalAtoms_ = 0;
-        for (int32_t i = 0; i < numInput; i++)
+        numHomeMta_  = numTotalMta;
+        numLocalMta_ = numTotalMta;
+
+        mtaToGmxLocal_.resize(numTotalMta);
+        mtaToGlobalMta_.resize(numTotalMta);
+        atomNumbers_.resize(numTotalMta);
+
+        for (int32_t i = 0; i < numTotalMta; i++)
         {
-            int32_t localIndex     = mtaAtoms->localIndex()[i];
-            int32_t globalIdx      = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
-            inputToLocalIndex_[i]  = localIndex;
-            inputToGlobalIndex_[i] = globalIdx;
-            atomNumbers_[i]        = options_.params_.atoms_.atom[globalIdx].atomnumber;
+            int32_t localIndex = mtaAtoms->localIndex()[i];
+            int32_t globalIdx  = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
+
+            mtaToGmxLocal_[i]       = localIndex;
+            mtaToGlobalMta_[i]      = i;
+            atomNumbers_[i]         = options_.params_.atoms_.atom[globalIdx].atomnumber;
+            gmxLocalToMtaIdx_[localIndex] = i;
         }
     }
 
@@ -468,318 +499,38 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
                        "Some atom numbers not set.");
 }
 
-/*! \brief Updates the internal position buffer with the coordinates of the Metatomic atoms.
- *
- * This function extracts the coordinates of the atoms relevant to the Metatomic model
- * from the full GROMACS local atom array (`pos`).
- *
- * 1. **Filtering:** `pos` contains all local atoms (solute, solvent, ions).
- * This function copies only the atoms defined in `mtaIndices` to `positions_`.
- * 2. **Ordering/Packing:** GROMACS reorders atoms dynamically for Domain Decomposition.
- * This function uses `inputToLocalIndex_` to collect atoms and pack them into a contiguous, ordered buffer
- *
- * \param[in] pos The array of all local atom coordinates for the current step.
- */
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
 {
-    const size_t numInput = inputToLocalIndex_.size();
-    positions_.assign(numInput, RVec({ 0.0, 0.0, 0.0 }));
-
-    for (size_t i = 0; i < numInput; i++)
+    positions_.resize(numLocalMta_);
+    for (int32_t i = 0; i < numLocalMta_; i++)
     {
-        if (inputToLocalIndex_[i] != -1)
-        {
-            positions_[i] = pos[inputToLocalIndex_[i]];
-        }
-    }
-
-    if (mpiComm_.isParallel())
-    {
-        mpiComm_.sumReduce(3 * numInput, positions_.data()->as_vec());
+        positions_[i] = pos[mtaToGmxLocal_[i]];
     }
 }
 
 void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& signal)
 {
-    // Capture the pairlist signal. Processing is deferred to
-    // calculateForces/preparePairlistInput to keep this callback fast.
-    fullPairlist_.assign(signal.excludedPairlist_.begin(), signal.excludedPairlist_.end());
-    doPairlist_ = true;
-}
+    pairlistMta_.clear();
+    cellShiftsMta_.clear();
 
-/*! \brief Converts the GROMACS neighbor list to a model-compatible list.
- *
- * This function iterates over the full GROMACS excluded pairlist (which contains pairs in
- * GROMACS local atom indices). It filters this list to retain only pairs where *both* atoms
- * are part of the Metatomic model's input set.
- *
- * It populates `pairlistForModel_` (using model-relative indices), `shiftVectors_`,
- * and `cellShifts_`.
- */
-void MetatomicForceProvider::preparePairlistInput()
-{
-    if (!doPairlist_)
+    // Use gmxLocalToMtaIdx_ which maps ALL GROMACS local buffer indices
+    // (including periodic ghost images) to their MTA model index.
+    //
+    // Sign convention: GROMACS shifts atom I (first): d = x[I]+shift - x[J].
+    // Metatensor shifts atom J (second): r_ij = x[J]+cell·box - x[I].
+    // So metatensor cell shift = -GROMACS cell shift.
+    for (const auto& entry : signal.excludedPairlist_)
     {
-        return;
-    }
-
-    // Although the assert catches empty pairlists, in a real simulation with a very large cutoff,
-    // this might happen legitimately if only 1 atom exists. However, for standard MD, it indicates
-    // an issue. Assert here to catch initialization ordering bugs.
-    GMX_ASSERT(!fullPairlist_.empty(), "Pairlist for Metatomic is empty!");
-
-    const int32_t numPairs = gmx::ssize(fullPairlist_);
-    pairlistForModel_.clear();
-    pairlistForModel_.reserve(2 * numPairs);
-    shiftVectors_.clear();
-    shiftVectors_.reserve(numPairs);
-    cellShifts_.clear();
-    cellShifts_.reserve(numPairs);
-
-    for (int32_t i = 0; i < numPairs; i++)
-    {
-        const auto [atomPair, shiftIndex] = fullPairlist_[i];
-
-        // GROMACS pairlists use local atom indices.
-        // Map these local indices back to the model's input indices [0, N_model_atoms).
-        // `inputToLocalIndex_` maps ModelIdx -> LocalIdx.
-        // indexOf reverses the map: Find ModelIdx k such that inputToLocalIndex_[k] == LocalIdx.
-        const int32_t inputIdxA = localToModelIndex_[atomPair.first];
-
-        if (inputIdxA != -1)
+        const auto& [atomPair, shiftIndex] = entry;
+        auto itA = gmxLocalToMtaIdx_.find(atomPair.first);
+        auto itB = gmxLocalToMtaIdx_.find(atomPair.second);
+        if (itA != gmxLocalToMtaIdx_.end() && itB != gmxLocalToMtaIdx_.end())
         {
-            const int32_t inputIdxB = localToModelIndex_[atomPair.second];
-
-            if (inputIdxB != -1)
-            {
-                // Both atoms belong to the Metatomic subsystem.
-                // Calculate the shift vector due to PBC.
-                RVec       shift;
-                const IVec unitShift = shiftIndexToXYZ(shiftIndex);
-                mvmul_ur0(box_, unitShift.toRVec(), shift);
-
-                pairlistForModel_.push_back(inputIdxA);
-                pairlistForModel_.push_back(inputIdxB);
-                std::fprintf(stderr,
-                             "Rank %d: Signal pair (Local %d, %d) -> Model (%d, %d)\n",
-                             mpiComm_.rank(),
-                             atomPair.first,
-                             atomPair.second,
-                             inputIdxA,
-                             inputIdxB);
-                shiftVectors_.push_back(shift);
-                cellShifts_.push_back(unitShift);
-            }
+            pairlistMta_.push_back(itA->second);
+            pairlistMta_.push_back(itB->second);
+            const IVec gmxShift = shiftIndexToXYZ(shiftIndex);
+            cellShiftsMta_.push_back(IVec(-gmxShift[XX], -gmxShift[YY], -gmxShift[ZZ]));
         }
-    }
-
-    GMX_RELEASE_ASSERT(pairlistForModel_.size() == shiftVectors_.size() * 2,
-                       "Pairlist/shift size mismatch.");
-    doPairlist_ = false;
-}
-
-void MetatomicForceProvider::augmentGhostPairs(const ArrayRef<const RVec> x, const matrix box)
-{
-    if (!mpiComm_.isParallel())
-    {
-        return;
-    }
-
-    // Identify halo MTA atoms: atoms in localToModelIndex_ that have a valid model index
-    // but are NOT home atoms on this rank (i.e. inputToLocalIndex_[modelIdx] == -1).
-    // These are atoms in the halo zone (local index >= numLocalAtoms_).
-    std::vector<int32_t> haloLocalIndices;
-    std::vector<RVec>    haloCoords;
-
-    for (int32_t i = numLocalAtoms_; i < static_cast<int32_t>(localToModelIndex_.size()); i++)
-    {
-        if (localToModelIndex_[i] != -1)
-        {
-            haloLocalIndices.push_back(i);
-            haloCoords.push_back(x[i]);
-        }
-    }
-
-    std::fprintf(stderr,
-                 "Rank %d: augmentGhostPairs found %zu halo MTA atoms\n",
-                 mpiComm_.rank(),
-                 haloCoords.size());
-
-    if (haloCoords.size() < 2)
-    {
-        return;
-    }
-
-    t_pbc pbc;
-    set_pbc(&pbc, *options_.params_.pbcType_, box);
-
-    gmx::AnalysisNeighborhood nb;
-    nb.setCutoff(data_->nl_requests[0]->cutoff());
-
-    gmx::AnalysisNeighborhoodPositions ghostPositions(as_rvec_array(haloCoords.data()), haloCoords.size());
-
-    gmx::AnalysisNeighborhoodSearch     search      = nb.initSearch(&pbc, ghostPositions);
-    gmx::AnalysisNeighborhoodPairSearch ghostSearch = search.startSelfPairSearch();
-    gmx::AnalysisNeighborhoodPair       pair;
-
-    int32_t augmentedCount = 0;
-    while (ghostSearch.findNextPair(&pair))
-    {
-        const int32_t localIdxA = haloLocalIndices[pair.refIndex()];
-        const int32_t localIdxB = haloLocalIndices[pair.testIndex()];
-
-        const int32_t inputIdxA = localToModelIndex_[localIdxA];
-        const int32_t inputIdxB = localToModelIndex_[localIdxB];
-
-        // Both should be valid since we pre-filtered, but guard anyway
-        if (inputIdxA != -1 && inputIdxB != -1)
-        {
-            // pair.dx() returns the PBC-correct vector from ref to test.
-            // buildNeighborListFromPairlist computes: r_ij = positions_[B] - positions_[A] + shift
-            // We need: shift = pair.dx() - (positions_[B] - positions_[A])
-            rvec modelDiff;
-            rvec_sub(positions_[inputIdxB].as_vec(), positions_[inputIdxA].as_vec(), modelDiff);
-
-            rvec shift;
-            rvec_sub(pair.dx(), modelDiff, shift);
-
-            // Compute integer cell shifts via box matrix inversion
-            double det = box[0][0] * (box[1][1] * box[2][2] - box[1][2] * box[2][1])
-                         - box[0][1] * (box[1][0] * box[2][2] - box[1][2] * box[2][0])
-                         + box[0][2] * (box[1][0] * box[2][1] - box[1][1] * box[2][0]);
-
-            IVec unitShift;
-            if (std::abs(det) > 1e-10)
-            {
-                double invDet = 1.0 / det;
-                rvec   unitShiftRvec;
-                unitShiftRvec[0] = invDet
-                                   * (shift[0] * (box[1][1] * box[2][2] - box[1][2] * box[2][1])
-                                      + shift[1] * (box[0][2] * box[2][1] - box[0][1] * box[2][2])
-                                      + shift[2] * (box[0][1] * box[1][2] - box[0][2] * box[1][1]));
-                unitShiftRvec[1] = invDet
-                                   * (shift[0] * (box[1][2] * box[2][0] - box[1][0] * box[2][2])
-                                      + shift[1] * (box[0][0] * box[2][2] - box[0][2] * box[2][0])
-                                      + shift[2] * (box[0][2] * box[1][0] - box[0][0] * box[1][2]));
-                unitShiftRvec[2] = invDet
-                                   * (shift[0] * (box[1][0] * box[2][1] - box[1][1] * box[2][0])
-                                      + shift[1] * (box[0][1] * box[2][0] - box[0][0] * box[2][1])
-                                      + shift[2] * (box[0][0] * box[1][1] - box[0][1] * box[1][0]));
-
-                unitShift[0] = static_cast<int>(std::round(unitShiftRvec[0]));
-                unitShift[1] = static_cast<int>(std::round(unitShiftRvec[1]));
-                unitShift[2] = static_cast<int>(std::round(unitShiftRvec[2]));
-            }
-            else
-            {
-                unitShift = { 0, 0, 0 };
-            }
-
-            // Recompute shift from integer cell shifts for consistency with preparePairlistInput
-            RVec finalShift;
-            mvmul_ur0(box, unitShift.toRVec(), finalShift);
-
-            pairlistForModel_.push_back(inputIdxA);
-            pairlistForModel_.push_back(inputIdxB);
-            shiftVectors_.push_back(finalShift);
-            cellShifts_.push_back(unitShift);
-            augmentedCount++;
-
-            std::fprintf(stderr,
-                         "[Augmented] Rank %d: Halo pair (Local %d, %d) -> Model (%d, %d) "
-                         "shift=(%d,%d,%d)\n",
-                         mpiComm_.rank(),
-                         localIdxA,
-                         localIdxB,
-                         inputIdxA,
-                         inputIdxB,
-                         unitShift[0],
-                         unitShift[1],
-                         unitShift[2]);
-        }
-    }
-
-    std::fprintf(stderr, "Rank %d: augmentGhostPairs added %d halo-halo pairs\n", mpiComm_.rank(), augmentedCount);
-}
-
-void MetatomicForceProvider::buildFullPairlist(const matrix box)
-{
-    pairlistForModel_.clear();
-    shiftVectors_.clear();
-    cellShifts_.clear();
-
-    const int32_t n_atoms = static_cast<int32_t>(positions_.size());
-    if (n_atoms < 2)
-    {
-        return;
-    }
-
-    t_pbc pbc;
-    set_pbc(&pbc, *options_.params_.pbcType_, box);
-
-    gmx::AnalysisNeighborhood nb;
-    nb.setCutoff(data_->nl_requests[0]->cutoff());
-
-    gmx::AnalysisNeighborhoodPositions allPositions(as_rvec_array(positions_.data()), n_atoms);
-
-    gmx::AnalysisNeighborhoodSearch     search     = nb.initSearch(&pbc, allPositions);
-    gmx::AnalysisNeighborhoodPairSearch pairSearch = search.startSelfPairSearch();
-    gmx::AnalysisNeighborhoodPair       pair;
-
-    while (pairSearch.findNextPair(&pair))
-    {
-        const int32_t atomA = pair.refIndex();
-        const int32_t atomB = pair.testIndex();
-
-        // pair.dx() = PBC-correct vector from ref to test
-        // buildNeighborListFromPairlist computes: r_ij = positions_[B] - positions_[A] + shift
-        // So: shift = pair.dx() - (positions_[B] - positions_[A])
-        rvec modelDiff;
-        rvec_sub(positions_[atomB].as_vec(), positions_[atomA].as_vec(), modelDiff);
-
-        rvec shift;
-        rvec_sub(pair.dx(), modelDiff, shift);
-
-        // Compute integer cell shifts via box matrix inversion
-        double det = box[0][0] * (box[1][1] * box[2][2] - box[1][2] * box[2][1])
-                     - box[0][1] * (box[1][0] * box[2][2] - box[1][2] * box[2][0])
-                     + box[0][2] * (box[1][0] * box[2][1] - box[1][1] * box[2][0]);
-
-        IVec unitShift;
-        if (std::abs(det) > 1e-10)
-        {
-            double invDet = 1.0 / det;
-            rvec   unitShiftRvec;
-            unitShiftRvec[0] = invDet
-                               * (shift[0] * (box[1][1] * box[2][2] - box[1][2] * box[2][1])
-                                  + shift[1] * (box[0][2] * box[2][1] - box[0][1] * box[2][2])
-                                  + shift[2] * (box[0][1] * box[1][2] - box[0][2] * box[1][1]));
-            unitShiftRvec[1] = invDet
-                               * (shift[0] * (box[1][2] * box[2][0] - box[1][0] * box[2][2])
-                                  + shift[1] * (box[0][0] * box[2][2] - box[0][2] * box[2][0])
-                                  + shift[2] * (box[0][2] * box[1][0] - box[0][0] * box[1][2]));
-            unitShiftRvec[2] = invDet
-                               * (shift[0] * (box[1][0] * box[2][1] - box[1][1] * box[2][0])
-                                  + shift[1] * (box[0][1] * box[2][0] - box[0][0] * box[2][1])
-                                  + shift[2] * (box[0][0] * box[1][1] - box[0][1] * box[1][0]));
-
-            unitShift[0] = static_cast<int>(std::round(unitShiftRvec[0]));
-            unitShift[1] = static_cast<int>(std::round(unitShiftRvec[1]));
-            unitShift[2] = static_cast<int>(std::round(unitShiftRvec[2]));
-        }
-        else
-        {
-            unitShift = { 0, 0, 0 };
-        }
-
-        // Recompute shift from integer cell shifts for exact consistency
-        RVec finalShift;
-        mvmul_ur0(box, unitShift.toRVec(), finalShift);
-
-        pairlistForModel_.push_back(atomA);
-        pairlistForModel_.push_back(atomB);
-        shiftVectors_.push_back(finalShift);
-        cellShifts_.push_back(unitShift);
     }
 }
 
@@ -788,36 +539,29 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 {
     MetatomicTimer totalTimer("calculateForces", mpiComm_);
 
-    const int32_t n_atoms = static_cast<int32_t>(options_.params_.mtaIndices_.size());
+    const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
 
-    // Update positions and box for the current step
+    // Fill local positions (no MPI communication)
     {
         MetatomicTimer timer("gatherAtomPositions", mpiComm_);
         gatherAtomPositions(inputs.x_);
     }
     copy_mat(inputs.box_, box_);
 
-    // Build the full neighbor list on the main rank from gathered positions.
-    // Every rank has all positions after gatherAtomPositions()/sumReduce, so rank 0
-    // can find ALL pairs via AnalysisNeighborhoodSearch. This avoids the fundamental
-    // problem of per-rank signal pairs only covering that rank's local view.
+    // Compute shift vectors from stored cell shifts and current box
+    std::vector<RVec> shiftVectors;
     {
-        MetatomicTimer timer("buildFullPairlist", mpiComm_);
-        buildFullPairlist(inputs.box_);
+        MetatomicTimer timer("prepareNL", mpiComm_);
+        shiftVectors.reserve(cellShiftsMta_.size());
+        for (const auto& cs : cellShiftsMta_)
+        {
+            RVec shift;
+            mvmul_ur0(inputs.box_, cs.toRVec(), shift);
+            shiftVectors.push_back(shift);
+        }
     }
 
-    const int32_t totalPairs = static_cast<int32_t>(pairlistForModel_.size() / 2);
-    std::fprintf(stderr,
-                 "Rank %d Step %ld: %d pairs, %d model atoms, homenr=%d, x.size=%zu\n",
-                 mpiComm_.rank(),
-                 inputs.step_,
-                 totalPairs,
-                 n_atoms,
-                 inputs.homenr_,
-                 inputs.x_.size());
-
-    // Every rank runs the model independently with the same gathered positions.
-    // This avoids MPI force/virial reduction entirely.
+    // Model inference
     torch::Tensor forceTensor;
     torch::Tensor virialTensor;
     double        energy = 0.0;
@@ -825,7 +569,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     {
         MetatomicTimer modelTimer("model inference", mpiComm_);
 
-        // Select appropriate precision for GROMACS data conversion
         auto gromacs_scalar_type = torch::kFloat32;
         if (std::is_same_v<real, double>)
         {
@@ -841,13 +584,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto torch_cell =
                 torch::from_blob(&box_, { 3, 3 }, cpu_blob_options).to(data_->dtype).to(data_->device);
 
-        // Create strain tensor (identity matrix) for virial computation via autodiff
         auto strain = torch::eye(
                 3, torch::TensorOptions().dtype(data_->dtype).device(data_->device).requires_grad(true));
 
-        // Apply strain to cell: strained_cell = cell @ strain
-        auto strained_cell = torch::matmul(torch_cell, strain);
-        // Apply strain to positions: r' = r @ strain
+        auto strained_cell      = torch::matmul(torch_cell, strain);
         auto strained_positions = torch::matmul(torch_positions, strain);
 
         auto torch_pbc = preparePbcType(options_.params_.pbcType_.get(), data_->device);
@@ -857,14 +597,57 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 torch_types, strained_positions, strained_cell, torch_pbc);
 
-        // Build neighbor list from GROMACS pairlist
+        // Build neighbor list from GROMACS pairlist (each pair on exactly one rank)
         for (const auto& request : data_->nl_requests)
         {
+            std::vector<int32_t> finalPairlist;
+            std::vector<RVec>    finalShiftVectors;
+            std::vector<IVec>    finalCellShifts;
+
+            if (request->full_list())
+            {
+                // Full list: add both (i,j) and (j,i) for each pair
+                const int64_t nHalf = static_cast<int64_t>(pairlistMta_.size() / 2);
+                finalPairlist.reserve(4 * nHalf);
+                finalShiftVectors.reserve(2 * nHalf);
+                finalCellShifts.reserve(2 * nHalf);
+
+                for (int64_t k = 0; k < nHalf; k++)
+                {
+                    int32_t atomA = pairlistMta_[2 * k];
+                    int32_t atomB = pairlistMta_[2 * k + 1];
+
+                    finalPairlist.push_back(atomA);
+                    finalPairlist.push_back(atomB);
+                    finalShiftVectors.push_back(shiftVectors[k]);
+                    finalCellShifts.push_back(cellShiftsMta_[k]);
+
+                    finalPairlist.push_back(atomB);
+                    finalPairlist.push_back(atomA);
+                    finalShiftVectors.push_back(
+                            RVec(-shiftVectors[k][XX], -shiftVectors[k][YY], -shiftVectors[k][ZZ]));
+                    finalCellShifts.push_back(
+                            IVec(-cellShiftsMta_[k][XX], -cellShiftsMta_[k][YY], -cellShiftsMta_[k][ZZ]));
+                }
+            }
+            else
+            {
+                // Half list: use pairlist as-is
+                finalPairlist     = pairlistMta_;
+                finalShiftVectors = shiftVectors;
+                finalCellShifts   = cellShiftsMta_;
+            }
+
             auto neighbors = buildNeighborListFromPairlist(
-                    pairlistForModel_, shiftVectors_, cellShifts_, positions_, data_->device, data_->dtype);
+                    finalPairlist, finalShiftVectors, finalCellShifts, positions_, data_->device, data_->dtype);
             metatomic_torch::register_autograd_neighbors(system, neighbors, data_->check_consistency);
             system->add_neighbor_list(request, neighbors);
         }
+
+        // No selected_atoms: each pair is on exactly one rank, so summing
+        // all per-atom energies (home + halo) gives the correct pair energy.
+        // GROMACS sums across ranks via global_stat.
+        data_->evaluations_options->set_selected_atoms(torch::nullopt);
 
         metatensor_torch::TensorMap output_map;
         try
@@ -872,7 +655,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             std::vector<metatomic_torch::System> systems;
             systems.push_back(system);
 
-            // Forward pass
             auto ivalue_output = data_->model.forward(
                     { systems, data_->evaluations_options, data_->check_consistency });
             auto dict_output = ivalue_output.toGenericDict();
@@ -883,52 +665,98 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             GMX_THROW(APIError("[Metatomic] Model evaluation failed: " + std::string(e.what())));
         }
 
-        // Extract Energy
         auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
         auto energy_tensor = energy_block->values();
 
         energy = energy_tensor.sum().item<double>();
 
-        // Reset gradients before backward
+        // Diagnostic: log pairlist size, per-rank energy and MPI sum
+        {
+            double mpiSumEnergy = energy;
+            if (mpiComm_.isParallel())
+            {
+                mpiComm_.sumReduce(1, &mpiSumEnergy);
+            }
+            std::string fname =
+                    "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
+            FILE* fp = std::fopen(fname.c_str(), "a");
+            if (fp)
+            {
+                std::fprintf(fp,
+                             "pairlistPairs=%zu, numLocalMta=%d, numHomeMta=%d, "
+                             "energy: perRank=%.6f, mpiSum=%.6f\n",
+                             pairlistMta_.size() / 2,
+                             numLocalMta_,
+                             numHomeMta_,
+                             energy,
+                             mpiSumEnergy);
+                std::fclose(fp);
+            }
+        }
+
         torch_positions.mutable_grad() = torch::Tensor();
         strain.mutable_grad()          = torch::Tensor();
 
-        // Backward pass: Compute forces (-dE/dr) and virial (-dE/dStrain)
         energy_tensor.backward(-torch::ones_like(energy_tensor));
 
         forceTensor  = torch_positions.grad().to(torch::kCPU).to(torch::kFloat64);
         virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
     }
 
-    // Accumulate forces into the GROMACS force output.
-    // Each rank applies forces only to its home atoms (no double-counting).
+    // Force distribution via all-reduce
     auto forceAccessor = forceTensor.accessor<double, 2>();
-    for (int32_t i = 0; i < n_atoms; ++i)
+
+    if (mpiComm_.isParallel())
     {
-        if (inputToLocalIndex_[i] != -1)
+        // Scatter local forces into global buffer, all-reduce, then apply
+        globalForceBuffer_.assign(numTotalMta, RVec({ 0.0, 0.0, 0.0 }));
+
+        for (int32_t i = 0; i < numLocalMta_; i++)
         {
-            outputs->forceWithVirial_.force_[inputToLocalIndex_[i]][0] += forceAccessor[i][0];
-            outputs->forceWithVirial_.force_[inputToLocalIndex_[i]][1] += forceAccessor[i][1];
-            outputs->forceWithVirial_.force_[inputToLocalIndex_[i]][2] += forceAccessor[i][2];
+            int32_t globalMtaIdx                = mtaToGlobalMta_[i];
+            globalForceBuffer_[globalMtaIdx][0] = static_cast<real>(forceAccessor[i][0]);
+            globalForceBuffer_[globalMtaIdx][1] = static_cast<real>(forceAccessor[i][1]);
+            globalForceBuffer_[globalMtaIdx][2] = static_cast<real>(forceAccessor[i][2]);
+        }
+
+        mpiComm_.sumReduce(3 * numTotalMta, globalForceBuffer_.data()->as_vec());
+
+        // Apply forces only to home MTA atoms from the reduced buffer
+        for (int32_t i = 0; i < numHomeMta_; i++)
+        {
+            int32_t gmxIdx       = mtaToGmxLocal_[i];
+            int32_t globalMtaIdx = mtaToGlobalMta_[i];
+            outputs->forceWithVirial_.force_[gmxIdx][0] += globalForceBuffer_[globalMtaIdx][0];
+            outputs->forceWithVirial_.force_[gmxIdx][1] += globalForceBuffer_[globalMtaIdx][1];
+            outputs->forceWithVirial_.force_[gmxIdx][2] += globalForceBuffer_[globalMtaIdx][2];
+        }
+    }
+    else
+    {
+        // Serial: apply forces directly
+        for (int32_t i = 0; i < numLocalMta_; i++)
+        {
+            int32_t gmxIdx = mtaToGmxLocal_[i];
+            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceAccessor[i][0]);
+            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceAccessor[i][1]);
+            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceAccessor[i][2]);
         }
     }
 
-    // Energy and virial: only main rank contributes since GROMACS sums across ranks.
-    if (mpiComm_.isMainRank() || !mpiComm_.isParallel())
-    {
-        outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] = static_cast<real>(energy);
+    // Energy: every rank contributes its portion, GROMACS sums globally via global_stat
+    outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] = static_cast<real>(energy);
 
-        matrix virialMatrix;
-        auto   virialAccessor = virialTensor.accessor<double, 2>();
-        for (int32_t i = 0; i < 3; ++i)
+    // Virial: every rank contributes its portion, GROMACS sums globally
+    matrix virialMatrix;
+    auto   virialAccessor = virialTensor.accessor<double, 2>();
+    for (int32_t i = 0; i < 3; ++i)
+    {
+        for (int32_t j = 0; j < 3; ++j)
         {
-            for (int32_t j = 0; j < 3; ++j)
-            {
-                virialMatrix[i][j] = virialAccessor[i][j];
-            }
+            virialMatrix[i][j] = virialAccessor[i][j];
         }
-        outputs->forceWithVirial_.addVirialContribution(virialMatrix);
     }
+    outputs->forceWithVirial_.addVirialContribution(virialMatrix);
 }
 
 } // namespace gmx

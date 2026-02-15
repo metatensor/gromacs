@@ -80,11 +80,17 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& /*inputs*
 {
 }
 
-void MetatomicForceProvider::updateLocalAtoms() {}
-void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> globalPositions) {
-    (void)globalPositions;
+void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedistributedSignal& /*signal*/)
+{
 }
-void MetatomicForceProvider::gatherAtomNumbersIndices() {}
+
+void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& /*signal*/)
+{
+}
+
+void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> /*positions*/)
+{
+}
 
 CLANG_DIAGNOSTIC_RESET
 
