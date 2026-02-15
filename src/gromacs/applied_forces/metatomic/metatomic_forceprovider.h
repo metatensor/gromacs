@@ -158,6 +158,12 @@ private:
     //! Cell shifts for each pair (metatensor convention: shift applied to second atom).
     std::vector<IVec> cellShiftsMta_;
 
+    //! Pre-allocated raw buffers for NL construction.
+    //! Avoids per-step torch::zeros allocations and accessor overhead.
+    //! Filled directly, then wrapped with torch::from_blob (zero-cost).
+    std::vector<int32_t> nlSamplesBuffer_; //!< flat [n_pairs * 5]: i, j, cs_a, cs_b, cs_c
+    std::vector<double>  nlVectorsBuffer_; //!< flat [n_pairs * 3]: dx, dy, dz
+
     //! local copy of simulation box
     matrix box_;
 

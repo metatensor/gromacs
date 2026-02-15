@@ -129,87 +129,6 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     return torch::tensor({ true, true, true }, options);
 }
 
-/*! \brief Constructs a Metatensor TensorBlock representing the neighbor list.
- *
- * Builds the metatensor neighbor list from flat pairlist arrays.  The
- * displacement vector for pair k is:
- *   r_ij = positions[j] - positions[i] + shiftVectors[k]
- * which matches the metatensor convention when cellShifts follow the
- * metatensor sign convention (shift applied to second atom j).
- *
- * \param[in] pairlist      Flat [i0,j0, i1,j1, ...] model-index pairs
- * \param[in] shiftVectors  Real-space shift vectors (box * cellShifts)
- * \param[in] cellShifts    Integer cell shifts (metatensor convention)
- * \param[in] positions     Atom positions indexed by model index
- * \param[in] device        Torch device for output tensors
- * \param[in] dtype         Torch scalar type for output tensors
- */
-static metatensor_torch::TensorBlock buildNeighborListFromPairlist(ArrayRef<const int32_t> pairlist,
-                                                                   ArrayRef<const RVec> shiftVectors,
-                                                                   ArrayRef<const IVec> cellShifts,
-                                                                   ArrayRef<const RVec> positions,
-                                                                   torch::Device        device,
-                                                                   torch::ScalarType    dtype)
-{
-    const int64_t n_pairs = static_cast<int64_t>(pairlist.size() / 2);
-
-    auto cpu_int_options   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-    auto cpu_float_options = torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU);
-
-    auto pair_samples_values = torch::zeros({ n_pairs, 5 }, cpu_int_options);
-    auto pair_samples_ptr    = pair_samples_values.accessor<int32_t, 2>();
-
-    auto vectors_cpu      = torch::zeros({ n_pairs, 3, 1 }, cpu_float_options);
-    auto vectors_accessor = vectors_cpu.accessor<double, 3>();
-
-    for (int64_t i = 0; i < n_pairs; i++)
-    {
-        const int32_t atom_i = pairlist[2 * i];
-        const int32_t atom_j = pairlist[2 * i + 1];
-
-        pair_samples_ptr[i][0] = atom_i;
-        pair_samples_ptr[i][1] = atom_j;
-        pair_samples_ptr[i][2] = cellShifts[i][0];
-        pair_samples_ptr[i][3] = cellShifts[i][1];
-        pair_samples_ptr[i][4] = cellShifts[i][2];
-
-        const double r_ij_x =
-                static_cast<double>(positions[atom_j][0] - positions[atom_i][0] + shiftVectors[i][0]);
-        const double r_ij_y =
-                static_cast<double>(positions[atom_j][1] - positions[atom_i][1] + shiftVectors[i][1]);
-        const double r_ij_z =
-                static_cast<double>(positions[atom_j][2] - positions[atom_i][2] + shiftVectors[i][2]);
-
-        vectors_accessor[i][0][0] = r_ij_x;
-        vectors_accessor[i][1][0] = r_ij_y;
-        vectors_accessor[i][2][0] = r_ij_z;
-    }
-
-    auto final_samples_values = pair_samples_values.to(device);
-    auto final_vectors        = vectors_cpu.to(dtype).to(device);
-
-    auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{
-                    "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c" },
-            final_samples_values);
-
-    auto neighbor_component = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{ "xyz" },
-            torch::tensor({ 0, 1, 2 }, torch::TensorOptions().dtype(torch::kInt32).device(device))
-                    .reshape({ 3, 1 }));
-
-    auto neighbor_properties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{ "distance" },
-            torch::zeros({ 1, 1 }, torch::TensorOptions().dtype(torch::kInt32).device(device)));
-
-    return torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
-            final_vectors,
-            neighbor_samples,
-            std::vector<metatensor_torch::Labels>{ neighbor_component },
-            neighbor_properties);
-}
-
-
 /*! \brief Internal data structure for Metatomic runtime states. */
 struct MetatomicData
 {
@@ -220,6 +139,14 @@ struct MetatomicData
     torch::ScalarType                                 dtype             = torch::kFloat32;
     bool                                              check_consistency = false;
     torch::Device                                     device            = torch::kCPU;
+
+    //! Cached NL Labels that are identical every step (created once in constructor).
+    metatensor_torch::Labels cachedNLComponent;
+    metatensor_torch::Labels cachedNLProperties;
+    //! Cached sample column names (avoids heap-allocating string vector every step).
+    std::vector<std::string> nlSampleNames = {
+            "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c"
+    };
 };
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
@@ -266,6 +193,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     const auto deviceType =
             metatomic_torch::pick_device(data_->capabilities->supported_devices, desiredDevice);
     data_->device = torch::Device(deviceType);
+
+    // Cache NL Labels that are constant across steps (avoids per-step
+    // string vector + tensor allocation for component and properties).
+    auto devIntOpts = torch::TensorOptions().dtype(torch::kInt32).device(data_->device);
+    data_->cachedNLComponent = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+            std::vector<std::string>{ "xyz" },
+            torch::tensor({ 0, 1, 2 }, devIntOpts).reshape({ 3, 1 }));
+    data_->cachedNLProperties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+            std::vector<std::string>{ "distance" },
+            torch::zeros({ 1, 1 }, devIntOpts));
 
     GMX_LOG(logger_.info)
             .asParagraph()
@@ -572,19 +509,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     copy_mat(inputs.box_, box_);
 
-    // Compute shift vectors from stored cell shifts and current box
-    std::vector<RVec> shiftVectors;
-    {
-        MetatomicTimer timer("prepareNL", mpiComm_);
-        shiftVectors.reserve(cellShiftsMta_.size());
-        for (const auto& cs : cellShiftsMta_)
-        {
-            RVec shift;
-            mvmul_ur0(inputs.box_, cs.toRVec(), shift);
-            shiftVectors.push_back(shift);
-        }
-    }
-
     // Model inference
     torch::Tensor forceTensor;
     torch::Tensor virialTensor;
@@ -592,6 +516,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     {
         MetatomicTimer modelTimer("model inference", mpiComm_);
+
+        MetatomicTimer tensorPrepTimer("tensorPrep", mpiComm_);
 
         auto gromacs_scalar_type = torch::kFloat32;
         if (std::is_same_v<real, double>)
@@ -621,60 +547,100 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 torch_types, strained_positions, strained_cell, torch_pbc);
 
-        // Build neighbor list from GROMACS pairlist (each pair on exactly one rank).
-        // The stored pairlistMta_ is a half list.  If the model requests
-        // full_list, we double it by adding the reverse pair (j,i) with
-        // negated cell shifts for each (i,j).
+        tensorPrepTimer.stop();
+
+        // Build NL directly into raw buffers, then wrap with from_blob.
+        // Shift vectors are computed inline (no separate prepareNL pass).
+        // Component and properties Labels are cached (identical every step).
+        MetatomicTimer buildNLTimer("buildNL", mpiComm_);
+
         for (const auto& request : data_->nl_requests)
         {
-            std::vector<int32_t> finalPairlist;
-            std::vector<RVec>    finalShiftVectors;
-            std::vector<IVec>    finalCellShifts;
+            const int64_t nHalf  = static_cast<int64_t>(pairlistMta_.size() / 2);
+            const bool    full   = request->full_list();
+            const int64_t nPairs = full ? 2 * nHalf : nHalf;
 
-            if (request->full_list())
+            nlSamplesBuffer_.resize(nPairs * 5);
+            nlVectorsBuffer_.resize(nPairs * 3);
+
+            for (int64_t k = 0; k < nHalf; k++)
             {
-                // Full list needed (e.g. message-passing GNNs like MACE, NequIP)
-                const int64_t nHalf = static_cast<int64_t>(pairlistMta_.size() / 2);
-                finalPairlist.reserve(4 * nHalf);
-                finalShiftVectors.reserve(2 * nHalf);
-                finalCellShifts.reserve(2 * nHalf);
+                const int32_t ai = pairlistMta_[2 * k];
+                const int32_t aj = pairlistMta_[2 * k + 1];
 
-                for (int64_t k = 0; k < nHalf; k++)
+                // Compute shift vector from cell shift and current box
+                RVec shift;
+                mvmul_ur0(inputs.box_, cellShiftsMta_[k].toRVec(), shift);
+
+                // Displacement: r_ij = pos[j] - pos[i] + shift  (metatensor convention)
+                const double dx = static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
+                const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
+                const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
+
+                const int64_t fwd = full ? 2 * k : k;
+                nlSamplesBuffer_[5 * fwd + 0] = ai;
+                nlSamplesBuffer_[5 * fwd + 1] = aj;
+                nlSamplesBuffer_[5 * fwd + 2] = cellShiftsMta_[k][0];
+                nlSamplesBuffer_[5 * fwd + 3] = cellShiftsMta_[k][1];
+                nlSamplesBuffer_[5 * fwd + 4] = cellShiftsMta_[k][2];
+                nlVectorsBuffer_[3 * fwd + 0] = dx;
+                nlVectorsBuffer_[3 * fwd + 1] = dy;
+                nlVectorsBuffer_[3 * fwd + 2] = dz;
+
+                if (full)
                 {
-                    int32_t atomA = pairlistMta_[2 * k];
-                    int32_t atomB = pairlistMta_[2 * k + 1];
-
-                    finalPairlist.push_back(atomA);
-                    finalPairlist.push_back(atomB);
-                    finalShiftVectors.push_back(shiftVectors[k]);
-                    finalCellShifts.push_back(cellShiftsMta_[k]);
-
-                    finalPairlist.push_back(atomB);
-                    finalPairlist.push_back(atomA);
-                    finalShiftVectors.push_back(
-                            RVec(-shiftVectors[k][XX], -shiftVectors[k][YY], -shiftVectors[k][ZZ]));
-                    finalCellShifts.push_back(
-                            IVec(-cellShiftsMta_[k][XX], -cellShiftsMta_[k][YY], -cellShiftsMta_[k][ZZ]));
+                    // Reverse pair (j,i) with negated shifts and displacement
+                    const int64_t rev = 2 * k + 1;
+                    nlSamplesBuffer_[5 * rev + 0] = aj;
+                    nlSamplesBuffer_[5 * rev + 1] = ai;
+                    nlSamplesBuffer_[5 * rev + 2] = -cellShiftsMta_[k][0];
+                    nlSamplesBuffer_[5 * rev + 3] = -cellShiftsMta_[k][1];
+                    nlSamplesBuffer_[5 * rev + 4] = -cellShiftsMta_[k][2];
+                    nlVectorsBuffer_[3 * rev + 0] = -dx;
+                    nlVectorsBuffer_[3 * rev + 1] = -dy;
+                    nlVectorsBuffer_[3 * rev + 2] = -dz;
                 }
             }
-            else
-            {
-                // Half list: use pairlist as-is
-                finalPairlist     = pairlistMta_;
-                finalShiftVectors = shiftVectors;
-                finalCellShifts   = cellShiftsMta_;
-            }
 
-            auto neighbors = buildNeighborListFromPairlist(
-                    finalPairlist, finalShiftVectors, finalCellShifts, positions_, data_->device, data_->dtype);
+            MetatomicTimer fromBlobTimer("fromBlob", mpiComm_);
+            auto samples_tensor = torch::from_blob(
+                    nlSamplesBuffer_.data(), { nPairs, 5 },
+                    torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
+            auto vectors_tensor = torch::from_blob(
+                    nlVectorsBuffer_.data(), { nPairs, 3, 1 },
+                    torch::TensorOptions().dtype(torch::kFloat64)).to(data_->dtype).to(data_->device);
+            fromBlobTimer.stop();
+
+            MetatomicTimer labelsTimer("makeSampleLabels", mpiComm_);
+            auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                    data_->nlSampleNames, samples_tensor);
+            labelsTimer.stop();
+
+            MetatomicTimer blockTimer("makeTensorBlock", mpiComm_);
+            auto neighbors = torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
+                    vectors_tensor,
+                    neighbor_samples,
+                    std::vector<metatensor_torch::Labels>{ data_->cachedNLComponent },
+                    data_->cachedNLProperties);
+            blockTimer.stop();
+
+            MetatomicTimer autogradTimer("registerAutograd", mpiComm_);
             metatomic_torch::register_autograd_neighbors(system, neighbors, data_->check_consistency);
+            autogradTimer.stop();
+
+            MetatomicTimer addNLTimer("addNeighborList", mpiComm_);
             system->add_neighbor_list(request, neighbors);
+            addNLTimer.stop();
         }
+
+        buildNLTimer.stop();
 
         // No selected_atoms: each pair is on exactly one rank, so summing
         // all per-atom energies (home + halo) gives the correct pair energy.
         // GROMACS sums across ranks via global_stat.
         data_->evaluations_options->set_selected_atoms(torch::nullopt);
+
+        MetatomicTimer forwardTimer("forward", mpiComm_);
 
         metatensor_torch::TensorMap output_map;
         try
@@ -691,6 +657,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         {
             GMX_THROW(APIError("[Metatomic] Model evaluation failed: " + std::string(e.what())));
         }
+
+        forwardTimer.stop();
 
         auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
         auto energy_tensor = energy_block->values();
@@ -721,13 +689,21 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
         }
 
+        MetatomicTimer backwardTimer("backward", mpiComm_);
+
         torch_positions.mutable_grad() = torch::Tensor();
         strain.mutable_grad()          = torch::Tensor();
 
         energy_tensor.backward(-torch::ones_like(energy_tensor));
 
+        backwardTimer.stop();
+
+        MetatomicTimer toCPUTimer("toCPU", mpiComm_);
+
         forceTensor  = torch_positions.grad().to(torch::kCPU).to(torch::kFloat64);
         virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
+
+        toCPUTimer.stop();
     }
 
     // Force distribution via all-reduce.
@@ -736,6 +712,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     // handles ForceWithShiftForces), we must all-reduce ourselves.  Each rank
     // scatters its local forces into a global buffer indexed by global MTA
     // index.  After all-reduce, each rank reads back only its home atoms.
+    MetatomicTimer forceScatterTimer("forceScatter", mpiComm_);
+
     auto forceAccessor = forceTensor.accessor<double, 2>();
 
     if (mpiComm_.isParallel())
@@ -773,6 +751,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceAccessor[i][2]);
         }
     }
+
+    forceScatterTimer.stop();
 
     // Energy: each rank's energy is the sum of per-atom energies for all local
     // atoms (home + halo) from the pairs assigned to this rank.  GROMACS

@@ -35,8 +35,8 @@
  * \brief
  * Scoped timer for Metatomic force provider profiling.
  *
- * RAII timer that prints nested timing information to stderr with MPI rank.
- * Enable with MetatomicTimer::enable(true) before use.
+ * RAII timer that writes nested timing information to per-rank files
+ * (metatomic_timer_rank_N.log).  Enable with GMX_METATOMIC_TIMER=1.
  *
  * \author Metatensor developers <https://github.com/metatensor>
  * \ingroup module_applied_forces
@@ -46,7 +46,7 @@
 
 #include <chrono>
 #include <cstdint>
-#include <iostream>
+#include <cstdio>
 #include <mutex>
 #include <string>
 
@@ -60,14 +60,15 @@ static std::mutex METATOMIC_TIMER_MUTEX = {};
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int64_t METATOMIC_TIMER_DEPTH = -1;
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-static uint64_t METATOMIC_TIMER_COUNTER = 0;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static bool METATOMIC_TIMER_ENABLED = false;
 
 /*! \internal \brief RAII scoped timer for Metatomic profiling.
  *
- * Prints hierarchical timing info to stderr. Timers nest automatically.
- * Thread-safe via a global mutex.
+ * Writes hierarchical timing info to a per-rank file
+ * (metatomic_timer_rank_N.log).  Timers nest automatically via a
+ * global depth counter.  Thread-safe via a global mutex.
+ *
+ * Enable with GMX_METATOMIC_TIMER=1 environment variable.
  */
 class MetatomicTimer
 {
@@ -87,41 +88,22 @@ public:
         if (METATOMIC_TIMER_ENABLED)
         {
             METATOMIC_TIMER_DEPTH += 1;
-            METATOMIC_TIMER_COUNTER += 1;
-
-            this->enabled_          = true;
-            this->starting_counter_ = METATOMIC_TIMER_COUNTER;
-            this->start_            = std::chrono::high_resolution_clock::now();
-            auto indent             = std::string(METATOMIC_TIMER_DEPTH * 3, ' ');
-
-            if (METATOMIC_TIMER_DEPTH == 0)
-            {
-                std::cerr << "\n";
-            }
-            std::cerr << "\n" << indent << this->name_ << " ...";
+            this->enabled_ = true;
+            this->start_   = std::chrono::high_resolution_clock::now();
         }
+    }
+
+    //! Stop the timer early (before scope exit). Safe to call multiple times.
+    void stop()
+    {
+        auto guard_ = std::lock_guard(METATOMIC_TIMER_MUTEX);
+        recordAndDisable_();
     }
 
     ~MetatomicTimer()
     {
         auto guard_ = std::lock_guard(METATOMIC_TIMER_MUTEX);
-
-        if (METATOMIC_TIMER_ENABLED && this->enabled_)
-        {
-            auto stop = std::chrono::high_resolution_clock::now();
-            auto elapsed =
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start_).count();
-
-            if (METATOMIC_TIMER_COUNTER != starting_counter_)
-            {
-                auto indent = std::string(METATOMIC_TIMER_DEPTH * 3, ' ');
-                std::cerr << "\n" << indent << this->name_;
-            }
-
-            std::cerr << " took " << elapsed / 1e6 << "ms (rank " << mpiComm_.rank() << ")"
-                      << std::flush;
-            METATOMIC_TIMER_DEPTH -= 1;
-        }
+        recordAndDisable_();
     }
 
     // Non-copyable, non-movable
@@ -131,11 +113,32 @@ public:
     MetatomicTimer& operator=(MetatomicTimer&&)      = delete;
 
 private:
-    bool                                                 enabled_;
-    std::string                                          name_;
-    const MpiComm&                                       mpiComm_;
-    uint64_t                                             starting_counter_ = 0;
-    std::chrono::high_resolution_clock::time_point       start_;
+    //! Record elapsed time and mark as done. Must be called under lock.
+    void recordAndDisable_()
+    {
+        if (METATOMIC_TIMER_ENABLED && this->enabled_)
+        {
+            auto stop    = std::chrono::high_resolution_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(stop - start_).count();
+            auto indent  = std::string(METATOMIC_TIMER_DEPTH * 2, ' ');
+
+            std::string fname = "metatomic_timer_rank_" + std::to_string(mpiComm_.rank()) + ".log";
+            FILE*       fp    = std::fopen(fname.c_str(), "a");
+            if (fp)
+            {
+                std::fprintf(fp, "%s%s: %.3f ms\n", indent.c_str(), name_.c_str(), elapsed / 1e3);
+                std::fclose(fp);
+            }
+
+            this->enabled_ = false;
+            METATOMIC_TIMER_DEPTH -= 1;
+        }
+    }
+
+    bool                                           enabled_;
+    std::string                                    name_;
+    const MpiComm&                                 mpiComm_;
+    std::chrono::high_resolution_clock::time_point start_;
 };
 
 } // namespace gmx
