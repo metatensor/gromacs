@@ -6,5 +6,5 @@
   <String Name="modelPath"></String>
   <String Name="extensionsDirectory"></String>
   <String Name="device"></String>
-  <Bool Name="checkConsistency">true</Bool>
+  <Bool Name="checkConsistency">false</Bool>
 </ReferenceData>
