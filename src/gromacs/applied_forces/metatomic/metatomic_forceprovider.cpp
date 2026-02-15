@@ -526,7 +526,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
         auto cpu_blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
 
-        auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { n_atoms, 3 }, cpu_blob_options)
+        auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { static_cast<int64_t>(numLocalMta_), 3 }, cpu_blob_options)
                                        .to(data_->dtype)
                                        .to(data_->device)
                                        .set_requires_grad(true);
