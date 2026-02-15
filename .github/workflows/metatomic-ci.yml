@@ -1,0 +1,79 @@
+name: Metatomic Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      pixi_envs_branch:
+        description: "pixi_envs branch for test definitions"
+        required: false
+        default: "main"
+  push:
+    branches: [metatomic]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mpi: thread-mpi
+            build_task: gromk-tmpi
+            gmx_bin: gmx
+          - mpi: real-mpi
+            build_task: gromk-mpi
+            gmx_bin: gmx_mpi
+
+    name: metatomic (${{ matrix.mpi }})
+
+    steps:
+      - name: Checkout GROMACS
+        uses: actions/checkout@v4
+        with:
+          path: gromacs
+
+      - name: Checkout pixi_envs
+        uses: actions/checkout@v4
+        with:
+          repository: HaoZeke/pixi_envs
+          ref: ${{ github.event.inputs.pixi_envs_branch || 'main' }}
+          path: pixi_envs
+
+      - name: Place GROMACS inside pixi_envs layout
+        run: ln -s ${{ github.workspace }}/gromacs pixi_envs/orgs/metatensor/gromacs/gromacs
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          manifest-path: pixi_envs/orgs/metatensor/gromacs/pixi.toml
+          environments: metatomic-cpu
+
+      - name: Build GROMACS (${{ matrix.mpi }})
+        working-directory: pixi_envs/orgs/metatensor/gromacs
+        run: pixi run -e metatomic-cpu ${{ matrix.build_task }} Release
+
+      - name: Show cmake error log on failure
+        if: failure()
+        working-directory: pixi_envs/orgs/metatensor/gromacs
+        run: |
+          for f in gromacs/build-*/CMakeFiles/CMakeError.log; do
+            echo "=== $f ==="
+            cat "$f" 2>/dev/null || true
+          done
+          for f in gromacs/build-*/CMakeFiles/CMakeOutput.log; do
+            echo "=== $f (last 100 lines) ==="
+            tail -100 "$f" 2>/dev/null || true
+          done
+
+      - name: Generate test model
+        working-directory: pixi_envs/orgs/metatensor/gromacs
+        run: cd mta_test && pixi run -e metatomic-cpu python create_model.py
+
+      - name: Run tests (skip dd8/dd12)
+        working-directory: pixi_envs/orgs/metatensor/gromacs
+        env:
+          GMX_BIN: ${{ matrix.gmx_bin }}
+        run: |
+          pixi run -e metatomic-cpu pytest mta_test/ -v \
+            -m "not dd8 and not dd12"
