@@ -294,10 +294,19 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                       energy_key.c_str())));
     }
 
+    auto model_output     = outputs.at(energy_key);
     auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-    // per_atom=true so the model returns per-atom energies (needed for
-    // correct energy decomposition when using the GROMACS pairlist in domain decomposition)
-    requested_output->per_atom           = true;
+    // Use the model's declared per_atom capability (needed for correct energy
+    // decomposition when using the GROMACS pairlist in domain decomposition)
+    requested_output->per_atom           = model_output->per_atom;
+    if (!model_output->per_atom)
+    {
+        GMX_LOG(logger_.warning)
+                .asParagraph()
+                .appendText(
+                        "Metatomic model does not support per_atom energy output. "
+                        "Energy decomposition in domain decomposition may be less accurate.");
+    }
     requested_output->explicit_gradients = {};
     requested_output->set_unit("kJ/mol");
 
