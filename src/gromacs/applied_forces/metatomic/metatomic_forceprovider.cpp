@@ -47,6 +47,10 @@
  *    second atom).  Models requesting full_list get both (i,j) and (j,i).
  *  - Energy: selected_atoms = nullopt (sum all per-atom energies, home +
  *    halo).  No double counting because each pair is on one rank.
+ *    NOTE: this only works for GNN-style models that exclusively use the
+ *    provided neighbor list.  Models with global attention or internal pair
+ *    recomputation would double-count; for those, selected_atoms should be
+ *    set to home atoms only (not yet implemented).
  *  - Forces: all-reduce on a global buffer because ForceWithVirial is not
  *    communicated by dd_move_f.  Only home atom forces are applied.
  *  - Ghost deduplication: periodic ghost images share the same model index
@@ -321,6 +325,18 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
 MetatomicForceProvider::~MetatomicForceProvider() = default;
 
+/*! \brief Rebuild local MTA atom tables after domain decomposition.
+ *
+ * Called on every AtomsRedistributed signal. Scans the local + halo atoms
+ * to find MTA atoms, deduplicates periodic ghost images, and builds:
+ *  - mtaToGmxLocal_: model index -> GROMACS local buffer index
+ *  - mtaToGlobalMta_: model index -> global MTA index (for force all-reduce)
+ *  - gmxLocalToMtaIdx_: GROMACS local index -> model index (all images)
+ *  - atomNumbers_: atomic numbers for the model input
+ *
+ * Home atoms get model indices [0, numHomeMta_), halo atoms get
+ * [numHomeMta_, numLocalMta_).
+ */
 void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedistributedSignal& signal)
 {
     const auto&   mtaIndices  = options_.params_.mtaIndices_;
@@ -495,6 +511,13 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
     }
 }
 
+/*! \brief Convert GROMACS excluded pairlist to MTA model indices.
+ *
+ * Called on every PairlistConstructed signal. Maps GROMACS local buffer
+ * indices in excludedPairlist_ to MTA model indices via gmxLocalToMtaIdx_,
+ * and negates cell shifts (GROMACS shifts first atom, metatensor shifts
+ * second atom).
+ */
 void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& signal)
 {
     pairlistMta_.clear();
@@ -661,6 +684,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         buildNLTimer.stop();
 
+        // TODO: For non-local models (global attention, internal pair recomputation),
+        // selected_atoms should be set to home atoms only to avoid double counting.
+        // Currently assumes GNN-style models that only use the provided neighbor list.
         // No selected_atoms: each pair is on exactly one rank, so summing
         // all per-atom energies (home + halo) gives the correct pair energy.
         // GROMACS sums across ranks via global_stat.
