@@ -194,6 +194,10 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             data_->model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
 
     torch::optional<std::string> desiredDevice = torch::nullopt;
+    if (!options_.params_.device.empty())
+    {
+        desiredDevice = options_.params_.device;
+    }
     if (const char* env = std::getenv("GMX_METATOMIC_DEVICE"))
     {
         desiredDevice = std::string(env);
