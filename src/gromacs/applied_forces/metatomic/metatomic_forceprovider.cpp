@@ -147,6 +147,9 @@ struct MetatomicData
     std::vector<std::string> nlSampleNames = {
             "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c"
     };
+
+    //! Whether debug logging to per-rank files is enabled (GMX_METATOMIC_DEBUG).
+    bool debugEnabled = false;
 };
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
@@ -164,6 +167,8 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     {
         MetatomicTimer::enable(std::string(timerEnv) != "0");
     }
+
+    data_->debugEnabled = (std::getenv("GMX_METATOMIC_DEBUG") != nullptr);
 
     // With thread-MPI, each rank is a thread sharing the same process.
     // PyTorch's internal OpenMP would spawn N threads per rank, causing
@@ -221,6 +226,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             .asParagraph()
             .appendTextFormatted("Metatomic using device: %s", data_->device.str().c_str());
 
+    if (data_->debugEnabled)
     {
         double interactionRange = data_->capabilities->engine_interaction_range("nm");
         std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
@@ -240,6 +246,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     for (const auto& request_ivalue : requests_ivalue.toList())
     {
         auto nl_opt = request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
+        if (data_->debugEnabled)
         {
             std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
             FILE*       fp    = std::fopen(fname.c_str(), "a");
@@ -402,6 +409,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             }
         }
 
+        if (data_->debugEnabled)
         {
             std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
             FILE*       fp    = std::fopen(fname.c_str(), "a");
@@ -679,6 +687,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         energy = energy_tensor.sum().item<double>();
 
         // Diagnostic: log pairlist size, per-rank energy and MPI sum
+        if (data_->debugEnabled)
         {
             double mpiSumEnergy = energy;
             if (mpiComm_.isParallel())
