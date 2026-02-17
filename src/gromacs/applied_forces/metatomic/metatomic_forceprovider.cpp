@@ -285,7 +285,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
     // per_atom=true so the model returns per-atom energies (needed for
-    // correct energy decomposition when using the GROMACS pairlist in DD)
+    // correct energy decomposition when using the GROMACS pairlist in domain decomposition)
     requested_output->per_atom           = true;
     requested_output->explicit_gradients = {};
     requested_output->set_unit("kJ/mol");

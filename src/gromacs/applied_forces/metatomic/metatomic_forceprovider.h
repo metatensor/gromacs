@@ -69,7 +69,7 @@ class MpiComm;
  * The neighbor list comes from the GROMACS plain pairlist (excludedPairlist),
  * which assigns each pair to exactly one rank — no double counting.
  *
- * **Atoms**: In DD, GROMACS partitions atoms into "home" atoms (owned by this
+ * **Atoms**: In domain decomposition, GROMACS partitions atoms into "home" atoms (owned by this
  * rank) and "halo" atoms (copies from neighboring ranks needed for short-range
  * interactions). The same global atom may appear as multiple periodic ghost
  * images in the halo. We deduplicate these so each atom has one model index,
