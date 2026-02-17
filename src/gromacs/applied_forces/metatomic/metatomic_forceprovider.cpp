@@ -122,10 +122,6 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     {
         return torch::tensor({ false, false, false }, options);
     }
-    else if (*pbcType != PbcType::Xyz)
-    {
-        GMX_THROW(InconsistentInputError("PBC type not supported by Metatomic interface."));
-    }
     return torch::tensor({ true, true, true }, options);
 }
 
