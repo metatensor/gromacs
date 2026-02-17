@@ -129,6 +129,9 @@ private:
                 std::fprintf(fp, "%s%s: %.3f ms\n", indent.c_str(), name_.c_str(), elapsed / 1e3);
                 std::fclose(fp);
             }
+            // Also print to stdout for immediate visibility
+            std::fprintf(stdout, "[MetatomicTimer rank %d] %s%s: %.3f ms\n",
+                         mpiComm_.rank(), indent.c_str(), name_.c_str(), elapsed / 1e3);
 
             this->enabled_ = false;
             METATOMIC_TIMER_DEPTH -= 1;

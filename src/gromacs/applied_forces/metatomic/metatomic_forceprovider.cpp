@@ -162,7 +162,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     if (const char* timerEnv = std::getenv("GMX_METATOMIC_TIMER"))
     {
-        MetatomicTimer::enable(std::string(timerEnv) == "1");
+        MetatomicTimer::enable(std::string(timerEnv) != "0");
     }
 
     // With thread-MPI, each rank is a thread sharing the same process.
