@@ -35,22 +35,20 @@
  * \brief
  * Implements the Metatomic Force Provider class with per-rank model evaluation.
  *
- * Uses the GROMACS plain pairlist (excludedPairlist) as the neighbor list
- * source.  MTA-MTA nonbonded pairs are excluded from the classical force
- * calculation via intermolecularExclusionGroup, causing them to appear in
- * excludedPairlist_ instead of pairlist_.  Each pair is assigned to exactly
- * one rank by the GROMACS nbnxm pairlist builder.
+ * Two NL modes are supported (controlled by MDP `metatomic-nl-mode`):
  *
- * Key design points:
- *  - Neighbor list: built from excludedPairlist_, not AnalysisNeighborhood.
- *    Cell shifts are negated (GROMACS shifts first atom, metatensor shifts
- *    second atom).  Models requesting full_list get both (i,j) and (j,i).
- *  - Energy: selected_atoms = nullopt (sum all per-atom energies, home +
- *    halo).  No double counting because each pair is on one rank.
- *    NOTE: this only works for GNN-style models that exclusively use the
- *    provided neighbor list.  Models with global attention or internal pair
- *    recomputation would double-count; for those, selected_atoms should be
- *    set to home atoms only (not yet implemented).
+ *  - **full** (default): uses the GROMACS pairlist as the pair source, then
+ *    exchanges pair identities across ranks (backward pair exchange) so every
+ *    home atom has ALL its pairs.  Sums home-atom energies only.  Safe for all
+ *    model architectures (newton pair ON pattern).
+ *
+ *  - **pairlist**: uses the GROMACS excluded pairlist (excludedPairlist_).
+ *    MTA-MTA nonbonded pairs are excluded from the classical force calculation
+ *    via intermolecularExclusionGroup.  Sets `selected_atoms = nullopt` — each
+ *    pair is on exactly one rank, so summing all per-atom energies is correct.
+ *    Only valid for models that exclusively use the provided neighbor list.
+ *
+ * Common design points:
  *  - Forces: all-reduce on a global buffer because ForceWithVirial is not
  *    communicated by dd_move_f.  Only home atom forces are applied.
  *  - Ghost deduplication: periodic ghost images share the same model index
@@ -63,13 +61,18 @@
 
 #include "metatomic_forceprovider.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 
 #include <algorithm>
+#include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
+#include "gromacs/domdec/domdec_network.h"
+#include "gromacs/domdec/domdec_struct.h"
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
@@ -150,6 +153,10 @@ struct MetatomicData
 
     //! Whether debug logging to per-rank files is enabled (GMX_METATOMIC_DEBUG).
     bool debugEnabled = false;
+
+    //! Effective NL mode: "full" (pairlist + backward pair exchange) or
+    //! "pairlist" (excluded pairlist only, selected_atoms=nullopt).
+    std::string nlMode = "full";
 };
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
@@ -169,6 +176,22 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
 
     data_->debugEnabled = (std::getenv("GMX_METATOMIC_DEBUG") != nullptr);
+
+    // NL mode: MDP setting, overridable by env var
+    data_->nlMode = options_.params_.nlMode;
+    if (const char* env = std::getenv("GMX_METATOMIC_NL_MODE"))
+    {
+        data_->nlMode = std::string(env);
+    }
+    if (data_->nlMode != "full" && data_->nlMode != "pairlist")
+    {
+        GMX_THROW(InvalidInputError(
+                formatString("Invalid metatomic nl-mode '%s'. Must be 'full' or 'pairlist'.",
+                             data_->nlMode.c_str())));
+    }
+    GMX_LOG(logger_.info)
+            .asParagraph()
+            .appendTextFormatted("Metatomic NL mode: %s", data_->nlMode.c_str());
 
     // With thread-MPI, each rank is a thread sharing the same process.
     // PyTorch's internal OpenMP would spawn N threads per rank, causing
@@ -500,6 +523,23 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 
     GMX_RELEASE_ASSERT(std::count(atomNumbers_.begin(), atomNumbers_.end(), 0) == 0,
                        "Some atom numbers not set.");
+
+    // Debug: dump local-to-global mapping
+    if (data_->debugEnabled)
+    {
+        std::string fname =
+                "metatomic_atoms_rank_" + std::to_string(mpiComm_.rank()) + ".csv";
+        FILE* fp = std::fopen(fname.c_str(), "w");
+        if (fp)
+        {
+            std::fprintf(fp, "localIdx,globalMta,isHome\n");
+            for (int32_t i = 0; i < numLocalMta_; i++)
+            {
+                std::fprintf(fp, "%d,%d,%d\n", i, mtaToGlobalMta_[i], i < numHomeMta_ ? 1 : 0);
+            }
+            std::fclose(fp);
+        }
+    }
 }
 
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
@@ -545,6 +585,288 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
 }
 
 
+int32_t MetatomicForceProvider::exchangeBackwardGhosts(
+        const gmx_domdec_t* dd, const matrix box, double cutoff)
+{
+    if (dd == nullptr || dd->ndim == 0)
+    {
+        return 0;
+    }
+
+    int32_t totalAdded = 0;
+    std::unordered_set<int32_t> existingGlobalMta(
+            mtaToGlobalMta_.begin(), mtaToGlobalMta_.end());
+
+    for (int d = 0; d < dd->ndim; d++)
+    {
+        const int dimIndex  = dd->dim[d]; // Cartesian dimension
+        const int numCellsD = dd->numCells[dimIndex];
+        const int npulseD   = dd->numPulses[dimIndex];
+
+        // Skip if forward pulses already cover all cells
+        if (npulseD >= numCellsD - 1)
+        {
+            continue;
+        }
+
+        // We currently implement 1 backward pulse.  Assert that this is
+        // sufficient (numCells - 1 - npulse == 1).
+        const int backwardGap = numCellsD - 1 - npulseD;
+        GMX_RELEASE_ASSERT(backwardGap == 1,
+                           "Backward ghost exchange currently supports exactly 1 missing "
+                           "cell per dimension.  Increase rlist or reduce DD cells.");
+
+        // Cell width along this dimension (orthorhombic approximation)
+        const double cellWidth =
+                static_cast<double>(box[dimIndex][dimIndex]) / numCellsD;
+
+        // Forward boundary of this rank's cell (upper edge)
+        const double forwardBoundary =
+                static_cast<double>(dd->ci[dimIndex] + 1) * cellWidth;
+
+        // Identify HOME MTA atoms near the forward boundary (within cutoff).
+        // These atoms are what the forward neighbor will receive as backward
+        // ghosts for its backward direction gap.
+        std::vector<int>  sendGlobalMta;
+        std::vector<RVec> sendPositions;
+        std::vector<int>  sendAtomNumbers;
+
+        for (int32_t i = 0; i < numHomeMta_; i++)
+        {
+            const double coord = static_cast<double>(positions_[i][dimIndex]);
+            if (coord > forwardBoundary - cutoff)
+            {
+                sendGlobalMta.push_back(static_cast<int>(mtaToGlobalMta_[i]));
+                sendPositions.push_back(positions_[i]);
+                sendAtomNumbers.push_back(static_cast<int>(atomNumbers_[i]));
+            }
+        }
+
+        // --- Step 1: exchange counts ---
+        int sendCount = static_cast<int>(sendGlobalMta.size());
+        int recvCount = 0;
+        ddSendrecv(dd, d, dddirForward,
+                   gmx::ArrayRef<int>(&sendCount, &sendCount + 1),
+                   gmx::ArrayRef<int>(&recvCount, &recvCount + 1));
+
+        if (recvCount == 0 && sendCount == 0)
+        {
+            continue;
+        }
+
+        // --- Step 2: exchange data ---
+        std::vector<int>  recvGlobalMta(recvCount);
+        std::vector<RVec> recvPositions(recvCount);
+        std::vector<int>  recvAtomNumbers(recvCount);
+
+        ddSendrecv(dd, d, dddirForward,
+                   gmx::ArrayRef<int>(sendGlobalMta),
+                   gmx::ArrayRef<int>(recvGlobalMta));
+        ddSendrecv(dd, d, dddirForward,
+                   gmx::ArrayRef<RVec>(sendPositions),
+                   gmx::ArrayRef<RVec>(recvPositions));
+        ddSendrecv(dd, d, dddirForward,
+                   gmx::ArrayRef<int>(sendAtomNumbers),
+                   gmx::ArrayRef<int>(recvAtomNumbers));
+
+        // PBC shift: when the backward neighbor wraps around (its cell index >
+        // our cell index), the received positions are at the far end of the
+        // box.  Shift them by -box[dim] to place them near our backward
+        // boundary (matching how standard halo atoms are shifted).
+        const int backCell = (dd->ci[dimIndex] - 1 + numCellsD) % numCellsD;
+        if (backCell > dd->ci[dimIndex])
+        {
+            for (int k = 0; k < recvCount; k++)
+            {
+                recvPositions[k][XX] -= box[dimIndex][XX];
+                recvPositions[k][YY] -= box[dimIndex][YY];
+                recvPositions[k][ZZ] -= box[dimIndex][ZZ];
+            }
+        }
+
+        // Add non-duplicate backward ghost atoms
+        for (int k = 0; k < recvCount; k++)
+        {
+            const int32_t globalMta = static_cast<int32_t>(recvGlobalMta[k]);
+            if (existingGlobalMta.count(globalMta) == 0)
+            {
+                positions_.push_back(recvPositions[k]);
+                atomNumbers_.push_back(static_cast<int32_t>(recvAtomNumbers[k]));
+                mtaToGlobalMta_.push_back(globalMta);
+                existingGlobalMta.insert(globalMta);
+                totalAdded++;
+            }
+        }
+    }
+
+    numLocalMta_ += totalAdded;
+
+    if (data_->debugEnabled)
+    {
+        std::string fname =
+                "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
+        FILE* fp = std::fopen(fname.c_str(), "a");
+        if (fp)
+        {
+            std::fprintf(fp,
+                         "exchangeBackwardGhosts: added %d, numLocalMta=%d (home=%d), "
+                         "uniqueGlobalMta=%zu\n",
+                         totalAdded, numLocalMta_, numHomeMta_,
+                         existingGlobalMta.size());
+            // Dump all global MTA indices present
+            std::fprintf(fp, "  globalMtaIndices:");
+            std::vector<int32_t> sorted(mtaToGlobalMta_.begin(),
+                                        mtaToGlobalMta_.begin() + numLocalMta_);
+            std::sort(sorted.begin(), sorted.end());
+            for (int32_t g : sorted)
+            {
+                std::fprintf(fp, " %d", g);
+            }
+            std::fprintf(fp, "\n");
+            // Position ranges
+            double xmin = 1e9, xmax = -1e9;
+            for (int32_t i = 0; i < numLocalMta_; i++)
+            {
+                double x = static_cast<double>(positions_[i][XX]);
+                if (x < xmin) xmin = x;
+                if (x > xmax) xmax = x;
+            }
+            std::fprintf(fp, "  posRange X: [%.4f, %.4f]\n", xmin, xmax);
+            std::fclose(fp);
+        }
+    }
+
+    return totalAdded;
+}
+
+
+void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
+{
+    backwardPairsMta_.clear();
+    backwardShiftsMta_.clear();
+
+    if (!mpiComm_.isParallel())
+    {
+        return;
+    }
+
+    const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
+
+    // Step 1: Build global pair existence table via allreduce.
+    // pairTable[gI * numTotalMta + gJ] = 1 if any rank has pair (gI, gJ).
+    // After sumReduce, entries > 0 indicate pairs that exist somewhere.
+    std::vector<int> pairTable(numTotalMta * numTotalMta, 0);
+    const int nMyPairs = static_cast<int>(pairlistMta_.size() / 2);
+    for (int k = 0; k < nMyPairs; k++)
+    {
+        const int32_t gI = mtaToGlobalMta_[pairlistMta_[2 * k]];
+        const int32_t gJ = mtaToGlobalMta_[pairlistMta_[2 * k + 1]];
+        pairTable[gI * numTotalMta + gJ] = 1;
+    }
+    mpiComm_.sumReduce(static_cast<std::size_t>(numTotalMta * numTotalMta),
+                       pairTable.data());
+
+    // Step 2: Build set of my home atoms and existing canonical pairs.
+    std::unordered_set<int32_t> myHomeGlobalMta;
+    for (int32_t i = 0; i < numHomeMta_; i++)
+    {
+        myHomeGlobalMta.insert(mtaToGlobalMta_[i]);
+    }
+
+    // Canonical pair set {min(gI,gJ), max(gI,gJ)} to avoid half-list duplication.
+    std::set<std::pair<int32_t, int32_t>> existingCanonical;
+    for (int k = 0; k < nMyPairs; k++)
+    {
+        const int32_t gI = mtaToGlobalMta_[pairlistMta_[2 * k]];
+        const int32_t gJ = mtaToGlobalMta_[pairlistMta_[2 * k + 1]];
+        existingCanonical.insert({ std::min(gI, gJ), std::max(gI, gJ) });
+    }
+
+    // Step 3: Build global MTA → local index mapping.
+    std::unordered_map<int32_t, int32_t> globalToLocal;
+    for (int32_t i = 0; i < numLocalMta_; i++)
+    {
+        globalToLocal[mtaToGlobalMta_[i]] = i;
+    }
+
+    // Step 4: Find pairs I need but don't have.
+    for (int32_t gI = 0; gI < numTotalMta; gI++)
+    {
+        for (int32_t gJ = 0; gJ < numTotalMta; gJ++)
+        {
+            if (pairTable[gI * numTotalMta + gJ] == 0)
+            {
+                continue;
+            }
+
+            // Pair must involve one of my home atoms.
+            const bool iIsMyHome = myHomeGlobalMta.count(gI) > 0;
+            const bool jIsMyHome = myHomeGlobalMta.count(gJ) > 0;
+            if (!iIsMyHome && !jIsMyHome)
+            {
+                continue;
+            }
+
+            // Skip if I already have this pair (in either direction).
+            auto canonical = std::make_pair(std::min(gI, gJ), std::max(gI, gJ));
+            if (existingCanonical.count(canonical) > 0)
+            {
+                continue;
+            }
+
+            // Both atoms must be in the local position array.
+            auto itI = globalToLocal.find(gI);
+            auto itJ = globalToLocal.find(gJ);
+            if (itI == globalToLocal.end() || itJ == globalToLocal.end())
+            {
+                continue;
+            }
+
+            const int32_t localI = itI->second;
+            const int32_t localJ = itJ->second;
+
+            // Compute minimum-image shift from local positions (orthorhombic).
+            const double rawDx =
+                    static_cast<double>(positions_[localJ][XX] - positions_[localI][XX]);
+            const double rawDy =
+                    static_cast<double>(positions_[localJ][YY] - positions_[localI][YY]);
+            const double rawDz =
+                    static_cast<double>(positions_[localJ][ZZ] - positions_[localI][ZZ]);
+
+            IVec shift;
+            shift[XX] = static_cast<int>(
+                    std::round(-rawDx / static_cast<double>(box[XX][XX])));
+            shift[YY] = static_cast<int>(
+                    std::round(-rawDy / static_cast<double>(box[YY][YY])));
+            shift[ZZ] = static_cast<int>(
+                    std::round(-rawDz / static_cast<double>(box[ZZ][ZZ])));
+
+            backwardPairsMta_.push_back(localI);
+            backwardPairsMta_.push_back(localJ);
+            backwardShiftsMta_.push_back(shift);
+            existingCanonical.insert(canonical);
+        }
+    }
+
+    if (data_->debugEnabled)
+    {
+        std::string fname =
+                "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
+        FILE* fp = std::fopen(fname.c_str(), "a");
+        if (fp)
+        {
+            std::fprintf(fp,
+                         "exchangeBackwardPairs: added %zu pairs "
+                         "(pairlist=%d, total=%zu)\n",
+                         backwardPairsMta_.size() / 2,
+                         nMyPairs,
+                         pairlistMta_.size() / 2 + backwardPairsMta_.size() / 2);
+            std::fclose(fp);
+        }
+    }
+}
+
+
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
     MetatomicTimer totalTimer("calculateForces", mpiComm_);
@@ -557,6 +879,53 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         gatherAtomPositions(inputs.x_);
     }
     copy_mat(inputs.box_, box_);
+
+    // Newton NL mode: in parallel with nl-mode=full, each rank needs ALL
+    // pairs involving its home atoms (not just the ones assigned by the
+    // eighth-shell DD decomposition). Uses the GROMACS pairlist as the pair
+    // source, then exchanges pair identities across ranks.
+    const bool useNewtonNL = mpiComm_.isParallel() && data_->nlMode == "full";
+
+    // Save original numLocalMta_ before potential backward ghost extension.
+    // Must be restored after model evaluation so that gatherAtomPositions
+    // on the next step does not access out-of-bounds mtaToGmxLocal_ entries.
+    const int32_t origNumLocalMta = numLocalMta_;
+
+    // Save original pairlist size; backward pairs are appended temporarily.
+    const std::size_t origPairlistSize = pairlistMta_.size();
+    const std::size_t origShiftsSize   = cellShiftsMta_.size();
+
+    if (useNewtonNL)
+    {
+        // Step 1: Exchange backward ghost atoms to fill the backward gap
+        // in the DD halo.  Extends positions_, atomNumbers_, mtaToGlobalMta_
+        // and numLocalMta_ with atoms from the backward PBC neighbor.
+        {
+            MetatomicTimer timer("exchangeBackwardGhosts", mpiComm_);
+            double maxCutoff = 0.0;
+            for (const auto& req : data_->nl_requests)
+            {
+                maxCutoff = std::max(maxCutoff, req->engine_cutoff("nm"));
+            }
+            exchangeBackwardGhosts(inputs.dd_, inputs.box_, maxCutoff);
+        }
+
+        // Step 2: Exchange backward-direction pairs.  Discovers pairs from
+        // other ranks' pairlists that involve this rank's home atoms.
+        {
+            MetatomicTimer timer("exchangeBackwardPairs", mpiComm_);
+            exchangeBackwardPairs(inputs.box_);
+        }
+
+        // Step 3: Temporarily extend pairlistMta_ with backward pairs
+        // so the NL building loop processes all pairs in one pass.
+        pairlistMta_.insert(pairlistMta_.end(),
+                            backwardPairsMta_.begin(),
+                            backwardPairsMta_.end());
+        cellShiftsMta_.insert(cellShiftsMta_.end(),
+                              backwardShiftsMta_.begin(),
+                              backwardShiftsMta_.end());
+    }
 
     // Model inference
     torch::Tensor forceTensor;
@@ -599,58 +968,94 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         tensorPrepTimer.stop();
 
         // Build NL directly into raw buffers, then wrap with from_blob.
-        // Shift vectors are computed inline (no separate prepareNL pass).
         // Component and properties Labels are cached (identical every step).
         MetatomicTimer buildNLTimer("buildNL", mpiComm_);
 
         for (const auto& request : data_->nl_requests)
         {
-            const int64_t nHalf  = static_cast<int64_t>(pairlistMta_.size() / 2);
-            const bool    full   = request->full_list();
-            const int64_t nPairs = full ? 2 * nHalf : nHalf;
+            int64_t nPairs;
 
-            nlSamplesBuffer_.resize(nPairs * 5);
-            nlVectorsBuffer_.resize(nPairs * 3);
-
-            for (int64_t k = 0; k < nHalf; k++)
             {
-                const int32_t ai = pairlistMta_[2 * k];
-                const int32_t aj = pairlistMta_[2 * k + 1];
+                // Build NL from GROMACS pairlist (+ backward pairs in newton mode).
+                // Both modes use the same code path; newton mode just has extra
+                // pairs appended to pairlistMta_ from exchangeBackwardPairs().
+                const int64_t nHalf = static_cast<int64_t>(pairlistMta_.size() / 2);
+                const bool    full  = request->full_list();
+                nPairs              = full ? 2 * nHalf : nHalf;
 
-                // Compute shift vector from cell shift and current box
-                RVec shift;
-                mvmul_ur0(inputs.box_, cellShiftsMta_[k].toRVec(), shift);
+                nlSamplesBuffer_.resize(nPairs * 5);
+                nlVectorsBuffer_.resize(nPairs * 3);
 
-                // Displacement: r_ij = pos[j] - pos[i] + shift  (metatensor convention)
-                const double dx = static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
-                const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
-                const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
-
-                const int64_t fwd = full ? 2 * k : k;
-                nlSamplesBuffer_[5 * fwd + 0] = ai;
-                nlSamplesBuffer_[5 * fwd + 1] = aj;
-                nlSamplesBuffer_[5 * fwd + 2] = cellShiftsMta_[k][0];
-                nlSamplesBuffer_[5 * fwd + 3] = cellShiftsMta_[k][1];
-                nlSamplesBuffer_[5 * fwd + 4] = cellShiftsMta_[k][2];
-                nlVectorsBuffer_[3 * fwd + 0] = dx;
-                nlVectorsBuffer_[3 * fwd + 1] = dy;
-                nlVectorsBuffer_[3 * fwd + 2] = dz;
-
-                if (full)
+                for (int64_t k = 0; k < nHalf; k++)
                 {
-                    // Reverse pair (j,i) with negated shifts and displacement
-                    const int64_t rev = 2 * k + 1;
-                    nlSamplesBuffer_[5 * rev + 0] = aj;
-                    nlSamplesBuffer_[5 * rev + 1] = ai;
-                    nlSamplesBuffer_[5 * rev + 2] = -cellShiftsMta_[k][0];
-                    nlSamplesBuffer_[5 * rev + 3] = -cellShiftsMta_[k][1];
-                    nlSamplesBuffer_[5 * rev + 4] = -cellShiftsMta_[k][2];
-                    nlVectorsBuffer_[3 * rev + 0] = -dx;
-                    nlVectorsBuffer_[3 * rev + 1] = -dy;
-                    nlVectorsBuffer_[3 * rev + 2] = -dz;
+                    const int32_t ai = pairlistMta_[2 * k];
+                    const int32_t aj = pairlistMta_[2 * k + 1];
+
+                    // Compute shift vector from cell shift and current box
+                    RVec shift;
+                    mvmul_ur0(inputs.box_, cellShiftsMta_[k].toRVec(), shift);
+
+                    // Displacement: r_ij = pos[j] - pos[i] + shift  (metatensor convention)
+                    const double dx = static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
+                    const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
+                    const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
+
+                    const int64_t fwd = full ? 2 * k : k;
+                    nlSamplesBuffer_[5 * fwd + 0] = ai;
+                    nlSamplesBuffer_[5 * fwd + 1] = aj;
+                    nlSamplesBuffer_[5 * fwd + 2] = cellShiftsMta_[k][0];
+                    nlSamplesBuffer_[5 * fwd + 3] = cellShiftsMta_[k][1];
+                    nlSamplesBuffer_[5 * fwd + 4] = cellShiftsMta_[k][2];
+                    nlVectorsBuffer_[3 * fwd + 0] = dx;
+                    nlVectorsBuffer_[3 * fwd + 1] = dy;
+                    nlVectorsBuffer_[3 * fwd + 2] = dz;
+
+                    if (full)
+                    {
+                        // Reverse pair (j,i) with negated shifts and displacement
+                        const int64_t rev = 2 * k + 1;
+                        nlSamplesBuffer_[5 * rev + 0] = aj;
+                        nlSamplesBuffer_[5 * rev + 1] = ai;
+                        nlSamplesBuffer_[5 * rev + 2] = -cellShiftsMta_[k][0];
+                        nlSamplesBuffer_[5 * rev + 3] = -cellShiftsMta_[k][1];
+                        nlSamplesBuffer_[5 * rev + 4] = -cellShiftsMta_[k][2];
+                        nlVectorsBuffer_[3 * rev + 0] = -dx;
+                        nlVectorsBuffer_[3 * rev + 1] = -dy;
+                        nlVectorsBuffer_[3 * rev + 2] = -dz;
+                    }
                 }
             }
 
+            // Debug: dump global pair indices + distances for comparison
+            if (data_->debugEnabled)
+            {
+                std::string fname =
+                        "metatomic_pairs_rank_" + std::to_string(mpiComm_.rank()) + ".csv";
+                FILE* fp2 = std::fopen(fname.c_str(), "w");
+                if (fp2)
+                {
+                    std::fprintf(fp2, "globalI,globalJ,shift_a,shift_b,shift_c,dist\n");
+                    for (int64_t p = 0; p < nPairs; p++)
+                    {
+                        const int32_t lI = nlSamplesBuffer_[5 * p + 0];
+                        const int32_t lJ = nlSamplesBuffer_[5 * p + 1];
+                        const double ddx = nlVectorsBuffer_[3 * p + 0];
+                        const double ddy = nlVectorsBuffer_[3 * p + 1];
+                        const double ddz = nlVectorsBuffer_[3 * p + 2];
+                        const double dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+                        std::fprintf(fp2, "%d,%d,%d,%d,%d,%.8f\n",
+                                     mtaToGlobalMta_[lI],
+                                     mtaToGlobalMta_[lJ],
+                                     nlSamplesBuffer_[5 * p + 2],
+                                     nlSamplesBuffer_[5 * p + 3],
+                                     nlSamplesBuffer_[5 * p + 4],
+                                     dist);
+                    }
+                    std::fclose(fp2);
+                }
+            }
+
+            // Wrap raw buffers as tensors (zero-copy on CPU, then move to device)
             MetatomicTimer fromBlobTimer("fromBlob", mpiComm_);
             auto samples_tensor = torch::from_blob(
                     nlSamplesBuffer_.data(), { nPairs, 5 },
@@ -684,13 +1089,30 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         buildNLTimer.stop();
 
-        // TODO: For non-local models (global attention, internal pair recomputation),
-        // selected_atoms should be set to home atoms only to avoid double counting.
-        // Currently assumes GNN-style models that only use the provided neighbor list.
-        // No selected_atoms: each pair is on exactly one rank, so summing
-        // all per-atom energies (home + halo) gives the correct pair energy.
-        // GROMACS sums across ranks via global_stat.
-        data_->evaluations_options->set_selected_atoms(torch::nullopt);
+        if (useNewtonNL)
+        {
+            // Newton mode: restrict output to home atoms only [0, numHomeMta_).
+            // Following the LAMMPS pair_metatomic pattern (selected_atoms = nlocal).
+            // The model computes per-atom energies for ALL local atoms internally,
+            // but only returns results for home atoms.  This is important because
+            // models are free to return output samples in arbitrary order when
+            // selected_atoms is nullopt, but the order is deterministic when
+            // selected_atoms is set.
+            auto sa_values = torch::zeros({ numHomeMta_, 2 },
+                                          torch::TensorOptions().dtype(torch::kInt32));
+            sa_values.index_put_({ torch::indexing::Slice(), 1 },
+                                 torch::arange(numHomeMta_, torch::kInt32));
+            sa_values = sa_values.to(data_->device);
+            auto selected = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                    std::vector<std::string>{ "system", "atom" }, sa_values);
+            data_->evaluations_options->set_selected_atoms(selected);
+        }
+        else
+        {
+            // Pairlist mode: each pair is on exactly one rank, so summing all
+            // per-atom energies (home + halo) gives the correct pair energy.
+            data_->evaluations_options->set_selected_atoms(torch::nullopt);
+        }
 
         MetatomicTimer forwardTimer("forward", mpiComm_);
 
@@ -715,6 +1137,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
         auto energy_tensor = energy_block->values();
 
+        // Sum all returned per-atom energies.
+        // In Newton mode, selected_atoms restricts output to home atoms only,
+        // so this sums only home atom energies.
+        // In pairlist mode, selected_atoms is nullopt, so this sums all atoms.
+        // Both are correct: Newton mode has complete NL per home atom,
+        // pairlist mode has each pair on exactly one rank.
         energy = energy_tensor.sum().item<double>();
 
         // Diagnostic: log pairlist size, per-rank energy and MPI sum
@@ -731,9 +1159,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             if (fp)
             {
                 std::fprintf(fp,
-                             "pairlistPairs=%zu, numLocalMta=%d, numHomeMta=%d, "
+                             "nlMode=%s, nlPairs=%zu, numLocalMta=%d, numHomeMta=%d, "
                              "energy: perRank=%.6f, mpiSum=%.6f\n",
-                             pairlistMta_.size() / 2,
+                             data_->nlMode.c_str(),
+                             nlSamplesBuffer_.size() / 5,
                              numLocalMta_,
                              numHomeMta_,
                              energy,
@@ -747,6 +1176,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         torch_positions.mutable_grad() = torch::Tensor();
         strain.mutable_grad()          = torch::Tensor();
 
+        // Backpropagate through all returned per-atom energies.
+        // In Newton mode, output is restricted to home atoms via selected_atoms.
+        // In pairlist mode, output includes all local atoms.
+        // Forces propagate to ALL local atoms (home + halo) via the NL autograd.
         energy_tensor.backward(-torch::ones_like(energy_tensor));
 
         backwardTimer.stop();
@@ -806,6 +1239,21 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
 
     forceScatterTimer.stop();
+
+    // Restore original state.  Backward ghost atoms have no GROMACS local
+    // buffer index, and backward pairs should not persist across steps.
+    if (useNewtonNL)
+    {
+        if (numLocalMta_ != origNumLocalMta)
+        {
+            numLocalMta_ = origNumLocalMta;
+            positions_.resize(origNumLocalMta);
+            atomNumbers_.resize(origNumLocalMta);
+            mtaToGlobalMta_.resize(origNumLocalMta);
+        }
+        pairlistMta_.resize(origPairlistSize);
+        cellShiftsMta_.resize(origShiftsSize);
+    }
 
     // Energy: each rank's energy is the sum of per-atom energies for all local
     // atoms (home + halo) from the pairs assigned to this rank.  GROMACS

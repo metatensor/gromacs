@@ -66,35 +66,46 @@ class MpiComm;
  * ## Domain decomposition strategy
  *
  * Each rank evaluates the model on its local (home + halo) MTA atoms.
- * The neighbor list comes from the GROMACS plain pairlist (excludedPairlist),
- * which assigns each pair to exactly one rank — no double counting.
+ * Two neighbor list (NL) modes are available, controlled by the MDP option
+ * `metatomic-nl-mode` (or env var `GMX_METATOMIC_NL_MODE`):
  *
- * **Atoms**: In domain decomposition, GROMACS partitions atoms into "home" atoms (owned by this
- * rank) and "halo" atoms (copies from neighboring ranks needed for short-range
- * interactions). The same global atom may appear as multiple periodic ghost
- * images in the halo. We deduplicate these so each atom has one model index,
- * but record ALL GROMACS local buffer indices in gmxLocalToMtaIdx_ so that
- * the pairlist (which may reference any image) can be resolved.
+ * ### Full NL mode (nl-mode = "full", default)
  *
- * **Pairs**: MTA-MTA pairs are excluded from classical nonbonded interactions
- * via intermolecularExclusionGroup (set by addEmbeddedNBExclusions). The
- * GROMACS pairlist builder reports these excluded pairs in excludedPairlist_,
- * filtered to the plainPairlistRange (= model cutoff). Each pair appears on
- * exactly one rank.
+ * Uses the GROMACS excluded pairlist as the pair source, then exchanges pair
+ * identities across ranks so every home atom has ALL its pairs. This is
+ * done via a backward ghost atom exchange (to get missing atom positions)
+ * followed by a backward pair exchange (to discover pairs assigned to other
+ * ranks by the DD eighth-shell decomposition). Distance vectors and shifts
+ * are recomputed from local positions. The energy is summed over home atoms
+ * only. This is the "newton pair ON" pattern inspired by LAMMPS
+ * pair_metatomic and is safe for all model architectures.
  *
- * **Energy**: With per_atom=true, the model decomposes energy per atom.
- * selected_atoms is always nullopt: we sum ALL per-atom energies (home + halo)
- * on each rank. Since each pair is on one rank, the per-pair energy
- * (V_ij/2 on atom i + V_ij/2 on atom j) sums to V_ij on that rank.
- * GROMACS global_stat sums across ranks for the total.
+ * ### Pairlist mode (nl-mode = "pairlist")
+ *
+ * Uses the GROMACS excluded pairlist (excludedPairlist) as the NL source.
+ * Each pair appears on exactly one rank. Sets `selected_atoms = nullopt` and
+ * sums all per-atom energies (home + halo). Only correct for models that
+ * exclusively use the provided neighbor list (pure GNN models).
+ *
+ * ### Common to both modes
+ *
+ * **Atoms**: In domain decomposition, GROMACS partitions atoms into "home"
+ * atoms (owned by this rank) and "halo" atoms (copies from neighboring ranks
+ * needed for short-range interactions). The same global atom may appear as
+ * multiple periodic ghost images in the halo. We deduplicate these so each
+ * atom has one model index, but record ALL GROMACS local buffer indices in
+ * gmxLocalToMtaIdx_ so that the pairlist (which may reference any image) can
+ * be resolved.
  *
  * **Forces**: backward() produces forces on all local atoms (home + halo).
  * Since ForceWithVirial is not communicated by dd_move_f, we scatter forces
  * into a global buffer and MPI all-reduce, then apply only to home atoms.
  *
- * **Shift convention**: GROMACS shifts atom I (first): d = x[I]+shift - x[J].
- * Metatensor convention: r_ij = x[J] + cell_shift*box - x[I]. Therefore
- * metatensor cell shifts = negated GROMACS cell shifts.
+ * **Shift convention**: GROMACS shifts atom I (first):
+ * d = x[I]+shift - x[J]. Metatensor convention: r_ij = x[J] + cell_shift*box
+ * - x[I]. Therefore metatensor cell shifts = negated GROMACS cell shifts.
+ * In full NL mode, backward pairs have shifts recomputed from local
+ * positions using the minimum-image convention.
  */
 class MetatomicForceProvider final : public IForceProvider
 {
@@ -119,6 +130,49 @@ public:
 private:
     //! Gather atom positions for MTA input (local only, no MPI).
     void gatherAtomPositions(ArrayRef<const RVec> positions);
+
+    /*! \brief Exchange backward-direction pairs via the GROMACS pairlist.
+     *
+     * In GROMACS DD, the excluded pairlist assigns each pair to exactly one
+     * rank (the rank whose home atom is the i-atom). For newton mode, each
+     * rank needs ALL pairs involving its home atoms, including those assigned
+     * to other ranks. This method discovers those missing pairs by
+     * allreducing a global pair existence table, then adds them to
+     * backwardPairsMta_ with shifts recomputed from local positions.
+     *
+     * Must be called after exchangeBackwardGhosts() (so all atom positions
+     * are available) and before the NL building loop.
+     *
+     * \param[in] box  Current simulation box.
+     */
+    void exchangeBackwardPairs(const matrix box);
+
+    /*! \brief Exchange backward ghost MTA atoms via DD to fill the backward gap.
+     *
+     * In the standard GROMACS DD halo exchange, atoms are communicated
+     * via forward pulses only.  When the number of forward pulses does
+     * not cover all cells in a dimension (npulse < numCells - 1), atoms
+     * from the backward PBC neighbor are missing from the local halo.
+     * This method performs one additional forward exchange per DD dimension
+     * to fill this gap.
+     *
+     * Protocol: each rank identifies home MTA atoms within \p cutoff of its
+     * forward cell boundary, then calls \c ddSendrecv(dd, d, dddirForward).
+     * The receiving rank gets atoms from its backward neighbor.  Received
+     * positions are PBC-shifted when the backward neighbor wraps around.
+     *
+     * Called once per step from \c calculateForces(), after
+     * \c gatherAtomPositions() and before \c exchangeBackwardPairs().
+     * Extends positions_, atomNumbers_, mtaToGlobalMta_, and numLocalMta_
+     * with the backward ghost atoms.  The caller must save and restore the
+     * original numLocalMta_ after model evaluation.
+     *
+     * \param[in] dd      Domain decomposition structure.
+     * \param[in] box     Current simulation box.
+     * \param[in] cutoff  Maximum model cutoff (nm).
+     * \returns Number of backward ghost atoms added.
+     */
+    int32_t exchangeBackwardGhosts(const gmx_domdec_t* dd, const matrix box, double cutoff);
 
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
@@ -154,13 +208,21 @@ private:
 
     //! Pairlist in MTA model indices, flat [i0,j0, i1,j1, ...].
     //! Built from GROMACS excludedPairlist_ with negated cell shifts.
+    //! Used in both NL modes.
     std::vector<int32_t> pairlistMta_;
     //! Cell shifts for each pair (metatensor convention: shift applied to second atom).
     std::vector<IVec> cellShiftsMta_;
 
-    //! Pre-allocated raw buffers for NL construction.
-    //! Avoids per-step torch::zeros allocations and accessor overhead.
-    //! Filled directly, then wrapped with torch::from_blob (zero-cost).
+    //! Backward-direction pairs discovered by exchangeBackwardPairs().
+    //! These are pairs from other ranks' pairlists that involve this rank's
+    //! home atoms. Flat [i0,j0, i1,j1, ...] with MTA local indices.
+    std::vector<int32_t> backwardPairsMta_;
+    //! Cell shifts for backward pairs (recomputed from local positions).
+    std::vector<IVec> backwardShiftsMta_;
+
+    //! Pre-allocated raw buffers for NL construction (used by both NL modes).
+    //! Filled inline from pairlistMta_/cellShiftsMta_ (+ backward pairs in full mode).
+    //! Wrapped with torch::from_blob (zero-cost) before passing to metatensor.
     std::vector<int32_t> nlSamplesBuffer_; //!< flat [n_pairs * 5]: i, j, cs_a, cs_b, cs_c
     std::vector<double>  nlVectorsBuffer_; //!< flat [n_pairs * 3]: dx, dy, dz
 
