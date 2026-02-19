@@ -78,6 +78,7 @@ static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
 static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
 static const std::string DEVICE_TAG               = "device";
 static const std::string VARIANT_TAG              = "variant";
+static const std::string NL_MODE_TAG              = "nl-mode";
 
 namespace
 {
@@ -141,6 +142,8 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
     addMdpTransformFromString<std::string>(rules, stringIdentityTransform, METATOMIC_MODULE_NAME, DEVICE_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, NL_MODE_TAG);
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -154,6 +157,7 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(StringOption(DEVICE_TAG.c_str()).store(&params_.device));
     section.addOption(BooleanOption(CHECK_CONSISTENCY_TAG.c_str()).store(&params_.checkConsistency));
     section.addOption(StringOption(VARIANT_TAG.c_str()).store(&params_.variant));
+    section.addOption(StringOption(NL_MODE_TAG.c_str()).store(&params_.nlMode));
 }
 
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
@@ -179,6 +183,7 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
         addMdpOutputValue<bool>(
                 builder, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG, params_.checkConsistency);
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, VARIANT_TAG, params_.variant);
+        addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, NL_MODE_TAG, params_.nlMode);
     }
 }
 
