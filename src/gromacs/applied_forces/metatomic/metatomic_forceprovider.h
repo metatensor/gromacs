@@ -199,7 +199,8 @@ private:
     //! Maps ANY GROMACS local buffer index -> MTA model index.
     //! Includes ALL periodic ghost images of each atom (not just the first).
     //! Needed because excludedPairlist_ entries can reference any image.
-    std::unordered_map<int32_t, int32_t> gmxLocalToMtaIdx_;
+    //! Initialized to -1 for non-MTA atoms.
+    std::vector<int32_t> gmxLocalToMtaIdx_;
 
     //! Global force buffer [N_total_mta] for MPI all-reduce of forces.
     //! Each rank scatters its local forces here, all-reduce sums them,

@@ -154,6 +154,10 @@ struct MetatomicData
     //! Whether debug logging to per-rank files is enabled (GMX_METATOMIC_DEBUG).
     bool debugEnabled = false;
 
+    //! Cached types and PBC tensors (re-created on AtomsRedistributed).
+    torch::Tensor cachedTypes;
+    torch::Tensor cachedPbc;
+
     //! Effective NL mode: "full" (pairlist + backward pair exchange) or
     //! "pairlist" (excluded pairlist only, selected_atoms=nullopt).
     std::string nlMode = "full";
@@ -193,11 +197,12 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             .asParagraph()
             .appendTextFormatted("Metatomic NL mode: %s", data_->nlMode.c_str());
 
-    // With thread-MPI, each rank is a thread sharing the same process.
-    // PyTorch's internal OpenMP would spawn N threads per rank, causing
-    // massive oversubscription (e.g. 12 ranks × 12 OMP threads = 144
-    // threads on 12 cores).  Force single-threaded torch operations.
-    if (GMX_THREAD_MPI && mpiComm_.isParallel())
+    // Force single-threaded PyTorch operations in all parallel runs.
+    // In thread-MPI, ranks share a process; in real MPI, each rank is a process.
+    // In both cases, GROMACS manages CPU affinity, and having PyTorch spawn its
+    // own internal thread pool (defaulting to all cores) leads to catastrophic
+    // oversubscription and context switching overhead.
+    if (mpiComm_.isParallel())
     {
         at::set_num_threads(1);
     }
@@ -442,7 +447,9 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             mtaIdxToModelIdx[haloGlobalMta[k]] = modelIdx++;
         }
 
-        // Second pass: build complete gmxLocal → modelIdx mapping for ALL images
+        // Second pass: build complete gmxLocal → modelIdx mapping for ALL images.
+        // We use a vector for O(1) direct lookup instead of a map.
+        gmxLocalToMtaIdx_.assign(numLocalPlusHalo, -1);
         for (int32_t i = 0; i < numLocalPlusHalo; i++)
         {
             int32_t globalIdx = globalAtomIndices[i];
@@ -508,6 +515,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
         mtaToGmxLocal_.resize(numTotalMta);
         mtaToGlobalMta_.resize(numTotalMta);
         atomNumbers_.resize(numTotalMta);
+        gmxLocalToMtaIdx_.assign(signal.x_.size(), -1);
 
         for (int32_t i = 0; i < numTotalMta; i++)
         {
@@ -523,6 +531,11 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 
     GMX_RELEASE_ASSERT(std::count(atomNumbers_.begin(), atomNumbers_.end(), 0) == 0,
                        "Some atom numbers not set.");
+
+    // Update cached tensors for the new atom distribution
+    data_->cachedTypes =
+            torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
+    data_->cachedPbc = preparePbcType(options_.params_.pbcType_.get(), data_->device);
 
     // Debug: dump local-to-global mapping
     if (data_->debugEnabled)
@@ -572,12 +585,13 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
     for (const auto& entry : signal.excludedPairlist_)
     {
         const auto& [atomPair, shiftIndex] = entry;
-        auto itA = gmxLocalToMtaIdx_.find(atomPair.first);
-        auto itB = gmxLocalToMtaIdx_.find(atomPair.second);
-        if (itA != gmxLocalToMtaIdx_.end() && itB != gmxLocalToMtaIdx_.end())
+        const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
+        const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
+
+        if (idxA != -1 && idxB != -1)
         {
-            pairlistMta_.push_back(itA->second);
-            pairlistMta_.push_back(itB->second);
+            pairlistMta_.push_back(idxA);
+            pairlistMta_.push_back(idxB);
             const IVec gmxShift = shiftIndexToXYZ(shiftIndex);
             cellShiftsMta_.push_back(IVec(-gmxShift[XX], -gmxShift[YY], -gmxShift[ZZ]));
         }
@@ -603,105 +617,100 @@ int32_t MetatomicForceProvider::exchangeBackwardGhosts(
         const int numCellsD = dd->numCells[dimIndex];
         const int npulseD   = dd->numPulses[dimIndex];
 
-        // Skip if forward pulses already cover all cells
-        if (npulseD >= numCellsD - 1)
-        {
-            continue;
-        }
-
-        // We currently implement 1 backward pulse.  Assert that this is
-        // sufficient (numCells - 1 - npulse == 1).
+        // The number of pulses needed to cover the "backward gap" left by GROMACS.
+        // GROMACS covers npulseD in the forward direction. The remaining domains
+        // in that dimension must be filled by us.
         const int backwardGap = numCellsD - 1 - npulseD;
-        GMX_RELEASE_ASSERT(backwardGap == 1,
-                           "Backward ghost exchange currently supports exactly 1 missing "
-                           "cell per dimension.  Increase rlist or reduce DD cells.");
-
-        // Cell width along this dimension (orthorhombic approximation)
-        const double cellWidth =
-                static_cast<double>(box[dimIndex][dimIndex]) / numCellsD;
-
-        // Forward boundary of this rank's cell (upper edge)
-        const double forwardBoundary =
-                static_cast<double>(dd->ci[dimIndex] + 1) * cellWidth;
-
-        // Identify HOME MTA atoms near the forward boundary (within cutoff).
-        // These atoms are what the forward neighbor will receive as backward
-        // ghosts for its backward direction gap.
-        std::vector<int>  sendGlobalMta;
-        std::vector<RVec> sendPositions;
-        std::vector<int>  sendAtomNumbers;
-
-        for (int32_t i = 0; i < numHomeMta_; i++)
-        {
-            const double coord = static_cast<double>(positions_[i][dimIndex]);
-            if (coord > forwardBoundary - cutoff)
-            {
-                sendGlobalMta.push_back(static_cast<int>(mtaToGlobalMta_[i]));
-                sendPositions.push_back(positions_[i]);
-                sendAtomNumbers.push_back(static_cast<int>(atomNumbers_[i]));
-            }
-        }
-
-        // --- Step 1: exchange counts ---
-        int sendCount = static_cast<int>(sendGlobalMta.size());
-        int recvCount = 0;
-        ddSendrecv(dd, d, dddirForward,
-                   gmx::ArrayRef<int>(&sendCount, &sendCount + 1),
-                   gmx::ArrayRef<int>(&recvCount, &recvCount + 1));
-
-        if (recvCount == 0 && sendCount == 0)
+        if (backwardGap <= 0)
         {
             continue;
         }
 
-        // --- Step 2: exchange data ---
-        std::vector<int>  recvGlobalMta(recvCount);
-        std::vector<RVec> recvPositions(recvCount);
-        std::vector<int>  recvAtomNumbers(recvCount);
+        // Forward boundary of this rank's cell (upper edge) in Cartesian coordinates.
+        // DomdecZones::sizes(0) is the home zone.
+        const double forwardBoundary = static_cast<double>(dd->zones.sizes(0).x1[dimIndex]);
 
-        ddSendrecv(dd, d, dddirForward,
-                   gmx::ArrayRef<int>(sendGlobalMta),
-                   gmx::ArrayRef<int>(recvGlobalMta));
-        ddSendrecv(dd, d, dddirForward,
-                   gmx::ArrayRef<RVec>(sendPositions),
-                   gmx::ArrayRef<RVec>(recvPositions));
-        ddSendrecv(dd, d, dddirForward,
-                   gmx::ArrayRef<int>(sendAtomNumbers),
-                   gmx::ArrayRef<int>(recvAtomNumbers));
-
-        // PBC shift: when the backward neighbor wraps around (its cell index >
-        // our cell index), the received positions are at the far end of the
-        // box.  Shift them by -box[dim] to place them near our backward
-        // boundary (matching how standard halo atoms are shifted).
-        const int backCell = (dd->ci[dimIndex] - 1 + numCellsD) % numCellsD;
-        if (backCell > dd->ci[dimIndex])
+        for (int p = 0; p < backwardGap; p++)
         {
+            // Identify ALL currently local MTA atoms near the forward boundary (within cutoff).
+            // We include ghosts from previous dimensions/pulses (staged communication)
+            // to correctly cover diagonal and corner backward neighbors.
+            std::vector<int>  sendGlobalMta;
+            std::vector<RVec> sendPositions;
+            std::vector<int>  sendAtomNumbers;
+
+            for (int32_t i = 0; i < numLocalMta_; i++)
+            {
+                const double coord = static_cast<double>(positions_[i][dimIndex]);
+                if (coord > forwardBoundary - cutoff)
+                {
+                    sendGlobalMta.push_back(static_cast<int>(mtaToGlobalMta_[i]));
+                    sendPositions.push_back(positions_[i]);
+                    sendAtomNumbers.push_back(static_cast<int>(atomNumbers_[i]));
+                }
+            }
+
+            // --- Step 1: exchange counts ---
+            int sendCount = static_cast<int>(sendGlobalMta.size());
+            int recvCount = 0;
+            ddSendrecv(dd, d, dddirForward,
+                       gmx::ArrayRef<int>(&sendCount, &sendCount + 1),
+                       gmx::ArrayRef<int>(&recvCount, &recvCount + 1));
+
+            if (recvCount == 0 && sendCount == 0)
+            {
+                continue;
+            }
+
+            // --- Step 2: exchange data ---
+            std::vector<int>  recvGlobalMta(recvCount);
+            std::vector<RVec> recvPositions(recvCount);
+            std::vector<int>  recvAtomNumbers(recvCount);
+
+            ddSendrecv(dd, d, dddirForward,
+                       gmx::ArrayRef<int>(sendGlobalMta),
+                       gmx::ArrayRef<int>(recvGlobalMta));
+            ddSendrecv(dd, d, dddirForward,
+                       gmx::ArrayRef<RVec>(sendPositions),
+                       gmx::ArrayRef<RVec>(recvPositions));
+            ddSendrecv(dd, d, dddirForward,
+                       gmx::ArrayRef<int>(sendAtomNumbers),
+                       gmx::ArrayRef<int>(recvAtomNumbers));
+
+            // PBC shift: when receiving from a rank that wrapped around the Periodic
+            // Boundary (target index > our index while moving backward), shift the
+            // received positions by -box[dim] to place them near our backward boundary.
+            const int targetCell = (dd->ci[dimIndex] - p - 1 + numCellsD) % numCellsD;
+            if (targetCell > dd->ci[dimIndex])
+            {
+                for (int k = 0; k < recvCount; k++)
+                {
+                    recvPositions[k][XX] -= box[dimIndex][XX];
+                    recvPositions[k][YY] -= box[dimIndex][YY];
+                    recvPositions[k][ZZ] -= box[dimIndex][ZZ];
+                }
+            }
+
+            // Add non-duplicate backward ghost atoms
+            int32_t addedInPulse = 0;
             for (int k = 0; k < recvCount; k++)
             {
-                recvPositions[k][XX] -= box[dimIndex][XX];
-                recvPositions[k][YY] -= box[dimIndex][YY];
-                recvPositions[k][ZZ] -= box[dimIndex][ZZ];
+                const int32_t globalMta = static_cast<int32_t>(recvGlobalMta[k]);
+                if (existingGlobalMta.count(globalMta) == 0)
+                {
+                    positions_.push_back(recvPositions[k]);
+                    atomNumbers_.push_back(static_cast<int32_t>(recvAtomNumbers[k]));
+                    mtaToGlobalMta_.push_back(globalMta);
+                    existingGlobalMta.insert(globalMta);
+                    addedInPulse++;
+                }
             }
-        }
-
-        // Add non-duplicate backward ghost atoms
-        for (int k = 0; k < recvCount; k++)
-        {
-            const int32_t globalMta = static_cast<int32_t>(recvGlobalMta[k]);
-            if (existingGlobalMta.count(globalMta) == 0)
-            {
-                positions_.push_back(recvPositions[k]);
-                atomNumbers_.push_back(static_cast<int32_t>(recvAtomNumbers[k]));
-                mtaToGlobalMta_.push_back(globalMta);
-                existingGlobalMta.insert(globalMta);
-                totalAdded++;
-            }
+            numLocalMta_ += addedInPulse;
+            totalAdded += addedInPulse;
         }
     }
 
-    numLocalMta_ += totalAdded;
-
-    if (data_->debugEnabled)
+    if (data_->debugEnabled && totalAdded > 0)
     {
         std::string fname =
                 "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
@@ -713,25 +722,6 @@ int32_t MetatomicForceProvider::exchangeBackwardGhosts(
                          "uniqueGlobalMta=%zu\n",
                          totalAdded, numLocalMta_, numHomeMta_,
                          existingGlobalMta.size());
-            // Dump all global MTA indices present
-            std::fprintf(fp, "  globalMtaIndices:");
-            std::vector<int32_t> sorted(mtaToGlobalMta_.begin(),
-                                        mtaToGlobalMta_.begin() + numLocalMta_);
-            std::sort(sorted.begin(), sorted.end());
-            for (int32_t g : sorted)
-            {
-                std::fprintf(fp, " %d", g);
-            }
-            std::fprintf(fp, "\n");
-            // Position ranges
-            double xmin = 1e9, xmax = -1e9;
-            for (int32_t i = 0; i < numLocalMta_; i++)
-            {
-                double x = static_cast<double>(positions_[i][XX]);
-                if (x < xmin) xmin = x;
-                if (x > xmax) xmax = x;
-            }
-            std::fprintf(fp, "  posRange X: [%.4f, %.4f]\n", xmin, xmax);
             std::fclose(fp);
         }
     }
@@ -910,6 +900,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             exchangeBackwardGhosts(inputs.dd_, inputs.box_, maxCutoff);
         }
 
+        // Rebuild cachedTypes after backward ghost exchange extended atomNumbers_
+        data_->cachedTypes =
+                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
+
         // Step 2: Exchange backward-direction pairs.  Discovers pairs from
         // other ranks' pairlists that involve this rank's home atoms.
         {
@@ -945,12 +939,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto cpu_blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
 
         auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { static_cast<int64_t>(numLocalMta_), 3 }, cpu_blob_options)
-                                       .to(data_->dtype)
-                                       .to(data_->device)
+                                       .to(data_->device, data_->dtype)
                                        .set_requires_grad(true);
 
         auto torch_cell =
-                torch::from_blob(&box_, { 3, 3 }, cpu_blob_options).to(data_->dtype).to(data_->device);
+                torch::from_blob(&box_, { 3, 3 }, cpu_blob_options).to(data_->device, data_->dtype);
 
         auto strain = torch::eye(
                 3, torch::TensorOptions().dtype(data_->dtype).device(data_->device).requires_grad(true));
@@ -958,12 +951,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto strained_cell      = torch::matmul(torch_cell, strain);
         auto strained_positions = torch::matmul(torch_positions, strain);
 
-        auto torch_pbc = preparePbcType(options_.params_.pbcType_.get(), data_->device);
-        auto torch_types =
-                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
-
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
-                torch_types, strained_positions, strained_cell, torch_pbc);
+                data_->cachedTypes, strained_positions, strained_cell, data_->cachedPbc);
 
         tensorPrepTimer.stop();
 
@@ -1062,7 +1051,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                     torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
             auto vectors_tensor = torch::from_blob(
                     nlVectorsBuffer_.data(), { nPairs, 3, 1 },
-                    torch::TensorOptions().dtype(torch::kFloat64)).to(data_->dtype).to(data_->device);
+                    torch::TensorOptions().dtype(torch::kFloat64)).to(data_->device, data_->dtype);
             fromBlobTimer.stop();
 
             MetatomicTimer labelsTimer("makeSampleLabels", mpiComm_);
@@ -1204,8 +1193,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     if (mpiComm_.isParallel())
     {
-        globalForceBuffer_.assign(numTotalMta, RVec({ 0.0, 0.0, 0.0 }));
+        globalForceBuffer_.resize(numTotalMta);
+        std::fill(globalForceBuffer_.begin(), globalForceBuffer_.end(), RVec({ 0.0, 0.0, 0.0 }));
 
+        // Scatter local forces into the global buffer.
         for (int32_t i = 0; i < numLocalMta_; i++)
         {
             int32_t globalMtaIdx                = mtaToGlobalMta_[i];
