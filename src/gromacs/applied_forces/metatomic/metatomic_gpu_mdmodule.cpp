@@ -61,6 +61,7 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 #include "gromacs/utility/logger.h"
+#include "gromacs/utility/strconvert.h"
 #include "gromacs/domdec/localatomset.h"
 
 #include "metatomic_options.h"
@@ -88,7 +89,17 @@ namespace
 class MetatomicGpuOptions final : public IMdpOptionProvider
 {
 public:
-    void initMdpTransform(IKeyValueTreeTransformRules* /*rules*/) override {}
+    void initMdpTransform(IKeyValueTreeTransformRules* rules) override
+    {
+        const auto& stringIdentityTransform = [](std::string s) { return s; };
+        addMdpTransformFromString<bool>(rules, &fromStdString<bool>, "metatomic-gpu", "active");
+        addMdpTransformFromString<std::string>(
+                rules, stringIdentityTransform, "metatomic-gpu", "model-path");
+        addMdpTransformFromString<std::string>(
+                rules, stringIdentityTransform, "metatomic-gpu", "extensions-directory");
+        addMdpTransformFromString<std::string>(
+                rules, stringIdentityTransform, "metatomic-gpu", "variant");
+    }
 
     void initMdpOptions(IOptionsContainerWithSections* options) override
     {
