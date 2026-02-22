@@ -34,17 +34,29 @@
 gmx_add_libgromacs_sources(
     metatomic_options.cpp
     metatomic_mdmodule.cpp
+    metatomic_gpu_mdmodule.cpp
 )
 
 if (GMX_METATOMIC)
     gmx_add_libgromacs_sources(
         metatomic_forceprovider.cpp
     )
-if (BUILD_TESTING)
-    add_subdirectory(tests)
-endif()
+    if (GMX_GPU_CUDA)
+        gmx_add_libgromacs_sources(
+            metatomic_gpu_forceprovider.cpp
+            metatomic_gpu_pairlist_kernel.cu
+        )
+    else()
+        gmx_add_libgromacs_sources(
+            metatomic_gpu_forceprovider_stub.cpp
+        )
+    endif()
+    if (BUILD_TESTING)
+        add_subdirectory(tests)
+    endif()
 else()
     gmx_add_libgromacs_sources(
         metatomic_forceprovider_stub.cpp
+        metatomic_gpu_forceprovider_stub.cpp
     )
 endif()

@@ -37,6 +37,8 @@
 
 #include "config.h"
 
+#include "gromacs/applied_forces/metatomic/metatomic_gpu_forceprovider.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>

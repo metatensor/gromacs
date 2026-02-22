@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "gromacs/applied_forces/awh/awh.h"
+#include "gromacs/applied_forces/metatomic/metatomic_gpu_forceprovider.h"
 #include "gromacs/domdec/dlbtiming.h"
 #include "gromacs/domdec/domdec.h"
 #include "gromacs/domdec/domdec_struct.h"
@@ -1199,7 +1200,8 @@ static void setupLocalGpuForceReduction(const MdrunScheduleWorkload& runSchedule
                                         GpuForceReduction*           gpuForceReduction,
                                         PmePpCommGpu*                pmePpCommGpu,
                                         const gmx_pme_t*             pmedata,
-                                        const gmx_domdec_t*          dd)
+                                        const gmx_domdec_t*          dd,
+                                        const t_forcerec*            fr = nullptr)
 {
     GMX_ASSERT(!runScheduleWork.simulationWork.useMts,
                "GPU force reduction is not compatible with MTS");
@@ -1260,6 +1262,15 @@ static void setupLocalGpuForceReduction(const MdrunScheduleWorkload& runSchedule
             GMX_ASSERT(pmeSynchronizer != nullptr, "PME force ready cuda event should not be NULL");
             gpuForceReduction->addDependency(pmeSynchronizer);
         }
+    }
+
+    if (runScheduleWork.simulationWork.useGpuMetatomic && fr->metatomicGpu
+        && !fr->metatomicGpu->hasDomainDecomposition())
+    {
+        // Single-rank: forces stay on GPU via GpuForceReduction.
+        // DD mode: forces are distributed via CPU in applyOutputs().
+        gpuForceReduction->registerRvecForce(fr->metatomicGpu->getForceDeviceBuffer());
+        gpuForceReduction->addDependency(fr->metatomicGpu->getCompletionEvent());
     }
 
     if (runScheduleWork.domainWork.haveCpuLocalForceWork
@@ -1492,7 +1503,8 @@ static void doPairSearch(const t_commrec*             cr,
                                         fr->gpuForceReduction[AtomLocality::Local].get(),
                                         fr->pmePpCommGpu.get(),
                                         fr->pmedata,
-                                        cr->dd);
+                                        cr->dd,
+                                        fr);
         }
 
         if (simulationWork.havePpDomainDecomposition)
@@ -1750,7 +1762,8 @@ void do_force(FILE*                         fplog,
                                         fr->gpuForceReduction[AtomLocality::Local].get(),
                                         fr->pmePpCommGpu.get(),
                                         fr->pmedata,
-                                        cr->dd);
+                                        cr->dd,
+                                        fr);
         }
     }
 
@@ -1820,6 +1833,34 @@ void do_force(FILE*                         fplog,
         }
         wallcycle_sub_stop(wcycle, WallCycleSubCounter::LaunchGpuNonBonded);
         wallcycle_stop(wcycle, WallCycleCounter::LaunchGpuPp);
+    }
+
+    // GPU-resident metatomic: evaluate ML model on GPU
+    if (simulationWork.useGpuMetatomic && fr->metatomicGpu)
+    {
+        // Update atom mapping on NS steps (DD redistribution or first call)
+        if (stepWork.doNeighborSearch)
+        {
+            const int* globalAtomIndices =
+                    haveDDAtomOrdering(*cr) ? cr->dd->globalAtomIndices.data() : nullptr;
+            const int numTotalLocal =
+                    haveDDAtomOrdering(*cr)
+                            ? static_cast<int>(cr->dd->globalAtomIndices.size())
+                            : mdatoms->homenr;
+            fr->metatomicGpu->updateAtomMapping(mdatoms->homenr, numTotalLocal, globalAtomIndices);
+        }
+
+        const GpuPairlist* gpuPl      = gpuGetPairlist(nbv->gpuNbv(), InteractionLocality::Local);
+        DeviceBuffer<int>  d_atomIdx  = gpuGetAtomIndex(nbv->gpuNbv());
+        NBAtomDataGpu*     nbAtomData = gpuGetNBAtomData(nbv->gpuNbv());
+        fr->metatomicGpu->calculateForces(stateGpu->getCoordinates(),
+                                           mdatoms->homenr,
+                                           box,
+                                           step,
+                                           gpuPl,
+                                           d_atomIdx,
+                                           nbAtomData,
+                                           stepWork.doNeighborSearch);
     }
 
     if (stepWork.haveGpuPmeOnThisRank)
@@ -2288,6 +2329,12 @@ void do_force(FILE*                         fplog,
                                    stepWork.useGpuPmeFReduction,
                                    wcycle);
         }
+    }
+
+    // GPU metatomic: apply energy, virial, and (DD) forces now that ForceWithVirial exists
+    if (simulationWork.useGpuMetatomic && fr->metatomicGpu)
+    {
+        fr->metatomicGpu->applyOutputs(enerd, &forceOutMtsLevel0.forceWithVirial());
     }
 
     if (domainWork.haveSpecialForces)

@@ -60,6 +60,8 @@
 #include <variant>
 #include <vector>
 
+#include "gromacs/applied_forces/metatomic/metatomic_gpu_forceprovider.h"
+#include "gromacs/applied_forces/metatomic/metatomic_options.h"
 #include "gromacs/commandline/filenm.h"
 #include "gromacs/domdec/builder.h"
 #include "gromacs/domdec/domdec.h"
@@ -1632,6 +1634,33 @@ int Mdrunner::mdrunner()
             canUseDirectGpuComm,
             useGpuPmeDecomposition);
 
+    // GPU-resident metatomic: check MDP options (KVT) and env var override
+    {
+        bool gpuMetatomicFromMdp = false;
+        if (inputrec->params->keyExists("applied-forces"))
+        {
+            const auto& afSection = (*inputrec->params)["applied-forces"].asObject();
+            if (afSection.keyExists("metatomic-gpu"))
+            {
+                const auto& mgSection = afSection["metatomic-gpu"].asObject();
+                if (mgSection.keyExists("active"))
+                {
+                    gpuMetatomicFromMdp = mgSection["active"].cast<bool>();
+                }
+            }
+        }
+        const bool gpuMetatomicFromEnv = (getenv("GMX_METATOMIC_GPU") != nullptr);
+        if ((gpuMetatomicFromMdp || gpuMetatomicFromEnv) && deviceInfo != nullptr)
+        {
+            runScheduleWork.simulationWork.useGpuMetatomic = true;
+            GMX_LOG(mdlog.info)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "GPU-resident metatomic force evaluation enabled (%s).",
+                            gpuMetatomicFromMdp ? "MDP option" : "GMX_METATOMIC_GPU env var");
+        }
+    }
+
     if (GMX_LIB_MPI && deviceInfo
         && (runScheduleWork.simulationWork.useGpuDirectCommunication
             || runScheduleWork.simulationWork.useGpuPmeDecomposition
@@ -1947,6 +1976,103 @@ int Mdrunner::mdrunner()
                                                       deviceStreamManager->context(),
                                                       deviceStreamManager->bondedStream(),
                                                       wcycle.get());
+        }
+        if (runScheduleWork.simulationWork.useGpuMetatomic)
+        {
+            GMX_RELEASE_ASSERT(deviceStreamManager != nullptr,
+                               "GPU device stream manager should be valid in order to use GPU "
+                               "metatomic force provider.");
+            MetatomicParameters metatomicGpuParams;
+            metatomicGpuParams.active = true;
+            metatomicGpuParams.device = "cuda";
+            metatomicGpuParams.nlMode = "full";
+
+            // Read model path: env var overrides MDP/KVT
+            const char* modelPathEnv = getenv("GMX_METATOMIC_MODEL_PATH");
+            if (modelPathEnv != nullptr)
+            {
+                metatomicGpuParams.modelPath_ = modelPathEnv;
+            }
+            else if (inputrec->params->keyExists("applied-forces"))
+            {
+                const auto& afSection = (*inputrec->params)["applied-forces"].asObject();
+                // Try GPU-specific model path first, then fall back to CPU metatomic path
+                for (const std::string& sectionName : { "metatomic-gpu", "metatomic" })
+                {
+                    if (afSection.keyExists(sectionName))
+                    {
+                        const auto& section = afSection[sectionName].asObject();
+                        if (section.keyExists("model-path"))
+                        {
+                            metatomicGpuParams.modelPath_ = section["model-path"].cast<std::string>();
+                            break;
+                        }
+                    }
+                }
+            }
+            if (metatomicGpuParams.modelPath_.empty())
+            {
+                GMX_THROW(InconsistentInputError(
+                        "GPU metatomic is active but no model path found. "
+                        "Set metatomic-gpu-model-path in MDP or GMX_METATOMIC_MODEL_PATH env var."));
+            }
+
+            // Extensions directory: env var overrides KVT
+            const char* extDirEnv = getenv("GMX_METATOMIC_EXTENSIONS_DIR");
+            if (extDirEnv != nullptr)
+            {
+                metatomicGpuParams.extensionsDirectory = extDirEnv;
+            }
+            else if (inputrec->params->keyExists("applied-forces"))
+            {
+                const auto& afSection = (*inputrec->params)["applied-forces"].asObject();
+                if (afSection.keyExists("metatomic-gpu"))
+                {
+                    const auto& mgSection = afSection["metatomic-gpu"].asObject();
+                    if (mgSection.keyExists("extensions-directory"))
+                    {
+                        metatomicGpuParams.extensionsDirectory =
+                                mgSection["extensions-directory"].cast<std::string>();
+                    }
+                }
+            }
+
+            // Variant: from KVT
+            if (inputrec->params->keyExists("applied-forces"))
+            {
+                const auto& afSection = (*inputrec->params)["applied-forces"].asObject();
+                if (afSection.keyExists("metatomic-gpu"))
+                {
+                    const auto& mgSection = afSection["metatomic-gpu"].asObject();
+                    if (mgSection.keyExists("variant"))
+                    {
+                        metatomicGpuParams.variant = mgSection["variant"].cast<std::string>();
+                    }
+                }
+            }
+
+            // Extract global atomic numbers from topology for GPU path
+            std::vector<int> globalAtomicNumbers;
+            globalAtomicNumbers.reserve(mtop.natoms);
+            for (const auto& molblock : mtop.molblock)
+            {
+                const auto& atoms = mtop.moltype[molblock.type].atoms;
+                for (int m = 0; m < molblock.nmol; m++)
+                {
+                    for (int a = 0; a < atoms.nr; a++)
+                    {
+                        globalAtomicNumbers.push_back(atoms.atom[a].atomnumber);
+                    }
+                }
+            }
+
+            fr->metatomicGpu = std::make_unique<MetatomicGpuForceProvider>(
+                    metatomicGpuParams,
+                    mdlog,
+                    deviceStreamManager->context(),
+                    deviceStreamManager->stream(DeviceStreamType::NonBondedLocal),
+                    cr->commMySim,
+                    std::move(globalAtomicNumbers));
         }
         fr->longRangeNonbondeds = std::make_unique<CpuPpLongRangeNonbondeds>(fr->n_tpi,
                                                                              fr->ic->coulomb.ewaldCoeff,
