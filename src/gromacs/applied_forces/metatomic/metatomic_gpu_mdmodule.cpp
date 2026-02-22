@@ -49,20 +49,26 @@
 #include <cmath>
 #include <cstdlib>
 
+#include <set>
 #include <string>
 
+#include "gromacs/domdec/localatomset.h"
+#include "gromacs/fileio/warninp.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/imdmodule.h"
 #include "gromacs/mdtypes/imdpoptionprovider_helpers.h"
 #include "gromacs/options/basicoptions.h"
 #include "gromacs/options/optionsection.h"
+#include "gromacs/selection/indexutil.h"
+#include "gromacs/topology/embedded_system_preprocessing.h"
+#include "gromacs/topology/topology.h"
 #include "gromacs/utility/basenetwork.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/strconvert.h"
-#include "gromacs/domdec/localatomset.h"
+#include "gromacs/utility/stringutil.h"
 
 #include "metatomic_options.h"
 
@@ -82,9 +88,9 @@ namespace
 /*! \internal
  * \brief MDP option provider for the metatomic-gpu section.
  *
- * Lightweight: only stores the "active" flag and model path.
- * Shares the model path key with the CPU metatomic module to allow
- * both to coexist in the same MDP file.
+ * Handles MDP parsing, topology preprocessing (NB exclusions for ML atoms),
+ * and parameter storage. Shares the embedded-system preprocessing logic
+ * with the CPU metatomic module.
  */
 class MetatomicGpuOptions final : public IMdpOptionProvider
 {
@@ -99,6 +105,8 @@ public:
                 rules, stringIdentityTransform, "metatomic-gpu", "extensions-directory");
         addMdpTransformFromString<std::string>(
                 rules, stringIdentityTransform, "metatomic-gpu", "variant");
+        addMdpTransformFromString<std::string>(
+                rules, stringIdentityTransform, "metatomic-gpu", "input-group");
     }
 
     void initMdpOptions(IOptionsContainerWithSections* options) override
@@ -108,6 +116,7 @@ public:
         section.addOption(StringOption("model-path").store(&modelPath_));
         section.addOption(StringOption("extensions-directory").store(&extensionsDir_));
         section.addOption(StringOption("variant").store(&variant_));
+        section.addOption(StringOption("input-group").store(&inputGroup_));
     }
 
     void buildMdpOutput(KeyValueTreeObjectBuilder* builder) const override
@@ -122,6 +131,7 @@ public:
             addMdpOutputValue<std::string>(
                     builder, "metatomic-gpu", "extensions-directory", extensionsDir_);
             addMdpOutputValue<std::string>(builder, "metatomic-gpu", "variant", variant_);
+            addMdpOutputValue<std::string>(builder, "metatomic-gpu", "input-group", inputGroup_);
         }
     }
 
@@ -129,6 +139,56 @@ public:
     std::string modelPath() const { return modelPath_; }
     std::string extensionsDir() const { return extensionsDir_; }
     std::string variant() const { return variant_; }
+
+    //! Resolve input-group name to atom indices from index file
+    void setInputGroupIndices(const IndexGroupsAndNames& indexGroupsAndNames)
+    {
+        mtaIndices_ = indexGroupsAndNames.indices(inputGroup_);
+        if (mtaIndices_.empty())
+        {
+            GMX_THROW(InconsistentInputError(formatString(
+                    "Group '%s' defining metatomic-gpu input atoms should not be empty.",
+                    inputGroup_.c_str())));
+        }
+    }
+
+    //! Modify topology: exclude classical NB for ML atoms, remove bonded interactions
+    void modifyTopology(gmx_mtop_t* mtop)
+    {
+        std::set<int> mtaIndicesSet(mtaIndices_.begin(), mtaIndices_.end());
+        int           numMTAAtoms     = static_cast<int>(mtaIndices_.size());
+        int           numRegularAtoms = mtop->natoms - numMTAAtoms;
+
+        GMX_LOG(logger().info)
+                .appendText("Metatomic GPU potential interface is active, topology was modified!");
+        GMX_LOG(logger().info)
+                .appendTextFormatted(
+                        "Number of embedded Metatomic-GPU atoms: %d\nNumber of regular atoms: %d\n",
+                        numMTAAtoms,
+                        numRegularAtoms);
+
+        std::vector<bool> isMTABlock = splitEmbeddedBlocks(mtop, mtaIndicesSet);
+        addEmbeddedNBExclusions(mtop, mtaIndicesSet, logger());
+        buildEmbeddedAtomNumbers(*mtop);
+        modifyEmbeddedTwoCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger());
+        modifyEmbeddedThreeCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger());
+        modifyEmbeddedFourCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger());
+        checkConstrainedBonds(mtop, mtaIndicesSet, isMTABlock, wi_);
+        mtop->finalize();
+    }
+
+    void setLogger(const MDLogger& logger) { logger_ = &logger; }
+    void setWarningHandler(WarningHandler* wi) { wi_ = wi; }
+
+    //! Write input-group indices to KVT for .tpr storage
+    void writeInputGroupToKvt(KeyValueTreeObjectBuilder kvt)
+    {
+        auto indexAdder = kvt.addUniformArray<std::int64_t>("metatomic-gpu-input-group");
+        for (const auto& idx : mtaIndices_)
+        {
+            indexAdder.addValue(idx);
+        }
+    }
 
     //! Build a MetatomicParameters struct for the GPU provider
     MetatomicParameters buildParams() const
@@ -139,15 +199,26 @@ public:
         params.extensionsDirectory = extensionsDir_;
         params.variant             = variant_;
         params.device              = "cuda";
-        params.nlMode              = "full"; // GPU path doesn't use DD NL modes
+        params.nlMode              = "full";
+        params.inputGroup          = inputGroup_;
         return params;
     }
 
 private:
-    bool        active_        = false;
-    std::string modelPath_;
-    std::string extensionsDir_;
-    std::string variant_;
+    const MDLogger& logger() const
+    {
+        GMX_RELEASE_ASSERT(logger_, "Logger not set for MetatomicGpuOptions.");
+        return *logger_;
+    }
+
+    bool                active_     = false;
+    std::string         modelPath_;
+    std::string         extensionsDir_;
+    std::string         variant_;
+    std::string         inputGroup_ = "System";
+    std::vector<Index>  mtaIndices_;
+    const MDLogger*     logger_     = nullptr;
+    WarningHandler*     wi_         = nullptr;
 };
 
 
@@ -170,7 +241,23 @@ public:
             return;
         }
 
-        // Write GPU metatomic params to KVT for storage in .tpr
+        // Receive logger for topology modification messages
+        notifiers->preProcessingNotifier_.subscribe(
+                [this](const MDLogger& logger) { options_.setLogger(logger); });
+
+        // Receive warning handler for constraint checks
+        notifiers->preProcessingNotifier_.subscribe(
+                [this](WarningHandler* wi) { options_.setWarningHandler(wi); });
+
+        // Resolve input-group name to atom indices
+        notifiers->preProcessingNotifier_.subscribe(
+                [this](const IndexGroupsAndNames& idx) { options_.setInputGroupIndices(idx); });
+
+        // Modify topology: exclude classical NB for ML atoms
+        notifiers->preProcessingNotifier_.subscribe(
+                [this](gmx_mtop_t* top) { options_.modifyTopology(top); });
+
+        // Write GPU metatomic params + input-group indices to KVT for .tpr
         notifiers->preProcessingNotifier_.subscribe(
                 [this](KeyValueTreeObjectBuilder kvt)
                 {
@@ -179,6 +266,7 @@ public:
                     section.addValue<std::string>("model-path", options_.modelPath());
                     section.addValue<std::string>("extensions-directory", options_.extensionsDir());
                     section.addValue<std::string>("variant", options_.variant());
+                    options_.writeInputGroupToKvt(kvt);
                 });
     }
 
@@ -237,6 +325,10 @@ public:
                     ranges->addRange(maxCutoff);
                 });
 
+        // Request "Metatomic Potential" energy term in .edr output
+        notifiers->simulationSetupNotifier_.subscribe(
+                [](MDModulesEnergyOutputToMetatomicPotRequestChecker* req)
+                { req->energyOutputToMetatomicPot_ = true; });
     }
 
     void subscribeToSimulationRunNotifications(MDModulesNotifiers* /*notifiers*/) override
