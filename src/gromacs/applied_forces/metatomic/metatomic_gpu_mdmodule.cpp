@@ -54,6 +54,7 @@
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/imdmodule.h"
+#include "gromacs/mdtypes/imdpoptionprovider_helpers.h"
 #include "gromacs/options/basicoptions.h"
 #include "gromacs/options/optionsection.h"
 #include "gromacs/utility/basenetwork.h"
@@ -100,11 +101,17 @@ public:
 
     void buildMdpOutput(KeyValueTreeObjectBuilder* builder) const override
     {
-        auto section = builder->addObject("metatomic-gpu");
-        section.addValue<bool>("active", active_);
-        section.addValue<std::string>("model-path", modelPath_);
-        section.addValue<std::string>("extensions-directory", extensionsDir_);
-        section.addValue<std::string>("variant", variant_);
+        addMdpOutputComment(builder, "metatomic-gpu", "empty-line", "");
+        addMdpOutputComment(
+                builder, "metatomic-gpu", "module", "; GPU-resident ML potential using metatomic");
+        addMdpOutputValue(builder, "metatomic-gpu", "active", active_);
+        if (active_)
+        {
+            addMdpOutputValue<std::string>(builder, "metatomic-gpu", "model-path", modelPath_);
+            addMdpOutputValue<std::string>(
+                    builder, "metatomic-gpu", "extensions-directory", extensionsDir_);
+            addMdpOutputValue<std::string>(builder, "metatomic-gpu", "variant", variant_);
+        }
     }
 
     bool        active() const { return active_; }

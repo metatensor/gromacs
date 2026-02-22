@@ -174,7 +174,8 @@ void MDModules::initMdpTransform(IKeyValueTreeTransformRules* rules)
                                          QMMMModuleInfo::sc_name,
                                          ColvarsModuleInfo::sc_name,
                                          NNPotModuleInfo::sc_name,
-                                         MetatomicModuleInfo::sc_name })
+                                         MetatomicModuleInfo::sc_name,
+                                         MetatomicGpuModuleInfo::sc_name })
     {
         IMDModule*          module            = impl_->modules_.at(std::string(moduleName)).get();
         IMdpOptionProvider* mdpOptionProvider = module->mdpOptionProvider();
@@ -199,7 +200,8 @@ void MDModules::buildMdpOutput(KeyValueTreeObjectBuilder* builder)
                                          QMMMModuleInfo::sc_name,
                                          ColvarsModuleInfo::sc_name,
                                          NNPotModuleInfo::sc_name,
-                                         MetatomicModuleInfo::sc_name })
+                                         MetatomicModuleInfo::sc_name,
+                                         MetatomicGpuModuleInfo::sc_name })
     {
         IMDModule*                module = impl_->modules_.at(std::string(moduleName)).get();
         const IMdpOptionProvider* mdpOptionProvider = module->mdpOptionProvider();
