@@ -1074,6 +1074,11 @@ static int getExpectedLocalXReadyOnDeviceConsumptionCount(const SimulationWorklo
             result++;
         }
     }
+    if (simulationWork.useGpuMetatomic)
+    {
+        // Event is consumed by MetatomicGpuForceProvider::calculateForces
+        result++;
+    }
     return result;
 }
 
@@ -1642,7 +1647,8 @@ void do_force(FILE*                         fplog,
     }
 
     auto* localXReadyOnDevice = (stepWork.haveGpuPmeOnThisRank || stepWork.useGpuXBufferOps
-                                 || simulationWork.useGpuUpdate || pmeSendCoordinatesFromGpu)
+                                 || simulationWork.useGpuUpdate || pmeSendCoordinatesFromGpu
+                                 || simulationWork.useGpuMetatomic)
                                         ? stateGpu->getCoordinatesReadyOnDeviceEvent(
                                                   AtomLocality::Local, simulationWork, stepWork)
                                         : nullptr;
@@ -1699,7 +1705,8 @@ void do_force(FILE*                         fplog,
     // The local coordinates can be copied right away.
     // NOTE: Consider moving this copy to right after they are updated and constrained,
     //       if the later is not offloaded.
-    if (stepWork.haveGpuPmeOnThisRank || stepWork.useGpuXBufferOps || pmeSendCoordinatesFromGpu)
+    if (stepWork.haveGpuPmeOnThisRank || stepWork.useGpuXBufferOps || pmeSendCoordinatesFromGpu
+        || simulationWork.useGpuMetatomic)
     {
         GMX_ASSERT(stateGpu != nullptr, "stateGpu should not be null");
         const int expectedLocalXReadyOnDeviceConsumptionCount =
@@ -1860,7 +1867,8 @@ void do_force(FILE*                         fplog,
                                            gpuPl,
                                            d_atomIdx,
                                            nbAtomData,
-                                           stepWork.doNeighborSearch);
+                                           stepWork.doNeighborSearch,
+                                           localXReadyOnDevice);
     }
 
     if (stepWork.haveGpuPmeOnThisRank)

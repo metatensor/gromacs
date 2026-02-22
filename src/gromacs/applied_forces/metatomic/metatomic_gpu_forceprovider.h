@@ -123,6 +123,7 @@ public:
      * \param[in] d_atomIndex   nbnxm->natural atom index mapping
      * \param[in] nbAtomData    nbnxm GPU atom data (xq, shiftVec for NL kernel)
      * \param[in] isNsStep      Whether this is a neighbor-search step
+     * \param[in] xReadyOnDevice Event signaling coordinates are ready on GPU (consumed here)
      */
     void calculateForces(DeviceBuffer<RVec>    d_x,
                          int                   numAtoms,
@@ -131,7 +132,8 @@ public:
                          const GpuPairlist*    gpuPairlist,
                          DeviceBuffer<int>     d_atomIndex,
                          const NBAtomDataGpu*  nbAtomData,
-                         bool                  isNsStep);
+                         bool                  isNsStep,
+                         GpuEventSynchronizer* xReadyOnDevice);
 
     /*! \brief Update atom types and home/halo mapping after DD redistribution.
      *

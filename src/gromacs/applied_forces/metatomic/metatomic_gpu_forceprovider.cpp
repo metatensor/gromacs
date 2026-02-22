@@ -130,7 +130,8 @@ public:
                          const GpuPairlist*    gpuPairlist,
                          DeviceBuffer<int>     d_atomIndex,
                          const NBAtomDataGpu*  nbAtomData,
-                         bool                  isNsStep);
+                         bool                  isNsStep,
+                         GpuEventSynchronizer* xReadyOnDevice);
 
     void updateAtomMapping(int numHomeAtoms, int numTotalAtoms, const int* globalAtomIndices);
 
@@ -334,6 +335,7 @@ MetatomicGpuForceProvider::Impl::Impl(const MetatomicParameters& params,
     auto requestedOutput = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
     requestedOutput->per_atom           = modelOutput->per_atom;
     requestedOutput->explicit_gradients = {};
+    requestedOutput->set_quantity("energy");
     requestedOutput->set_unit("kJ/mol");
     evaluationOptions_->outputs.insert(energyKey, requestedOutput);
 
@@ -552,8 +554,54 @@ void MetatomicGpuForceProvider::Impl::buildNeighborListGpu(const GpuPairlist*   
     auto intOptions   = torch::TensorOptions().dtype(torch::kInt32).device(device_);
     auto floatOptions = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
 
-    nlSamples_   = torch::from_blob(d_nlSamples_, { numPairs, 5 }, intOptions);
-    nlDistances_ = torch::from_blob(d_nlDistances_, { numPairs, 3, 1 }, floatOptions);
+    auto halfSamples   = torch::from_blob(d_nlSamples_, { numPairs, 5 }, intOptions);
+    auto halfDistances = torch::from_blob(d_nlDistances_, { numPairs, 3, 1 }, floatOptions);
+
+    // The nbnxm GPU pairlist is approximately a half-list, but some pairs
+    // may appear in both directions due to overlapping super-clusters.
+    // ML models require a full list with both (i,j) and (j,i).
+    // Strategy: create all reverses, concatenate, then deduplicate.
+    auto revSamples = torch::empty_like(halfSamples);
+    revSamples.index({ torch::indexing::Slice(), 0 }) =
+            halfSamples.index({ torch::indexing::Slice(), 1 }); // j -> i
+    revSamples.index({ torch::indexing::Slice(), 1 }) =
+            halfSamples.index({ torch::indexing::Slice(), 0 }); // i -> j
+    revSamples.index({ torch::indexing::Slice(), torch::indexing::Slice(2, 5) }) =
+            -halfSamples.index({ torch::indexing::Slice(), torch::indexing::Slice(2, 5) });
+
+    auto revDistances = -halfDistances;
+
+    auto allSamples   = torch::cat({ halfSamples, revSamples }, /*dim=*/0);
+    auto allDistances = torch::cat({ halfDistances, revDistances }, /*dim=*/0);
+
+    // Deduplicate: encode each 5-column row as a single int64 key,
+    // sort, then keep only the first occurrence of each key.
+    {
+        auto s64       = allSamples.to(torch::kInt64);
+        constexpr int64_t D = 50; // shift offset (shifts are small integers)
+        constexpr int64_t M = 100000; // multiplier (> max atom index + 2*D)
+        auto col0 = s64.index({ torch::indexing::Slice(), 0 });
+        auto col1 = s64.index({ torch::indexing::Slice(), 1 });
+        auto col2 = s64.index({ torch::indexing::Slice(), 2 }) + D;
+        auto col3 = s64.index({ torch::indexing::Slice(), 3 }) + D;
+        auto col4 = s64.index({ torch::indexing::Slice(), 4 }) + D;
+        auto keys = ((((col0 * M + col1) * M + col2) * M + col3) * M + col4);
+
+        // Sort by key, then keep rows where key differs from predecessor
+        auto [sortedKeys, sortIdx] = keys.sort();
+        auto uniqueMask = torch::ones({ sortedKeys.size(0) },
+                                       torch::TensorOptions().dtype(torch::kBool).device(device_));
+        if (sortedKeys.size(0) > 1)
+        {
+            uniqueMask.index({ torch::indexing::Slice(1, torch::indexing::None) }) =
+                    sortedKeys.index({ torch::indexing::Slice(1, torch::indexing::None) })
+                    != sortedKeys.index({ torch::indexing::Slice(torch::indexing::None, -1) });
+        }
+        auto keepIdx = sortIdx.index({ uniqueMask });
+
+        nlSamples_   = allSamples.index_select(0, keepIdx);
+        nlDistances_ = allDistances.index_select(0, keepIdx);
+    }
 
     if (dtype_ == torch::kFloat64)
     {
@@ -569,9 +617,19 @@ void MetatomicGpuForceProvider::Impl::calculateForces(DeviceBuffer<RVec>    d_x,
                                                         const GpuPairlist*    gpuPairlist,
                                                         DeviceBuffer<int>     d_atomIndex,
                                                         const NBAtomDataGpu*  nbAtomData,
-                                                        bool                  isNsStep)
+                                                        bool                  isNsStep,
+                                                        GpuEventSynchronizer* xReadyOnDevice)
 {
     GMX_RELEASE_ASSERT(atomMappingReady_, "updateAtomMapping must be called before calculateForces");
+
+    // Wait for coordinates to be ready on the GPU.
+    // The H2D copy runs on the StatePropagatorDataGpu stream; we insert
+    // a barrier into the metatomic (NonBondedLocal) stream so that all
+    // subsequent torch/CUDA work sees the updated coordinates.
+    if (xReadyOnDevice != nullptr)
+    {
+        xReadyOnDevice->enqueueWaitEvent(deviceStream_);
+    }
 
     // In DD mode, use the total local atom count (home + halo) for model input.
     // The caller passes mdatoms->homenr, but we need all local atoms.
@@ -656,6 +714,26 @@ void MetatomicGpuForceProvider::Impl::calculateForces(DeviceBuffer<RVec>    d_x,
     // Serial mode: same.
     evaluationOptions_->set_selected_atoms(torch::nullopt);
 
+    // Debug: print diagnostics
+    if (debugEnabled_)
+    {
+        auto posHost = positions.detach().to(torch::kCPU).to(torch::kFloat64);
+        auto cellCpu = cell.to(torch::kCPU).to(torch::kFloat64);
+        auto pA = posHost.accessor<double, 2>();
+        auto cA = cellCpu.accessor<double, 2>();
+        fprintf(stderr,
+                "[MetatomicGpu] step=%ld atoms=%d NL_pairs=%ld\n"
+                "  pos[0] = (%.6f, %.6f, %.6f)\n"
+                "  pos[1] = (%.6f, %.6f, %.6f)\n"
+                "  cell = diag(%.6f, %.6f, %.6f)\n",
+                step,
+                modelNumAtoms,
+                nlSamples_.numel() > 0 ? nlSamples_.size(0) : 0L,
+                pA[0][0], pA[0][1], pA[0][2],
+                pA[1][0], pA[1][1], pA[1][2],
+                cA[0][0], cA[1][1], cA[2][2]);
+    }
+
     // Forward pass
     metatensor_torch::TensorMap outputMap;
     try
@@ -677,6 +755,14 @@ void MetatomicGpuForceProvider::Impl::calculateForces(DeviceBuffer<RVec>    d_x,
 
     // Extract energy (always needed for logging/output)
     cachedEnergy_ = energyTensor.sum().item<double>();
+
+    if (debugEnabled_)
+    {
+        fprintf(stderr, "[MetatomicGpu] energy = %.6f (per_atom tensor shape: [%ld, %ld])\n",
+                cachedEnergy_,
+                energyTensor.size(0),
+                energyTensor.size(1));
+    }
 
     // Backward pass: compute forces via autograd
     positions.mutable_grad() = torch::Tensor();
@@ -877,9 +963,10 @@ void MetatomicGpuForceProvider::calculateForces(DeviceBuffer<RVec>    d_x,
                                                  const GpuPairlist*    gpuPairlist,
                                                  DeviceBuffer<int>     d_atomIndex,
                                                  const NBAtomDataGpu*  nbAtomData,
-                                                 bool                  isNsStep)
+                                                 bool                  isNsStep,
+                                                 GpuEventSynchronizer* xReadyOnDevice)
 {
-    impl_->calculateForces(d_x, numAtoms, box, step, gpuPairlist, d_atomIndex, nbAtomData, isNsStep);
+    impl_->calculateForces(d_x, numAtoms, box, step, gpuPairlist, d_atomIndex, nbAtomData, isNsStep, xReadyOnDevice);
 }
 
 void MetatomicGpuForceProvider::updateAtomMapping(int        numHomeAtoms,
