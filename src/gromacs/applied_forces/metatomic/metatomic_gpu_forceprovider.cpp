@@ -636,10 +636,14 @@ void MetatomicGpuForceProvider::Impl::calculateForces(DeviceBuffer<RVec>    d_x,
             continue;
         }
 
+        // Detach from any previous step's computational graph
+        auto samples   = nlSamples_.detach();
+        auto distances = nlDistances_.detach();
+
         auto neighborSamples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-                nlSampleNames_, nlSamples_);
+                nlSampleNames_, samples);
         auto neighbors = torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
-                nlDistances_,
+                distances,
                 neighborSamples,
                 std::vector<metatensor_torch::Labels>{ cachedNLComponent_ },
                 cachedNLProperties_);
