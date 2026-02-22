@@ -46,6 +46,7 @@
 
 #include "gromacs/nbnxm/nbnxm_enums.h"
 #include "gromacs/nbnxm/pairlist.h"
+#include "gromacs/pbcutil/ishift.h"
 
 namespace gmx
 {
