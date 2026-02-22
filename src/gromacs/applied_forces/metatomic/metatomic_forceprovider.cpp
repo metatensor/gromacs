@@ -968,12 +968,21 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 // Build NL from GROMACS pairlist (+ backward pairs in newton mode).
                 // Both modes use the same code path; newton mode just has extra
                 // pairs appended to pairlistMta_ from exchangeBackwardPairs().
-                const int64_t nHalf = static_cast<int64_t>(pairlistMta_.size() / 2);
-                const bool    full  = request->full_list();
-                nPairs              = full ? 2 * nHalf : nHalf;
+                //
+                // GROMACS pairlist uses rlist (verlet buffer) which is typically
+                // larger than the model's cutoff. Filter pairs by the model's
+                // cutoff to avoid sending excess pairs that waste GPU memory.
+                const int64_t nHalf  = static_cast<int64_t>(pairlistMta_.size() / 2);
+                const bool    full   = request->full_list();
+                const double  cutoff = request->engine_cutoff("nm");
+                const double  cutoff2 = cutoff * cutoff;
 
-                nlSamplesBuffer_.resize(nPairs * 5);
-                nlVectorsBuffer_.resize(nPairs * 3);
+                // Pre-allocate for worst case (all pairs within cutoff)
+                const int64_t maxPairs = full ? 2 * nHalf : nHalf;
+                nlSamplesBuffer_.resize(maxPairs * 5);
+                nlVectorsBuffer_.resize(maxPairs * 3);
+
+                int64_t outIdx = 0; // running output index for filtered pairs
 
                 for (int64_t k = 0; k < nHalf; k++)
                 {
@@ -989,30 +998,40 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                     const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
                     const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
 
-                    const int64_t fwd = full ? 2 * k : k;
-                    nlSamplesBuffer_[5 * fwd + 0] = ai;
-                    nlSamplesBuffer_[5 * fwd + 1] = aj;
-                    nlSamplesBuffer_[5 * fwd + 2] = cellShiftsMta_[k][0];
-                    nlSamplesBuffer_[5 * fwd + 3] = cellShiftsMta_[k][1];
-                    nlSamplesBuffer_[5 * fwd + 4] = cellShiftsMta_[k][2];
-                    nlVectorsBuffer_[3 * fwd + 0] = dx;
-                    nlVectorsBuffer_[3 * fwd + 1] = dy;
-                    nlVectorsBuffer_[3 * fwd + 2] = dz;
+                    const double dist2 = dx * dx + dy * dy + dz * dz;
+                    if (dist2 > cutoff2)
+                    {
+                        continue;
+                    }
+
+                    nlSamplesBuffer_[5 * outIdx + 0] = ai;
+                    nlSamplesBuffer_[5 * outIdx + 1] = aj;
+                    nlSamplesBuffer_[5 * outIdx + 2] = cellShiftsMta_[k][0];
+                    nlSamplesBuffer_[5 * outIdx + 3] = cellShiftsMta_[k][1];
+                    nlSamplesBuffer_[5 * outIdx + 4] = cellShiftsMta_[k][2];
+                    nlVectorsBuffer_[3 * outIdx + 0] = dx;
+                    nlVectorsBuffer_[3 * outIdx + 1] = dy;
+                    nlVectorsBuffer_[3 * outIdx + 2] = dz;
+                    outIdx++;
 
                     if (full)
                     {
                         // Reverse pair (j,i) with negated shifts and displacement
-                        const int64_t rev = 2 * k + 1;
-                        nlSamplesBuffer_[5 * rev + 0] = aj;
-                        nlSamplesBuffer_[5 * rev + 1] = ai;
-                        nlSamplesBuffer_[5 * rev + 2] = -cellShiftsMta_[k][0];
-                        nlSamplesBuffer_[5 * rev + 3] = -cellShiftsMta_[k][1];
-                        nlSamplesBuffer_[5 * rev + 4] = -cellShiftsMta_[k][2];
-                        nlVectorsBuffer_[3 * rev + 0] = -dx;
-                        nlVectorsBuffer_[3 * rev + 1] = -dy;
-                        nlVectorsBuffer_[3 * rev + 2] = -dz;
+                        nlSamplesBuffer_[5 * outIdx + 0] = aj;
+                        nlSamplesBuffer_[5 * outIdx + 1] = ai;
+                        nlSamplesBuffer_[5 * outIdx + 2] = -cellShiftsMta_[k][0];
+                        nlSamplesBuffer_[5 * outIdx + 3] = -cellShiftsMta_[k][1];
+                        nlSamplesBuffer_[5 * outIdx + 4] = -cellShiftsMta_[k][2];
+                        nlVectorsBuffer_[3 * outIdx + 0] = -dx;
+                        nlVectorsBuffer_[3 * outIdx + 1] = -dy;
+                        nlVectorsBuffer_[3 * outIdx + 2] = -dz;
+                        outIdx++;
                     }
                 }
+
+                nPairs = outIdx;
+                nlSamplesBuffer_.resize(nPairs * 5);
+                nlVectorsBuffer_.resize(nPairs * 3);
             }
 
             // Debug: dump global pair indices + distances for comparison
