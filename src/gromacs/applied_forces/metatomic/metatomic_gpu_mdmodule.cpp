@@ -219,9 +219,6 @@ public:
                     ranges->addRange(maxCutoff);
                 });
 
-        // Flag this simulation as using a direct force provider (not IForceProvider)
-        notifiers->simulationSetupNotifier_.subscribe(
-                [](MDModulesDirectProvider* provider) { provider->isDirectProvider = true; });
     }
 
     void subscribeToSimulationRunNotifications(MDModulesNotifiers* /*notifiers*/) override
