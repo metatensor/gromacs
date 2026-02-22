@@ -336,6 +336,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                         "Energy decomposition in domain decomposition may be less accurate.");
     }
     requested_output->explicit_gradients = {};
+    requested_output->set_quantity("energy");
     requested_output->set_unit("kJ/mol");
 
     data_->evaluations_options->outputs.insert(energy_key, requested_output);
