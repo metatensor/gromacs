@@ -151,9 +151,6 @@ struct MetatomicData
     torch::Tensor cachedTypes;
     torch::Tensor cachedPbc;
 
-    //! Effective NL mode: "full" (pairlist + backward pair exchange) or
-    //! "pairlist" (excluded pairlist only, selected_atoms=nullopt).
-    std::string nlMode = "full";
 };
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
@@ -173,22 +170,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
 
     data_->debugEnabled = (std::getenv("GMX_METATOMIC_DEBUG") != nullptr);
-
-    // NL mode: MDP setting, overridable by env var
-    data_->nlMode = options_.params_.nlMode;
-    if (const char* env = std::getenv("GMX_METATOMIC_NL_MODE"))
-    {
-        data_->nlMode = std::string(env);
-    }
-    if (data_->nlMode != "full" && data_->nlMode != "pairlist")
-    {
-        GMX_THROW(InvalidInputError(
-                formatString("Invalid metatomic nl-mode '%s'. Must be 'full' or 'pairlist'.",
-                             data_->nlMode.c_str())));
-    }
-    GMX_LOG(logger_.info)
-            .asParagraph()
-            .appendTextFormatted("Metatomic NL mode: %s", data_->nlMode.c_str());
 
     // Force single-threaded PyTorch operations in all parallel runs.
     // In thread-MPI, ranks share a process; in real MPI, each rank is a process.
@@ -1152,9 +1133,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             if (fp)
             {
                 std::fprintf(fp,
-                             "nlMode=%s, nlPairs=%zu, numLocalMta=%d, numHomeMta=%d, "
+                             "nlPairs=%zu, numLocalMta=%d, numHomeMta=%d, "
                              "energy: perRank=%.6f, mpiSum=%.6f\n",
-                             data_->nlMode.c_str(),
                              nlSamplesBuffer_.size() / 5,
                              numLocalMta_,
                              numHomeMta_,

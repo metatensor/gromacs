@@ -85,14 +85,6 @@ struct MetatomicParameters
     //! predictions
     std::string variant;
 
-    //! Neighbor list mode for domain decomposition:
-    //! "full" (default): use GROMACS pairlist + backward pair exchange so
-    //!   every home atom sees all its pairs. selected_atoms = home_only.
-    //!   Safe for all models (GNN, global attention, internal pair recomputation).
-    //! "pairlist": use GROMACS excluded pairlist as-is + selected_atoms = nullopt.
-    //!   Only correct for models that exclusively use the provided NL.
-    std::string nlMode = "full";
-
     // TODO: how should we translate atomic types?
 
     //! stores atom group name for which metatomic should compute the energy
