@@ -12,6 +12,7 @@
 *.pyc
 *.so
 *.swp
+.asv
 .eggs
 .idea
 Makefile
