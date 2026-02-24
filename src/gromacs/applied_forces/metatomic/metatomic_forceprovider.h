@@ -131,9 +131,11 @@ private:
      * Must be called after exchangeBackwardGhosts() (so all atom positions
      * are available) and before the NL building loop.
      *
-     * \param[in] box  Current simulation box.
+     * \param[in] box        Current simulation box.
+     * \param[in] maxRounds  Maximum number of ring exchange rounds (capped by
+     *                       ceil(cutoff/minCellSize) when DD info is available).
      */
-    void exchangeBackwardPairs(const matrix box);
+    void exchangeBackwardPairs(const matrix box, int maxRounds);
 
     /*! \brief Exchange backward ghost MTA atoms via DD to fill the backward gap.
      *

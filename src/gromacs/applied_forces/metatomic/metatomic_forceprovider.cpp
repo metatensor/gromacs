@@ -68,6 +68,7 @@
 #include "gromacs/domdec/domdec_network.h"
 #include "gromacs/domdec/domdec_struct.h"
 #include "gromacs/domdec/localatomset.h"
+#include "gromacs/math/boxmatrix.h"
 #include "gromacs/mdlib/broadcaststructs.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/enerdata.h"
@@ -152,6 +153,8 @@ struct MetatomicData
     torch::Tensor cachedTypes;
     torch::Tensor cachedPbc;
 
+    //! Sparse/dense force exchange threshold (atom count). Env: GMX_METATOMIC_SPARSE_THRESHOLD.
+    int32_t sparseThreshold = 1000;
 };
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
@@ -171,6 +174,15 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
 
     data_->debugEnabled = (std::getenv("GMX_METATOMIC_DEBUG") != nullptr);
+
+    if (const char* env = std::getenv("GMX_METATOMIC_SPARSE_THRESHOLD"))
+    {
+        data_->sparseThreshold = std::stoi(env);
+        GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendTextFormatted("Metatomic sparse force threshold: %d",
+                                     data_->sparseThreshold);
+    }
 
     // Force single-threaded PyTorch operations in all parallel runs.
     // In thread-MPI, ranks share a process; in real MPI, each rank is a process.
@@ -710,7 +722,7 @@ int32_t MetatomicForceProvider::exchangeBackwardGhosts(
 }
 
 
-void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
+void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRounds)
 {
     backwardPairsMta_.clear();
     backwardShiftsMta_.clear();
@@ -772,10 +784,14 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
     const int sendTo   = (myRank + 1) % numRanks;
     const int recvFrom = (myRank - 1 + numRanks) % numRanks;
 
+    // Compute box inverse once for triclinic-safe shift computation.
+    matrix boxInv;
+    invertBoxMatrix(box, boxInv);
+
     std::vector<int> sendBuf = myPairsBuf;
     std::vector<int> recvBuf;
 
-    for (int round = 0; round < numRanks - 1; round++)
+    for (int round = 0; round < maxRounds; round++)
     {
         // Exchange counts first so receiver knows buffer size.
         int sendCount = static_cast<int>(sendBuf.size());
@@ -820,7 +836,8 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
             const int32_t localI = itI->second;
             const int32_t localJ = itJ->second;
 
-            // Compute minimum-image shift from local positions (orthorhombic).
+            // Triclinic-safe minimum-image shift (matches LAMMPS cell_shifts).
+            // invertBoxMatrix returns lower-triangular inverse, so upper triangle is 0.
             const double rawDx =
                     static_cast<double>(positions_[localJ][XX] - positions_[localI][XX]);
             const double rawDy =
@@ -829,12 +846,11 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
                     static_cast<double>(positions_[localJ][ZZ] - positions_[localI][ZZ]);
 
             IVec shift;
-            shift[XX] = static_cast<int>(
-                    std::round(-rawDx / static_cast<double>(box[XX][XX])));
-            shift[YY] = static_cast<int>(
-                    std::round(-rawDy / static_cast<double>(box[YY][YY])));
-            shift[ZZ] = static_cast<int>(
-                    std::round(-rawDz / static_cast<double>(box[ZZ][ZZ])));
+            shift[XX] = static_cast<int>(std::round(
+                    -(boxInv[XX][XX] * rawDx + boxInv[YY][XX] * rawDy + boxInv[ZZ][XX] * rawDz)));
+            shift[YY] = static_cast<int>(std::round(
+                    -(boxInv[YY][YY] * rawDy + boxInv[ZZ][YY] * rawDz)));
+            shift[ZZ] = static_cast<int>(std::round(-(boxInv[ZZ][ZZ] * rawDz)));
 
             backwardPairsMta_.push_back(localI);
             backwardPairsMta_.push_back(localJ);
@@ -872,7 +888,7 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
 
     // For small systems, dense allreduce has lower latency than the
     // sparse exchange (gather counts + allgatherv).
-    constexpr int32_t sparseThreshold = 1000;
+    const int32_t sparseThreshold = data_->sparseThreshold;
 
     if (numTotalMta < sparseThreshold)
     {
@@ -997,16 +1013,19 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     if (useNewtonNL)
     {
+        // Compute max cutoff across all NL requests (used by both ghost
+        // exchange and ring hop limit).
+        double maxCutoff = 0.0;
+        for (const auto& req : data_->nl_requests)
+        {
+            maxCutoff = std::max(maxCutoff, req->engine_cutoff("nm"));
+        }
+
         // Step 1: Exchange backward ghost atoms to fill the backward gap
         // in the DD halo.  Extends positions_, atomNumbers_, mtaToGlobalMta_
         // and numLocalMta_ with atoms from the backward PBC neighbor.
         {
             MetatomicTimer timer("exchangeBackwardGhosts", mpiComm_);
-            double maxCutoff = 0.0;
-            for (const auto& req : data_->nl_requests)
-            {
-                maxCutoff = std::max(maxCutoff, req->engine_cutoff("nm"));
-            }
             exchangeBackwardGhosts(inputs.dd_, inputs.box_, maxCutoff);
         }
 
@@ -1016,9 +1035,27 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         // Step 2: Exchange backward-direction pairs.  Discovers pairs from
         // other ranks' pairlists that involve this rank's home atoms.
+        // Limit ring rounds to ceil(cutoff/minCellSize) when DD is available.
         {
             MetatomicTimer timer("exchangeBackwardPairs", mpiComm_);
-            exchangeBackwardPairs(inputs.box_);
+            int maxRounds = mpiComm_.size() - 1;
+            if (inputs.dd_ != nullptr && inputs.dd_->ndim > 0)
+            {
+                double minCellSize = 1e30;
+                for (int d = 0; d < inputs.dd_->ndim; d++)
+                {
+                    const int    dim = inputs.dd_->dim[d];
+                    const double cs  = static_cast<double>(inputs.box_[dim][dim])
+                                      / inputs.dd_->numCells[dim];
+                    minCellSize = std::min(minCellSize, cs);
+                }
+                if (minCellSize > 0.0)
+                {
+                    maxRounds = std::min(maxRounds,
+                                         static_cast<int>(std::ceil(maxCutoff / minCellSize)));
+                }
+            }
+            exchangeBackwardPairs(inputs.box_, maxRounds);
         }
 
         // Step 3: Temporarily extend pairlistMta_ with backward pairs
