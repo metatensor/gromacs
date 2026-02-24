@@ -63,37 +63,21 @@ class MpiComm;
  *
  * Implements the IForceProvider interface for the Metatomic force provider.
  *
- * ## Domain decomposition strategy
+ * ## Domain decomposition (DD) strategy
  *
  * Each rank evaluates the model on its local (home + halo) MTA atoms.
- * Two neighbor list (NL) modes are available, controlled by the MDP option
- * `metatomic-nl-mode` (or env var `GMX_METATOMIC_NL_MODE`):
+ * The GROMACS excluded pairlist serves as the pair source; a backward ghost
+ * atom exchange followed by a backward pair exchange ensures every home atom
+ * has ALL its pairs (the "newton pair ON" pattern from LAMMPS pair_metatomic).
+ * Distance vectors and shifts are recomputed from local positions.
+ * The energy is summed over home atoms only (`selected_atoms = home_only`).
+ * This approach is safe for all model architectures.
  *
- * ### Full NL mode (nl-mode = "full", default)
- *
- * Uses the GROMACS excluded pairlist as the pair source, then exchanges pair
- * identities across ranks so every home atom has ALL its pairs. This is
- * done via a backward ghost atom exchange (to get missing atom positions)
- * followed by a backward pair exchange (to discover pairs assigned to other
- * ranks by the DD eighth-shell decomposition). Distance vectors and shifts
- * are recomputed from local positions. The energy is summed over home atoms
- * only. This is the "newton pair ON" pattern inspired by LAMMPS
- * pair_metatomic and is safe for all model architectures.
- *
- * ### Pairlist mode (nl-mode = "pairlist")
- *
- * Uses the GROMACS excluded pairlist (excludedPairlist) as the NL source.
- * Each pair appears on exactly one rank. Sets `selected_atoms = nullopt` and
- * sums all per-atom energies (home + halo). Only correct for models that
- * exclusively use the provided neighbor list (pure GNN models).
- *
- * ### Common to both modes
- *
- * **Atoms**: In domain decomposition, GROMACS partitions atoms into "home"
- * atoms (owned by this rank) and "halo" atoms (copies from neighboring ranks
- * needed for short-range interactions). The same global atom may appear as
- * multiple periodic ghost images in the halo. We deduplicate these so each
- * atom has one model index, but record ALL GROMACS local buffer indices in
+ * **Atoms**: In DD, GROMACS partitions atoms into "home" atoms (owned by
+ * this rank) and "halo" atoms (copies from neighboring ranks needed for
+ * short-range interactions). The same global atom may appear as multiple
+ * periodic ghost images in the halo. We deduplicate these so each atom has
+ * one model index, but record ALL GROMACS local buffer indices in
  * gmxLocalToMtaIdx_ so that the pairlist (which may reference any image) can
  * be resolved.
  *
@@ -104,8 +88,8 @@ class MpiComm;
  * **Shift convention**: GROMACS shifts atom I (first):
  * d = x[I]+shift - x[J]. Metatensor convention: r_ij = x[J] + cell_shift*box
  * - x[I]. Therefore metatensor cell shifts = negated GROMACS cell shifts.
- * In full NL mode, backward pairs have shifts recomputed from local
- * positions using the minimum-image convention.
+ * Backward pairs have shifts recomputed from local positions using the
+ * minimum-image convention.
  */
 class MetatomicForceProvider final : public IForceProvider
 {

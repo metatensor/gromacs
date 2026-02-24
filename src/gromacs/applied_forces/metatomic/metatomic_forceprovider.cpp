@@ -35,18 +35,11 @@
  * \brief
  * Implements the Metatomic Force Provider class with per-rank model evaluation.
  *
- * Two NL modes are supported (controlled by MDP `metatomic-nl-mode`):
- *
- *  - **full** (default): uses the GROMACS pairlist as the pair source, then
- *    exchanges pair identities across ranks (backward pair exchange) so every
- *    home atom has ALL its pairs.  Sums home-atom energies only.  Safe for all
- *    model architectures (newton pair ON pattern).
- *
- *  - **pairlist**: uses the GROMACS excluded pairlist (excludedPairlist_).
- *    MTA-MTA nonbonded pairs are excluded from the classical force calculation
- *    via intermolecularExclusionGroup.  Sets `selected_atoms = nullopt` — each
- *    pair is on exactly one rank, so summing all per-atom energies is correct.
- *    Only valid for models that exclusively use the provided neighbor list.
+ * In domain decomposition, each rank uses the GROMACS pairlist as the pair
+ * source, then exchanges pair identities across ranks (backward pair exchange)
+ * so every home atom has ALL its pairs. Sums home-atom energies only. Safe for
+ * all model architectures (newton pair ON pattern, inspired by LAMMPS
+ * pair_metatomic).
  *
  * Common design points:
  *  - Forces: all-reduce on a global buffer because ForceWithVirial is not
@@ -871,11 +864,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     copy_mat(inputs.box_, box_);
 
-    // Newton NL mode: in parallel with nl-mode=full, each rank needs ALL
-    // pairs involving its home atoms (not just the ones assigned by the
-    // eighth-shell DD decomposition). Uses the GROMACS pairlist as the pair
-    // source, then exchanges pair identities across ranks.
-    const bool useNewtonNL = mpiComm_.isParallel() && data_->nlMode == "full";
+    // Newton NL mode: in parallel, each rank needs ALL pairs involving its
+    // home atoms (not just the ones assigned by the eighth-shell DD
+    // decomposition). Uses the GROMACS pairlist as the pair source, then
+    // exchanges pair identities across ranks.
+    const bool useNewtonNL = mpiComm_.isParallel();
 
     // Save original numLocalMta_ before potential backward ghost extension.
     // Must be restored after model evaluation so that gatherAtomPositions
@@ -1100,7 +1093,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         if (useNewtonNL)
         {
-            // Newton mode: restrict output to home atoms only [0, numHomeMta_).
+            // Restrict output to home atoms only [0, numHomeMta_).
             // Following the LAMMPS pair_metatomic pattern (selected_atoms = nlocal).
             // The model computes per-atom energies for ALL local atoms internally,
             // but only returns results for home atoms.  This is important because
@@ -1115,12 +1108,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             auto selected = torch::make_intrusive<metatensor_torch::LabelsHolder>(
                     std::vector<std::string>{ "system", "atom" }, sa_values);
             data_->evaluations_options->set_selected_atoms(selected);
-        }
-        else
-        {
-            // Pairlist mode: each pair is on exactly one rank, so summing all
-            // per-atom energies (home + halo) gives the correct pair energy.
-            data_->evaluations_options->set_selected_atoms(torch::nullopt);
         }
 
         MetatomicTimer forwardTimer("forward", mpiComm_);
@@ -1147,11 +1134,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         auto energy_tensor = energy_block->values();
 
         // Sum all returned per-atom energies.
-        // In Newton mode, selected_atoms restricts output to home atoms only,
-        // so this sums only home atom energies.
-        // In pairlist mode, selected_atoms is nullopt, so this sums all atoms.
-        // Both are correct: Newton mode has complete NL per home atom,
-        // pairlist mode has each pair on exactly one rank.
+        // In parallel, selected_atoms restricts output to home atoms only,
+        // so this sums only home atom energies (each home atom has a complete NL).
         energy = energy_tensor.sum().item<double>();
 
         // Diagnostic: log pairlist size, per-rank energy and MPI sum
@@ -1186,8 +1170,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         strain.mutable_grad()          = torch::Tensor();
 
         // Backpropagate through all returned per-atom energies.
-        // In Newton mode, output is restricted to home atoms via selected_atoms.
-        // In pairlist mode, output includes all local atoms.
+        // In parallel, output is restricted to home atoms via selected_atoms.
         // Forces propagate to ALL local atoms (home + halo) via the NL autograd.
         energy_tensor.backward(-torch::ones_like(energy_tensor));
 
