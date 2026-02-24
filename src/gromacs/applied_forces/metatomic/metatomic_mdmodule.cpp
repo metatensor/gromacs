@@ -239,16 +239,6 @@ public:
                     GMX_THROW(InconsistentInputError("Metatomic model cutoff is 0.0 or invalid."));
                 }
             }
-            // TODO: For multi-layer GNN models (MACE, NequIP, etc.) the
-            // interaction_range should be n_layers * cutoff so that domain decomposition halos
-            // are deep enough for message-passing.  Many models currently
-            // report interaction_range == cutoff, which makes domain decomposition give wrong
-            // energies because halo atoms lack complete neighborhoods.
-            // Unlike LAMMPS (which adds a ~2 Å neighbor skin on top of the
-            // cutoff), GROMACS caps the domain decomposition range at rlist, so we cannot add
-            // extra range here.  The model must report the correct
-            // interaction_range, or the user must increase rcoulomb/rvdw in
-            // the .mdp so that rlist >= interaction_range.
             ranges->addRange(max_cutoff);
         };
         // Register the callback
