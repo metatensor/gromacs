@@ -82,8 +82,10 @@ class MpiComm;
  * be resolved.
  *
  * **Forces**: backward() produces forces on all local atoms (home + halo).
- * Since ForceWithVirial is not communicated by dd_move_f, we scatter forces
- * into a global buffer and MPI all-reduce, then apply only to home atoms.
+ * Since ForceWithVirial is not communicated by dd_move_f, home forces are
+ * applied directly and non-home (halo) forces are exchanged via sparse
+ * indexed communication (allgatherv pattern). Falls back to dense allreduce
+ * for small systems (N_total_mta < 1000).
  *
  * **Shift convention**: GROMACS shifts atom I (first):
  * d = x[I]+shift - x[J]. Metatensor convention: r_ij = x[J] + cell_shift*box
@@ -115,14 +117,16 @@ private:
     //! Gather atom positions for MTA input (local only, no MPI).
     void gatherAtomPositions(ArrayRef<const RVec> positions);
 
-    /*! \brief Exchange backward-direction pairs via the GROMACS pairlist.
+    /*! \brief Exchange backward-direction pairs via ring-based MPI_Sendrecv.
      *
      * In GROMACS DD, the excluded pairlist assigns each pair to exactly one
      * rank (the rank whose home atom is the i-atom). For newton mode, each
      * rank needs ALL pairs involving its home atoms, including those assigned
      * to other ranks. This method discovers those missing pairs by
-     * allreducing a global pair existence table, then adds them to
-     * backwardPairsMta_ with shifts recomputed from local positions.
+     * circulating packed (globalI, globalJ) pair buffers in P-1 ring rounds,
+     * then adds them to backwardPairsMta_ with shifts recomputed from local
+     * positions. Complexity: O(total_pairs) communication, O(max_pairs/rank)
+     * memory — replaces the previous O(N²) pair table allreduce.
      *
      * Must be called after exchangeBackwardGhosts() (so all atom positions
      * are available) and before the NL building loop.
@@ -158,6 +162,12 @@ private:
      */
     int32_t exchangeBackwardGhosts(const gmx_domdec_t* dd, const matrix box, double cutoff);
 
+    //! Distribute non-home forces via sparse indexed exchange (allgatherv pattern).
+    //! Home forces are applied directly; only halo forces are communicated.
+    //! \param[in] forces   Flat force array [numLocalMta_ * 3], row-major (fx,fy,fz).
+    //! \param[out] outputs Force provider output to accumulate into.
+    void distributeNonHomeForces(const double* forces, ForceProviderOutput* outputs);
+
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
     const MpiComm&          mpiComm_;
@@ -186,10 +196,10 @@ private:
     //! Initialized to -1 for non-MTA atoms.
     std::vector<int32_t> gmxLocalToMtaIdx_;
 
-    //! Global force buffer [N_total_mta] for MPI all-reduce of forces.
-    //! Each rank scatters its local forces here, all-reduce sums them,
-    //! then home forces are read back.
-    std::vector<RVec> globalForceBuffer_;
+    //! Maps global MTA index -> local home model index (only home atoms).
+    //! Built in gatherAtomNumbersIndices(), used by distributeNonHomeForces()
+    //! to identify incoming forces destined for this rank's home atoms.
+    std::unordered_map<int32_t, int32_t> globalMtaToLocalHome_;
 
     //! Pairlist in MTA model indices, flat [i0,j0, i1,j1, ...].
     //! Built from GROMACS excludedPairlist_ with negated cell shifts.

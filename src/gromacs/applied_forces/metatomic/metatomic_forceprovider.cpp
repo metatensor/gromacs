@@ -42,8 +42,10 @@
  * pair_metatomic).
  *
  * Common design points:
- *  - Forces: all-reduce on a global buffer because ForceWithVirial is not
- *    communicated by dd_move_f.  Only home atom forces are applied.
+ *  - Forces: home forces applied directly; non-home forces exchanged via
+ *    sparse indexed communication.  ForceWithVirial is not communicated
+ *    by dd_move_f, so we handle it ourselves.  Dense allreduce fallback
+ *    for small systems (N_total < 1000).
  *  - Ghost deduplication: periodic ghost images share the same model index
  *    but all GROMACS local indices are mapped via gmxLocalToMtaIdx_.
  *
@@ -59,7 +61,6 @@
 #include <cstdio>
 
 #include <algorithm>
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -316,11 +317,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     data_->evaluations_options->outputs.insert(energy_key, requested_output);
     data_->check_consistency = options_.params_.checkConsistency;
 
-    // Allocate global force buffer sized to total MTA atoms
-    const auto&   mtaIndices = options_.params_.mtaIndices_;
-    const int32_t n_total    = static_cast<int32_t>(mtaIndices.size());
-    globalForceBuffer_.resize(n_total, RVec({ 0.0, 0.0, 0.0 }));
-
     GMX_LOG(logger_.info)
             .asParagraph()
             .appendText("MetatomicForceProvider initialization complete.");
@@ -349,6 +345,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     mtaToGlobalMta_.clear();
     atomNumbers_.clear();
     gmxLocalToMtaIdx_.clear();
+    globalMtaToLocalHome_.clear();
 
     if (mpiComm_.isParallel())
     {
@@ -502,6 +499,14 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             atomNumbers_[i]         = options_.params_.atoms_.atom[globalIdx].atomnumber;
             gmxLocalToMtaIdx_[localIndex] = i;
         }
+    }
+
+    // Build reverse map: global MTA index -> local home model index.
+    // Used by sparse force distribution to route incoming forces to home atoms.
+    globalMtaToLocalHome_.reserve(numHomeMta_);
+    for (int32_t i = 0; i < numHomeMta_; i++)
+    {
+        globalMtaToLocalHome_[mtaToGlobalMta_[i]] = i;
     }
 
     GMX_RELEASE_ASSERT(std::count(atomNumbers_.begin(), atomNumbers_.end(), 0) == 0,
@@ -715,56 +720,82 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
         return;
     }
 
-    const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
-
-    // Step 1: Build global pair existence table via allreduce.
-    // pairTable[gI * numTotalMta + gJ] = 1 if any rank has pair (gI, gJ).
-    // After sumReduce, entries > 0 indicate pairs that exist somewhere.
-    std::vector<int> pairTable(numTotalMta * numTotalMta, 0);
     const int nMyPairs = static_cast<int>(pairlistMta_.size() / 2);
+
+    // Step 1: Pack local pairs as flat (globalI, globalJ) buffer.
+    std::vector<int> myPairsBuf(2 * nMyPairs);
     for (int k = 0; k < nMyPairs; k++)
     {
-        const int32_t gI = mtaToGlobalMta_[pairlistMta_[2 * k]];
-        const int32_t gJ = mtaToGlobalMta_[pairlistMta_[2 * k + 1]];
-        pairTable[gI * numTotalMta + gJ] = 1;
+        myPairsBuf[2 * k]     = mtaToGlobalMta_[pairlistMta_[2 * k]];
+        myPairsBuf[2 * k + 1] = mtaToGlobalMta_[pairlistMta_[2 * k + 1]];
     }
-    mpiComm_.sumReduce(static_cast<std::size_t>(numTotalMta * numTotalMta),
-                       pairTable.data());
 
-    // Step 2: Build set of my home atoms and existing canonical pairs.
+    // Step 2: Build set of my home atoms.
     std::unordered_set<int32_t> myHomeGlobalMta;
     for (int32_t i = 0; i < numHomeMta_; i++)
     {
         myHomeGlobalMta.insert(mtaToGlobalMta_[i]);
     }
 
-    // Canonical pair set {min(gI,gJ), max(gI,gJ)} to avoid half-list duplication.
-    std::set<std::pair<int32_t, int32_t>> existingCanonical;
+    // Step 3: Existing canonical pairs — O(1) lookup via hashed set.
+    struct PairHash
+    {
+        std::size_t operator()(const std::pair<int32_t, int32_t>& p) const
+        {
+            // Combine the two 32-bit ints into one 64-bit value for a perfect hash.
+            return std::hash<int64_t>()(static_cast<int64_t>(p.first) << 32
+                                        | static_cast<uint32_t>(p.second));
+        }
+    };
+    std::unordered_set<std::pair<int32_t, int32_t>, PairHash> existingCanonical;
+    existingCanonical.reserve(nMyPairs);
     for (int k = 0; k < nMyPairs; k++)
     {
-        const int32_t gI = mtaToGlobalMta_[pairlistMta_[2 * k]];
-        const int32_t gJ = mtaToGlobalMta_[pairlistMta_[2 * k + 1]];
+        const int32_t gI = myPairsBuf[2 * k];
+        const int32_t gJ = myPairsBuf[2 * k + 1];
         existingCanonical.insert({ std::min(gI, gJ), std::max(gI, gJ) });
     }
 
-    // Step 3: Build global MTA → local index mapping.
+    // Step 4: Global MTA → local index mapping.
     std::unordered_map<int32_t, int32_t> globalToLocal;
+    globalToLocal.reserve(numLocalMta_);
     for (int32_t i = 0; i < numLocalMta_; i++)
     {
         globalToLocal[mtaToGlobalMta_[i]] = i;
     }
 
-    // Step 4: Find pairs I need but don't have.
-    for (int32_t gI = 0; gI < numTotalMta; gI++)
-    {
-        for (int32_t gJ = 0; gJ < numTotalMta; gJ++)
-        {
-            if (pairTable[gI * numTotalMta + gJ] == 0)
-            {
-                continue;
-            }
+    // Step 5: Ring exchange — P-1 rounds of MPI_Sendrecv.
+    // Each round: send our pairs to rank+1, receive from rank-1.
+    // Scan received pairs for those involving our home atoms.
+    const int numRanks = mpiComm_.size();
+    const int myRank   = mpiComm_.rank();
+    const int sendTo   = (myRank + 1) % numRanks;
+    const int recvFrom = (myRank - 1 + numRanks) % numRanks;
 
-            // Pair must involve one of my home atoms.
+    std::vector<int> sendBuf = myPairsBuf;
+    std::vector<int> recvBuf;
+
+    for (int round = 0; round < numRanks - 1; round++)
+    {
+        // Exchange counts first so receiver knows buffer size.
+        int sendCount = static_cast<int>(sendBuf.size());
+        int recvCount = 0;
+        MPI_Sendrecv(&sendCount, 1, MPI_INT, sendTo, 0,
+                     &recvCount, 1, MPI_INT, recvFrom, 0,
+                     mpiComm_.comm(), MPI_STATUS_IGNORE);
+
+        recvBuf.resize(recvCount);
+        MPI_Sendrecv(sendBuf.data(), sendCount, MPI_INT, sendTo, 1,
+                     recvBuf.data(), recvCount, MPI_INT, recvFrom, 1,
+                     mpiComm_.comm(), MPI_STATUS_IGNORE);
+
+        // Scan received pairs for those involving our home atoms.
+        const int nRecvPairs = recvCount / 2;
+        for (int k = 0; k < nRecvPairs; k++)
+        {
+            const int32_t gI = recvBuf[2 * k];
+            const int32_t gJ = recvBuf[2 * k + 1];
+
             const bool iIsMyHome = myHomeGlobalMta.count(gI) > 0;
             const bool jIsMyHome = myHomeGlobalMta.count(gJ) > 0;
             if (!iIsMyHome && !jIsMyHome)
@@ -772,7 +803,6 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
                 continue;
             }
 
-            // Skip if I already have this pair (in either direction).
             auto canonical = std::make_pair(std::min(gI, gJ), std::max(gI, gJ));
             if (existingCanonical.count(canonical) > 0)
             {
@@ -811,6 +841,9 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
             backwardShiftsMta_.push_back(shift);
             existingCanonical.insert(canonical);
         }
+
+        // Forward received buffer for the next round.
+        sendBuf.swap(recvBuf);
     }
 
     if (data_->debugEnabled)
@@ -821,7 +854,7 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
         if (fp)
         {
             std::fprintf(fp,
-                         "exchangeBackwardPairs: added %zu pairs "
+                         "exchangeBackwardPairs(ring): added %zu pairs "
                          "(pairlist=%d, total=%zu)\n",
                          backwardPairsMta_.size() / 2,
                          nMyPairs,
@@ -832,11 +865,113 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box)
 }
 
 
+void MetatomicForceProvider::distributeNonHomeForces(const double*        forces,
+                                                     ForceProviderOutput* outputs)
+{
+    const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
+
+    // For small systems, dense allreduce has lower latency than the
+    // sparse exchange (gather counts + allgatherv).
+    constexpr int32_t sparseThreshold = 1000;
+
+    if (numTotalMta < sparseThreshold)
+    {
+        // Dense fallback: allocate N_total buffer, scatter, allreduce, readback.
+        std::vector<double> denseForces(3 * numTotalMta, 0.0);
+        for (int32_t i = 0; i < numLocalMta_; i++)
+        {
+            int32_t g = mtaToGlobalMta_[i];
+            denseForces[3 * g]     = forces[3 * i];
+            denseForces[3 * g + 1] = forces[3 * i + 1];
+            denseForces[3 * g + 2] = forces[3 * i + 2];
+        }
+        mpiComm_.sumReduce(static_cast<std::size_t>(3 * numTotalMta), denseForces.data());
+
+        for (int32_t i = 0; i < numHomeMta_; i++)
+        {
+            int32_t gmxIdx = mtaToGmxLocal_[i];
+            int32_t g      = mtaToGlobalMta_[i];
+            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(denseForces[3 * g]);
+            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(denseForces[3 * g + 1]);
+            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(denseForces[3 * g + 2]);
+        }
+        return;
+    }
+
+    // Sparse path: apply home forces directly, exchange only non-home forces.
+
+    // Step 1: Apply home atom forces directly (no communication needed).
+    for (int32_t i = 0; i < numHomeMta_; i++)
+    {
+        int32_t gmxIdx = mtaToGmxLocal_[i];
+        outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forces[3 * i]);
+        outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forces[3 * i + 1]);
+        outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forces[3 * i + 2]);
+    }
+
+    // Step 2: Pack non-home forces as sparse tuples (globalMtaIdx, fx, fy, fz).
+    // Each tuple is 4 doubles: [globalMtaIdx_as_double, fx, fy, fz].
+    const int32_t numNonHome = numLocalMta_ - numHomeMta_;
+    std::vector<double> sendBuf(4 * numNonHome);
+    for (int32_t i = numHomeMta_; i < numLocalMta_; i++)
+    {
+        int32_t k = i - numHomeMta_;
+        sendBuf[4 * k]     = static_cast<double>(mtaToGlobalMta_[i]);
+        sendBuf[4 * k + 1] = forces[3 * i];
+        sendBuf[4 * k + 2] = forces[3 * i + 1];
+        sendBuf[4 * k + 3] = forces[3 * i + 2];
+    }
+
+    // Step 3: Exchange counts via allreduce on a P-element array.
+    const int numRanks = mpiComm_.size();
+    std::vector<int> counts(numRanks, 0);
+    counts[mpiComm_.rank()] = numNonHome;
+    mpiComm_.sumReduce(ArrayRef<int>(counts));
+
+    // Step 4: Allgatherv via Gatherv + Bcast (thread-MPI compatible).
+    int totalNonHome = 0;
+    std::vector<int> displs(numRanks);
+    for (int r = 0; r < numRanks; r++)
+    {
+        displs[r] = totalNonHome;
+        totalNonHome += counts[r];
+    }
+
+    // Scale counts/displs to doubles (4 per tuple)
+    std::vector<int> dcounts(numRanks), ddispls(numRanks);
+    for (int r = 0; r < numRanks; r++)
+    {
+        dcounts[r] = 4 * counts[r];
+        ddispls[r] = 4 * displs[r];
+    }
+
+    std::vector<double> recvBuf(4 * totalNonHome);
+    MPI_Gatherv(sendBuf.data(), 4 * numNonHome, MPI_DOUBLE,
+                recvBuf.data(), dcounts.data(), ddispls.data(), MPI_DOUBLE,
+                mpiComm_.mainRank(), mpiComm_.comm());
+    MPI_Bcast(recvBuf.data(), 4 * totalNonHome, MPI_DOUBLE,
+              mpiComm_.mainRank(), mpiComm_.comm());
+
+    // Step 5: Scan received tuples for forces destined for our home atoms.
+    for (int t = 0; t < totalNonHome; t++)
+    {
+        int32_t globalMtaIdx = static_cast<int32_t>(recvBuf[4 * t]);
+        auto    it           = globalMtaToLocalHome_.find(globalMtaIdx);
+        if (it != globalMtaToLocalHome_.end())
+        {
+            int32_t localHomeIdx = it->second;
+            int32_t gmxIdx       = mtaToGmxLocal_[localHomeIdx];
+            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(recvBuf[4 * t + 1]);
+            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(recvBuf[4 * t + 2]);
+            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(recvBuf[4 * t + 3]);
+        }
+    }
+}
+
+
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
     MetatomicTimer totalTimer("calculateForces", mpiComm_);
-
-    const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
 
     // Fill local positions (no MPI communication)
     {
@@ -1164,41 +1299,16 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         toCPUTimer.stop();
     }
 
-    // Force distribution via all-reduce.
-    // backward() produces forces on ALL local atoms (home + halo).  Since
-    // ForceWithVirial forces are NOT communicated by dd_move_f (which only
-    // handles ForceWithShiftForces), we must all-reduce ourselves.  Each rank
-    // scatters its local forces into a global buffer indexed by global MTA
-    // index.  After all-reduce, each rank reads back only its home atoms.
+    // Force distribution: home forces applied directly, non-home forces
+    // exchanged via sparse indexed communication (or dense fallback for
+    // small systems). ForceWithVirial is NOT communicated by dd_move_f.
     MetatomicTimer forceScatterTimer("forceScatter", mpiComm_);
 
-    auto forceAccessor = forceTensor.accessor<double, 2>();
+    const double* forceData = forceTensor.data_ptr<double>();
 
     if (mpiComm_.isParallel())
     {
-        globalForceBuffer_.resize(numTotalMta);
-        std::fill(globalForceBuffer_.begin(), globalForceBuffer_.end(), RVec({ 0.0, 0.0, 0.0 }));
-
-        // Scatter local forces into the global buffer.
-        for (int32_t i = 0; i < numLocalMta_; i++)
-        {
-            int32_t globalMtaIdx                = mtaToGlobalMta_[i];
-            globalForceBuffer_[globalMtaIdx][0] = static_cast<real>(forceAccessor[i][0]);
-            globalForceBuffer_[globalMtaIdx][1] = static_cast<real>(forceAccessor[i][1]);
-            globalForceBuffer_[globalMtaIdx][2] = static_cast<real>(forceAccessor[i][2]);
-        }
-
-        mpiComm_.sumReduce(3 * numTotalMta, globalForceBuffer_.data()->as_vec());
-
-        // Apply forces only to home MTA atoms from the reduced buffer
-        for (int32_t i = 0; i < numHomeMta_; i++)
-        {
-            int32_t gmxIdx       = mtaToGmxLocal_[i];
-            int32_t globalMtaIdx = mtaToGlobalMta_[i];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += globalForceBuffer_[globalMtaIdx][0];
-            outputs->forceWithVirial_.force_[gmxIdx][1] += globalForceBuffer_[globalMtaIdx][1];
-            outputs->forceWithVirial_.force_[gmxIdx][2] += globalForceBuffer_[globalMtaIdx][2];
-        }
+        distributeNonHomeForces(forceData, outputs);
     }
     else
     {
@@ -1206,9 +1316,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         for (int32_t i = 0; i < numLocalMta_; i++)
         {
             int32_t gmxIdx = mtaToGmxLocal_[i];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceAccessor[i][0]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceAccessor[i][1]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceAccessor[i][2]);
+            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceData[3 * i]);
+            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceData[3 * i + 1]);
+            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceData[3 * i + 2]);
         }
     }
 
