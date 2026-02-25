@@ -90,7 +90,7 @@ class MetatomicGpuForceProvider
 public:
     /*! \brief Construct GPU metatomic force provider.
      *
-     * \param[in] params               Model parameters (path, device, variant, nlMode)
+     * \param[in] params               Model parameters (path, device, variant)
      * \param[in] logger               Logger for status messages
      * \param[in] deviceContext         GPU device context
      * \param[in] deviceStream          GPU stream for kernels

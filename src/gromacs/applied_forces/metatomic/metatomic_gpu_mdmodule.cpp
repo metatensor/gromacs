@@ -199,7 +199,6 @@ public:
         params.extensionsDirectory = extensionsDir_;
         params.variant             = variant_;
         params.device              = "cuda";
-        params.nlMode              = "full";
         params.inputGroup          = inputGroup_;
         return params;
     }

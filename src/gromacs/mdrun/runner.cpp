@@ -1985,7 +1985,6 @@ int Mdrunner::mdrunner()
             MetatomicParameters metatomicGpuParams;
             metatomicGpuParams.active = true;
             metatomicGpuParams.device = "cuda";
-            metatomicGpuParams.nlMode = "full";
 
             // Read model path: env var overrides MDP/KVT
             const char* modelPathEnv = getenv("GMX_METATOMIC_MODEL_PATH");
