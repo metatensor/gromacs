@@ -40,7 +40,8 @@
  *
  * Single-rank: forces via GpuForceReduction (pure GPU path, no D2H copies).
  * Domain decomposition: GPU model evaluation + CPU-side sparse force exchange.
- * Uses the "pairlist" DD mode from the CPU metatomic path.
+ * GPU-resident (zero-copy) path is single-rank only; DD mode uses CPU force
+ * distribution via distributeNonHomeForces.
  *
  * \ingroup module_applied_forces
  */
@@ -268,9 +269,11 @@ MetatomicGpuForceProvider::Impl::Impl(const MetatomicParameters& params,
     capabilities_ = model_.run_method("capabilities")
                              .toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
 
-    // Determine CUDA device
+    // Determine CUDA device and verify it matches the GROMACS DeviceContext
     int cudaDevice = 0;
     cudaGetDevice(&cudaDevice);
+    GMX_RELEASE_ASSERT(deviceContext_.deviceInfo().id == cudaDevice,
+                       "GROMACS DeviceContext and CUDA current device disagree");
     device_ = torch::Device(torch::kCUDA, cudaDevice);
 
     // Set GROMACS CUDA stream as LibTorch's current stream to avoid inter-stream sync
@@ -734,6 +737,18 @@ void MetatomicGpuForceProvider::Impl::calculateForces(DeviceBuffer<RVec>    d_x,
                 cA[0][0], cA[1][1], cA[2][2]);
     }
 
+    // In debug mode, checksum a sample of the raw coordinate buffer before
+    // model evaluation to verify the assumption that d_x is stable (not mutated
+    // by another stream) during the metatomic call.
+    torch::Tensor coordChecksumPre;
+    if (debugEnabled_)
+    {
+        auto rawCoords = torch::from_blob(static_cast<void*>(d_x),
+                                           { static_cast<int64_t>(modelNumAtoms), 3 },
+                                           coordOptions);
+        coordChecksumPre = rawCoords.sum().detach().clone();
+    }
+
     // Forward pass
     metatensor_torch::TensorMap outputMap;
     try
@@ -768,6 +783,19 @@ void MetatomicGpuForceProvider::Impl::calculateForces(DeviceBuffer<RVec>    d_x,
     positions.mutable_grad() = torch::Tensor();
     strain.mutable_grad()    = torch::Tensor();
     energyTensor.backward(-torch::ones_like(energyTensor));
+
+    // Verify coordinate buffer was not mutated during model evaluation
+    if (debugEnabled_ && coordChecksumPre.defined())
+    {
+        auto rawCoords = torch::from_blob(static_cast<void*>(d_x),
+                                           { static_cast<int64_t>(modelNumAtoms), 3 },
+                                           coordOptions);
+        auto coordChecksumPost = rawCoords.sum();
+        auto diff = (coordChecksumPost - coordChecksumPre).abs().item<float>();
+        GMX_RELEASE_ASSERT(diff < 1e-6f,
+                           "Coordinate buffer d_x was mutated during metatomic model evaluation. "
+                           "This indicates a stream synchronization or aliasing bug.");
+    }
 
     // Forces = position gradients (already negated by backward with -1)
     auto forces = positions.grad(); // [modelNumAtoms, 3] on CUDA

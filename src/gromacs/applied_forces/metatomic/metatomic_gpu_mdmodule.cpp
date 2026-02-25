@@ -289,11 +289,15 @@ public:
                     }
                 });
 
-        // Register model cutoff for pairlist range (same pattern as CPU module)
+        // Register model cutoff for pairlist range.
+        // For Newton mode DD, the registered range must be
+        // interaction_range + max_nl_cutoff so that halo atoms have
+        // complete neighbor lists within the DD communication zone.
         notifiers->simulationSetupNotifier_.subscribe(
                 [this](PlainPairlistRanges* ranges)
                 {
-                    double maxCutoff = 0.0;
+                    double interactionRange = 0.0;
+                    double maxNlCutoff      = 0.0;
                     try
                     {
                         auto model = metatomic_torch::load_atomistic_model(options_.modelPath());
@@ -302,13 +306,13 @@ public:
                         double range = caps->engine_interaction_range("nm");
                         if (range > 0.0 && std::isfinite(range))
                         {
-                            maxCutoff = range;
+                            interactionRange = range;
                         }
                         auto nlRequests = model.run_method("requested_neighbor_lists");
                         for (const auto& req : nlRequests.toList())
                         {
                             auto nlOpt = req.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
-                            maxCutoff  = std::max(maxCutoff, nlOpt->engine_cutoff("nm"));
+                            maxNlCutoff = std::max(maxNlCutoff, nlOpt->engine_cutoff("nm"));
                         }
                     }
                     catch (const std::exception& e)
@@ -317,12 +321,17 @@ public:
                                 "Failed to read cutoff from GPU metatomic model: " + std::string(e.what())));
                     }
 
-                    if (maxCutoff <= 0.0 || !std::isfinite(maxCutoff))
+                    // Use the sum: halo atoms at distance interaction_range
+                    // from a home atom must themselves have complete NLs
+                    // (cutoff radius maxNlCutoff). For single-rank this is
+                    // conservative but harmless.
+                    double totalRange = interactionRange + maxNlCutoff;
+                    if (totalRange <= 0.0 || !std::isfinite(totalRange))
                     {
                         GMX_THROW(InconsistentInputError(
                                 "Metatomic GPU model cutoff is invalid."));
                     }
-                    ranges->addRange(maxCutoff);
+                    ranges->addRange(totalRange);
                 });
 
         // Request "Metatomic Potential" energy term in .edr output

@@ -76,7 +76,8 @@ void MetatomicGpuForceProvider::calculateForces(DeviceBuffer<RVec> /*d_x*/,
                                                 const GpuPairlist* /*gpuPairlist*/,
                                                 DeviceBuffer<int> /*d_atomIndex*/,
                                                 const NBAtomDataGpu* /*nbAtomData*/,
-                                                bool /*isNsStep*/)
+                                                bool /*isNsStep*/,
+                                                GpuEventSynchronizer* /*xReadyOnDevice*/)
 {
 }
 
