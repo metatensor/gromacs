@@ -1,7 +1,7 @@
 name: Comment benchmark results
 on:
   workflow_run:
-    workflows: ["Benchmark PR"]
+    workflows: ["Benchmark PR", "GPU Benchmark PR"] 
     types: [completed]
 
 jobs:
@@ -31,4 +31,5 @@ jobs:
           auto-draft-on-regression: "false"
           label-before: base
           label-after: pr
-          runner-info: ubuntu-24.04
+          # Dynamically set the comment title based on which workflow triggered it
+          runner-info: ${{ github.event.workflow_run.name == 'GPU Benchmark PR' && 'self-hosted-cuda' || 'ubuntu-24.04' }}
