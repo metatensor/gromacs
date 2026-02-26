@@ -1996,7 +1996,7 @@ int Mdrunner::mdrunner()
             {
                 const auto& afSection = (*inputrec->params)["applied-forces"].asObject();
                 // Try GPU-specific model path first, then fall back to CPU metatomic path
-                for (const std::string& sectionName : { "metatomic-gpu", "metatomic" })
+                for (const auto& sectionName : { std::string("metatomic-gpu"), std::string("metatomic") })
                 {
                     if (afSection.keyExists(sectionName))
                     {
