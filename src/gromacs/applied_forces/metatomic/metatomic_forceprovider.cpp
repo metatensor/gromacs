@@ -1353,8 +1353,18 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             fromBlobTimer.stop();
 
             MetatomicTimer labelsTimer("makeSampleLabels", mpiComm_);
-            auto neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-                    data_->nlSampleNames, samples_tensor);
+            metatensor_torch::Labels neighbor_samples;
+            if (data_->check_consistency)
+            {
+                neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                        data_->nlSampleNames, samples_tensor);
+            }
+            else
+            {
+                neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                        data_->nlSampleNames, samples_tensor,
+                        metatensor::assume_unique{});
+            }
             labelsTimer.stop();
 
             MetatomicTimer blockTimer("makeTensorBlock", mpiComm_);
