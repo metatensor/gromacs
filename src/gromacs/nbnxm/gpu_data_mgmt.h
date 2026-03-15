@@ -157,6 +157,17 @@ NBAtomDataGpu* gpuGetNBAtomData(NbnxmGpu gmx_unused* nb) GPU_FUNC_TERM_WITH_RETU
 GPU_FUNC_QUALIFIER
 DeviceBuffer<RVec> gpu_get_f(NbnxmGpu gmx_unused* nb) GPU_FUNC_TERM_WITH_RETURN(DeviceBuffer<RVec>{});
 
+/** Returns pointer to the GPU pairlist for the given locality. */
+GPU_FUNC_QUALIFIER
+const GpuPairlist* gpuGetPairlist(const NbnxmGpu gmx_unused* nb,
+                                  InteractionLocality gmx_unused iloc)
+        GPU_FUNC_TERM_WITH_RETURN(nullptr);
+
+/** Returns DeviceBuffer of the nbnxm-to-natural atom index mapping. */
+GPU_FUNC_QUALIFIER
+DeviceBuffer<int> gpuGetAtomIndex(const NbnxmGpu gmx_unused* nb)
+        GPU_FUNC_TERM_WITH_RETURN(DeviceBuffer<int>{});
+
 /*! \brief Calculates working memory required for exclusive sum, used in neighbour list sorting on GPU.
  *
  * This is only used for CUDA/HIP, where the actual size is calculate based on the list.

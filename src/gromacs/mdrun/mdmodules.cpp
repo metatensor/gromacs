@@ -44,6 +44,7 @@
 #include "gromacs/applied_forces/colvars/colvarsMDModule.h"
 #include "gromacs/applied_forces/densityfitting/densityfitting.h"
 #include "gromacs/applied_forces/electricfield.h"
+#include "gromacs/applied_forces/metatomic/metatomic_gpu_mdmodule.h"
 #include "gromacs/applied_forces/metatomic/metatomic_mdmodule.h"
 #include "gromacs/applied_forces/nnpot/nnpot.h"
 #include "gromacs/applied_forces/plumed/plumedMDModule.h"
@@ -88,6 +89,7 @@ public:
         modules_[std::string(NNPotModuleInfo::sc_name)]     = NNPotModuleInfo::create();
         modules_[std::string(FmmModuleInfo::sc_name)]       = FmmModuleInfo::create();
         modules_[std::string(MetatomicModuleInfo::sc_name)] = MetatomicModuleInfo::create();
+        modules_[std::string(MetatomicGpuModuleInfo::sc_name)] = MetatomicGpuModuleInfo::create();
     }
 
     void makeModuleOptions(Options* options) const
@@ -105,7 +107,8 @@ public:
                                              QMMMModuleInfo::sc_name,
                                              ColvarsModuleInfo::sc_name,
                                              NNPotModuleInfo::sc_name,
-                                             MetatomicModuleInfo::sc_name })
+                                             MetatomicModuleInfo::sc_name,
+                                             MetatomicGpuModuleInfo::sc_name })
         {
             IMDModule*          module            = modules_.at(std::string(moduleName)).get();
             IMdpOptionProvider* mdpOptionProvider = module->mdpOptionProvider();
@@ -171,7 +174,8 @@ void MDModules::initMdpTransform(IKeyValueTreeTransformRules* rules)
                                          QMMMModuleInfo::sc_name,
                                          ColvarsModuleInfo::sc_name,
                                          NNPotModuleInfo::sc_name,
-                                         MetatomicModuleInfo::sc_name })
+                                         MetatomicModuleInfo::sc_name,
+                                         MetatomicGpuModuleInfo::sc_name })
     {
         IMDModule*          module            = impl_->modules_.at(std::string(moduleName)).get();
         IMdpOptionProvider* mdpOptionProvider = module->mdpOptionProvider();
@@ -196,7 +200,8 @@ void MDModules::buildMdpOutput(KeyValueTreeObjectBuilder* builder)
                                          QMMMModuleInfo::sc_name,
                                          ColvarsModuleInfo::sc_name,
                                          NNPotModuleInfo::sc_name,
-                                         MetatomicModuleInfo::sc_name })
+                                         MetatomicModuleInfo::sc_name,
+                                         MetatomicGpuModuleInfo::sc_name })
     {
         IMDModule*                module = impl_->modules_.at(std::string(moduleName)).get();
         const IMdpOptionProvider* mdpOptionProvider = module->mdpOptionProvider();

@@ -70,6 +70,7 @@ class ForceProviders;
 class MdGpuGraph;
 class StatePropagatorDataGpu;
 class PmePpCommGpu;
+class MetatomicGpuForceProvider;
 class WholeMoleculeTransform;
 } // namespace gmx
 
@@ -274,6 +275,9 @@ struct t_forcerec
 
     /* For PME-PP GPU communication */
     std::unique_ptr<gmx::PmePpCommGpu> pmePpCommGpu;
+
+    /* GPU-resident metatomic force provider (pure-ML, bypasses IForceProvider) */
+    std::unique_ptr<gmx::MetatomicGpuForceProvider> metatomicGpu;
 
     /* For GPU force reduction (on both local and non-local atoms) */
     gmx::EnumerationArray<gmx::AtomLocality, std::unique_ptr<gmx::GpuForceReduction>> gpuForceReduction;

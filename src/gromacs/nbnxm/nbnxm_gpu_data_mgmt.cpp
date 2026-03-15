@@ -1764,4 +1764,16 @@ DeviceBuffer<RVec> gpu_get_f(NbnxmGpu* nb)
     return nb->atdat->f;
 }
 
+const GpuPairlist* gpuGetPairlist(const NbnxmGpu* nb, InteractionLocality iloc)
+{
+    GMX_ASSERT(nb != nullptr, "nb pointer must be valid");
+    return nb->plist[iloc].get();
+}
+
+DeviceBuffer<int> gpuGetAtomIndex(const NbnxmGpu* nb)
+{
+    GMX_ASSERT(nb != nullptr, "nb pointer must be valid");
+    return nb->atomIndices;
+}
+
 } // namespace gmx

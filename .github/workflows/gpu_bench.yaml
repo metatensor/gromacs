@@ -1,4 +1,4 @@
-name: Benchmark PR
+name: GPU Benchmark PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -7,8 +7,20 @@ on:
 
 jobs:
   benchmark:
-    runs-on: ubuntu-24.04
+    runs-on: self-hosted
+    # PRIMARY GATE: Block all forks. Only runs on branches pushed directly to the main repository.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
+      # SECONDARY GATE: Require a specific repository secret to execute.
+      - name: Authorize Execution
+        env:
+          SECURE_GATE: ${{ secrets.CUDA_RUNNER_SECRET }}
+        run: |
+          if [ -z "$SECURE_GATE" ]; then
+            echo "::error::Unauthorized: Missing required repository secret."
+            exit 1
+          fi
+
       - name: Checkout GROMACS
         uses: actions/checkout@v4
         with:
@@ -29,15 +41,15 @@ jobs:
         uses: prefix-dev/setup-pixi@v0.8.1
         with:
           manifest-path: pixi_envs/orgs/metatensor/gromacs/pixi.toml
-          environments: metatomic-cpu
+          environments: metatomic-cuda
 
       - name: Install ASV
         working-directory: pixi_envs/orgs/metatensor/gromacs
-        run: pixi run -e metatomic-cpu pip install asv
+        run: pixi run -e metatomic-cuda pip install asv
 
       - name: Initialise ASV machine
         working-directory: pixi_envs/orgs/metatensor/gromacs
-        run: pixi run -e metatomic-cpu python -m asv machine --yes
+        run: pixi run -e metatomic-cuda python -m asv machine --yes
 
       - name: Record commit SHAs
         id: shas
@@ -51,12 +63,12 @@ jobs:
         working-directory: pixi_envs/orgs/metatensor/gromacs
         run: |
           git -C ${{ github.workspace }}/gromacs checkout -f ${{ steps.shas.outputs.base }}
-          pixi run -e metatomic-cpu gromk-tmpi Release
+          pixi run -e metatomic-cuda gromk-tmpi Release
 
       - name: Generate test model (base)
         working-directory: pixi_envs/orgs/metatensor/gromacs
         run: |
-          pixi run -e metatomic-cpu python benchmarks/data/create_model.py
+          pixi run -e metatomic-cuda python benchmarks/data/create_model.py
           mv model.pt benchmarks/data/
 
       - name: Benchmark base
@@ -64,32 +76,32 @@ jobs:
         continue-on-error: true
         working-directory: pixi_envs/orgs/metatensor/gromacs
         env:
-          GMX_BIN: ${{ github.workspace }}/pixi_envs/orgs/metatensor/gromacs/.pixi/envs/metatomic-cpu/bin/gmx
+          GMX_BIN: ${{ github.workspace }}/pixi_envs/orgs/metatensor/gromacs/.pixi/envs/metatomic-cuda/bin/gmx
         run: |
-          pixi run -e metatomic-cpu python -m asv run -E existing --set-commit-hash ${{ steps.shas.outputs.base }} --record-samples --quick
+          pixi run -e metatomic-cuda python -m asv run -E existing --set-commit-hash ${{ steps.shas.outputs.base }} --record-samples --quick
 
       # -- Benchmark PR HEAD --------------------------------------------
       - name: Build GROMACS (PR)
         working-directory: pixi_envs/orgs/metatensor/gromacs
         run: |
           git -C ${{ github.workspace }}/gromacs checkout -f ${{ steps.shas.outputs.pr }}
-          pixi run -e metatomic-cpu gromk-tmpi Release
+          pixi run -e metatomic-cuda gromk-tmpi Release
 
       - name: Benchmark PR
         id: bench_pr
         continue-on-error: true
         working-directory: pixi_envs/orgs/metatensor/gromacs
         env:
-          GMX_BIN: ${{ github.workspace }}/pixi_envs/orgs/metatensor/gromacs/.pixi/envs/metatomic-cpu/bin/gmx
+          GMX_BIN: ${{ github.workspace }}/pixi_envs/orgs/metatensor/gromacs/.pixi/envs/metatomic-cuda/bin/gmx
         run: |
-          pixi run -e metatomic-cpu python -m asv run -E existing --set-commit-hash ${{ steps.shas.outputs.pr }} --record-samples --quick
+          pixi run -e metatomic-cuda python -m asv run -E existing --set-commit-hash ${{ steps.shas.outputs.pr }} --record-samples --quick
 
       # -- Compare and upload -------------------------------------------
       - name: Generate comparison
         working-directory: pixi_envs/orgs/metatensor/gromacs
         run: |
           mkdir -p results
-          pixi run -e metatomic-cpu python -m asv compare ${{ steps.shas.outputs.base }} ${{ steps.shas.outputs.pr }} > results/comparison.txt || true
+          pixi run -e metatomic-cuda python -m asv compare ${{ steps.shas.outputs.base }} ${{ steps.shas.outputs.pr }} > results/comparison.txt || true
           cat results/comparison.txt
 
       - name: Write metadata
