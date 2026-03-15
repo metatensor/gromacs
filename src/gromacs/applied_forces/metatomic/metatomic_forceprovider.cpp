@@ -1397,7 +1397,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         MetatomicTimer forwardTimer("forward", mpiComm_);
 
-        c10::Dict<c10::IValue, c10::IValue> dict_output;
+        c10::impl::GenericDict dict_output(c10::AnyType::get(), c10::AnyType::get());
         metatensor_torch::TensorMap output_map;
         try
         {
