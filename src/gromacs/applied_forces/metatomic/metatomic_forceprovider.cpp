@@ -350,9 +350,9 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     {
         auto v_energy_uq = normalize_variant(options_.params_.variantEnergyUq);
         bool has_uncertainty = false;
-        for (const auto& [key, val] : outputs)
+        for (const auto& entry : outputs)
         {
-            if (key.find("energy_uncertainty") == 0)
+            if (entry.key().find("energy_uncertainty") == 0)
             {
                 has_uncertainty = true;
                 break;
@@ -1397,22 +1397,24 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         MetatomicTimer forwardTimer("forward", mpiComm_);
 
-        c10::impl::GenericDict dict_output(c10::AnyType::get(), c10::AnyType::get());
         metatensor_torch::TensorMap output_map;
+        c10::IValue                 ivalue_output;
         try
         {
             std::vector<metatomic_torch::System> systems;
             systems.push_back(system);
 
-            auto ivalue_output = data_->model.forward(
+            ivalue_output = data_->model.forward(
                     { systems, data_->evaluations_options, data_->check_consistency });
-            dict_output = ivalue_output.toGenericDict();
+            auto dict_output = ivalue_output.toGenericDict();
             output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
         }
         catch (const std::exception& e)
         {
             GMX_THROW(APIError("[Metatomic] Model evaluation failed: " + std::string(e.what())));
         }
+        // Re-extract dict for uncertainty and NC access (auto type avoids GenericDict issues)
+        auto dict_output = ivalue_output.toGenericDict();
 
         forwardTimer.stop();
 
