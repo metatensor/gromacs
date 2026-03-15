@@ -78,6 +78,11 @@ static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
 static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
 static const std::string DEVICE_TAG               = "device";
 static const std::string VARIANT_TAG              = "variant";
+static const std::string UNCERTAINTY_THRESHOLD_TAG = "uncertainty-threshold";
+static const std::string VARIANT_ENERGY_UQ_TAG     = "variant-energy-uq";
+static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
+static const std::string VARIANT_NC_FORCES_TAG     = "variant-nc-forces";
+static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
 
 namespace
 {
@@ -141,6 +146,16 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
     addMdpTransformFromString<std::string>(rules, stringIdentityTransform, METATOMIC_MODULE_NAME, DEVICE_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, UNCERTAINTY_THRESHOLD_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_ENERGY_UQ_TAG);
+    addMdpTransformFromString<bool>(
+            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, NON_CONSERVATIVE_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG);
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -154,6 +169,11 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(StringOption(DEVICE_TAG.c_str()).store(&params_.device));
     section.addOption(BooleanOption(CHECK_CONSISTENCY_TAG.c_str()).store(&params_.checkConsistency));
     section.addOption(StringOption(VARIANT_TAG.c_str()).store(&params_.variant));
+    section.addOption(StringOption(UNCERTAINTY_THRESHOLD_TAG.c_str()).store(&params_.uncertaintyThreshold));
+    section.addOption(StringOption(VARIANT_ENERGY_UQ_TAG.c_str()).store(&params_.variantEnergyUq));
+    section.addOption(BooleanOption(NON_CONSERVATIVE_TAG.c_str()).store(&params_.nonConservative));
+    section.addOption(StringOption(VARIANT_NC_FORCES_TAG.c_str()).store(&params_.variantNcForces));
+    section.addOption(StringOption(VARIANT_NC_STRESS_TAG.c_str()).store(&params_.variantNcStress));
 }
 
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
@@ -179,6 +199,16 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
         addMdpOutputValue<bool>(
                 builder, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG, params_.checkConsistency);
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, VARIANT_TAG, params_.variant);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, UNCERTAINTY_THRESHOLD_TAG, params_.uncertaintyThreshold);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, VARIANT_ENERGY_UQ_TAG, params_.variantEnergyUq);
+        addMdpOutputValue<bool>(
+                builder, METATOMIC_MODULE_NAME, NON_CONSERVATIVE_TAG, params_.nonConservative);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG, params_.variantNcForces);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG, params_.variantNcStress);
     }
 }
 

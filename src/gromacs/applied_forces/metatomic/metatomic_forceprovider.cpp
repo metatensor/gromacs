@@ -155,6 +155,22 @@ struct MetatomicData
 
     //! Sparse/dense force exchange threshold (atom count). Env: GMX_METATOMIC_SPARSE_THRESHOLD.
     int32_t sparseThreshold = 1000;
+
+    //! Energy uncertainty output key (empty if disabled or model lacks it).
+    std::string energy_uq_key;
+    //! Requested uncertainty output (nullptr if disabled).
+    metatomic_torch::ModelOutput uncertainty_output;
+    //! Uncertainty threshold in kJ/mol. Atoms above this trigger a warning.
+    double uncertaintyThreshold = 0.0;
+
+    //! Non-conservative mode: forces/stress predicted directly, no backward pass.
+    bool nonConservative = false;
+    //! Output keys for non-conservative forces and stress.
+    std::string nc_forces_key;
+    std::string nc_stress_key;
+    //! Requested outputs for non-conservative mode.
+    metatomic_torch::ModelOutput nc_forces_output;
+    metatomic_torch::ModelOutput nc_stress_output;
 };
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
@@ -328,6 +344,121 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     data_->evaluations_options->outputs.insert(energy_key, requested_output);
     data_->check_consistency = options_.params_.checkConsistency;
+
+    // Uncertainty checking: auto-detect energy_uncertainty output from model
+    if (options_.params_.uncertaintyThreshold != "off")
+    {
+        auto v_energy_uq = normalize_variant(options_.params_.variantEnergyUq);
+        bool has_uncertainty = false;
+        for (const auto& [key, val] : outputs)
+        {
+            if (key.find("energy_uncertainty") == 0)
+            {
+                has_uncertainty = true;
+                break;
+            }
+        }
+
+        if (has_uncertainty)
+        {
+            data_->energy_uq_key = pick_output("energy_uncertainty", outputs, v_energy_uq);
+            auto uq_cap = outputs.at(data_->energy_uq_key);
+
+            if (uq_cap->per_atom)
+            {
+                data_->uncertainty_output =
+                        torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
+                data_->uncertainty_output->set_quantity("energy");
+                data_->uncertainty_output->set_unit("kJ/mol");
+                data_->uncertainty_output->per_atom = true;
+
+                if (options_.params_.uncertaintyThreshold == "auto")
+                {
+                    // Default: 100 meV/atom converted to kJ/mol
+                    data_->uncertaintyThreshold =
+                            0.1 * metatomic_torch::unit_conversion_factor("energy", "eV", "kJ/mol");
+                }
+                else
+                {
+                    data_->uncertaintyThreshold =
+                            std::stod(options_.params_.uncertaintyThreshold);
+                }
+
+                data_->evaluations_options->outputs.insert(
+                        data_->energy_uq_key, data_->uncertainty_output);
+
+                GMX_LOG(logger_.info)
+                        .asParagraph()
+                        .appendTextFormatted(
+                                "Metatomic: found '%s' output, will check for atoms with "
+                                "high uncertainty (threshold: %.4f kJ/mol)",
+                                data_->energy_uq_key.c_str(),
+                                data_->uncertaintyThreshold);
+            }
+        }
+    }
+
+    // Non-conservative mode: model predicts forces/stress directly
+    data_->nonConservative = options_.params_.nonConservative;
+    if (data_->nonConservative)
+    {
+        auto v_nc_forces = normalize_variant(options_.params_.variantNcForces);
+        auto v_nc_stress = normalize_variant(options_.params_.variantNcStress);
+
+        // Both variant overrides must match if both are set (LAMMPS convention)
+        if (v_nc_forces.has_value() && v_nc_stress.has_value()
+            && v_nc_forces.value() != v_nc_stress.value())
+        {
+            GMX_THROW(APIError(
+                    "if both 'variant-nc-forces' and 'variant-nc-stress' are present, "
+                    "they must have the same value"));
+        }
+
+        data_->nc_forces_key = pick_output("non_conservative_forces", outputs, v_nc_forces);
+        if (!outputs.contains(data_->nc_forces_key))
+        {
+            GMX_THROW(APIError(formatString(
+                    "The model does not provide '%s' output, "
+                    "we can not enable non-conservative simulations",
+                    data_->nc_forces_key.c_str())));
+        }
+        auto nc_forces_cap = outputs.at(data_->nc_forces_key);
+        if (!nc_forces_cap->per_atom)
+        {
+            GMX_THROW(APIError(formatString(
+                    "The model's '%s' output can not produce per-atom output, "
+                    "we can not enable non-conservative simulations",
+                    data_->nc_forces_key.c_str())));
+        }
+
+        data_->nc_forces_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
+        data_->nc_forces_output->set_quantity("force");
+        data_->nc_forces_output->set_unit("kJ/mol/nm");
+        data_->nc_forces_output->per_atom = true;
+
+        data_->evaluations_options->outputs.insert(
+                data_->nc_forces_key, data_->nc_forces_output);
+
+        data_->nc_stress_key = pick_output("non_conservative_stress", outputs, v_nc_stress);
+        if (outputs.contains(data_->nc_stress_key))
+        {
+            data_->nc_stress_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
+            data_->nc_stress_output->set_quantity("stress");
+            data_->nc_stress_output->set_unit("kJ/mol/nm^3");
+            data_->nc_stress_output->per_atom = false;
+
+            data_->evaluations_options->outputs.insert(
+                    data_->nc_stress_key, data_->nc_stress_output);
+        }
+
+        GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendTextFormatted(
+                        "Metatomic: non-conservative mode enabled. Forces from '%s', "
+                        "stress from '%s'",
+                        data_->nc_forces_key.c_str(),
+                        data_->nc_stress_key.c_str());
+    }
 
     GMX_LOG(logger_.info)
             .asParagraph()
@@ -1087,13 +1218,14 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { static_cast<int64_t>(numLocalMta_), 3 }, cpu_blob_options)
                                        .to(data_->device, data_->dtype)
-                                       .set_requires_grad(true);
+                                       .set_requires_grad(!data_->nonConservative);
 
         auto torch_cell =
                 torch::from_blob(&box_, { 3, 3 }, cpu_blob_options).to(data_->device, data_->dtype);
 
         auto strain = torch::eye(
-                3, torch::TensorOptions().dtype(data_->dtype).device(data_->device).requires_grad(true));
+                3, torch::TensorOptions().dtype(data_->dtype).device(data_->device)
+                           .requires_grad(!data_->nonConservative));
 
         auto strained_cell      = torch::matmul(torch_cell, strain);
         auto strained_positions = torch::matmul(torch_positions, strain);
@@ -1265,6 +1397,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         MetatomicTimer forwardTimer("forward", mpiComm_);
 
+        c10::Dict<c10::IValue, c10::IValue> dict_output;
         metatensor_torch::TensorMap output_map;
         try
         {
@@ -1273,7 +1406,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
             auto ivalue_output = data_->model.forward(
                     { systems, data_->evaluations_options, data_->check_consistency });
-            auto dict_output = ivalue_output.toGenericDict();
+            dict_output = ivalue_output.toGenericDict();
             output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
         }
         catch (const std::exception& e)
@@ -1282,6 +1415,31 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
 
         forwardTimer.stop();
+
+        // Check uncertainty if the model provides it
+        if (data_->uncertainty_output != nullptr
+            && dict_output.contains(data_->energy_uq_key))
+        {
+            auto uq_map = dict_output.at(data_->energy_uq_key)
+                                  .toCustomClass<metatensor_torch::TensorMapHolder>();
+            auto uq_block = metatensor_torch::TensorMapHolder::block_by_id(uq_map, 0);
+            auto uq_values = uq_block->values().reshape({ -1 });
+            auto atoms_above = uq_values > data_->uncertaintyThreshold;
+
+            if (torch::any(atoms_above).to(torch::kCPU).item<bool>())
+            {
+                int64_t nAbove = torch::sum(atoms_above.to(torch::kInt64))
+                                         .to(torch::kCPU).item<int64_t>();
+                GMX_LOG(logger_.warning)
+                        .asParagraph()
+                        .appendTextFormatted(
+                                "Metatomic: uncertainty on atomic energies for %ld atoms "
+                                "is larger than the threshold of %.4f kJ/mol. "
+                                "Consider retraining the model.",
+                                static_cast<long>(nAbove),
+                                data_->uncertaintyThreshold);
+            }
+        }
 
         auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
         auto energy_tensor = energy_block->values();
@@ -1316,34 +1474,97 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
         }
 
-        MetatomicTimer backwardTimer("backward", mpiComm_);
+        if (data_->nonConservative)
+        {
+            // Non-conservative: extract forces directly from model output
+            MetatomicTimer ncTimer("ncExtract", mpiComm_);
 
-        torch_positions.mutable_grad() = torch::Tensor();
-        strain.mutable_grad()          = torch::Tensor();
+            auto forces_map =
+                    dict_output.at(data_->nc_forces_key)
+                            .toCustomClass<metatensor_torch::TensorMapHolder>();
+            auto forces_block =
+                    metatensor_torch::TensorMapHolder::block_by_id(forces_map, 0);
+            forceTensor = forces_block->values().squeeze(-1)
+                                  .to(torch::kCPU).to(torch::kFloat64);
 
-        // Backpropagate through all returned per-atom energies.
-        // In parallel, output is restricted to home atoms via selected_atoms.
-        // Forces propagate to ALL local atoms (home + halo) via the NL autograd.
-        energy_tensor.backward(-torch::ones_like(energy_tensor));
+            // Virial from stress if available
+            if (data_->nc_stress_output != nullptr)
+            {
+                auto stress_map =
+                        dict_output.at(data_->nc_stress_key)
+                                .toCustomClass<metatensor_torch::TensorMapHolder>();
+                auto stress_block =
+                        metatensor_torch::TensorMapHolder::block_by_id(stress_map, 0);
+                auto stress_tensor = stress_block->values().squeeze(0).squeeze(-1);
 
-        backwardTimer.stop();
+                // Compute volume from box
+                double volume = inputs.box_[XX][XX]
+                                * (inputs.box_[YY][YY] * inputs.box_[ZZ][ZZ]
+                                   - inputs.box_[YY][ZZ] * inputs.box_[ZZ][YY])
+                                - inputs.box_[XX][YY]
+                                          * (inputs.box_[YY][XX] * inputs.box_[ZZ][ZZ]
+                                             - inputs.box_[YY][ZZ] * inputs.box_[ZZ][XX])
+                                + inputs.box_[XX][ZZ]
+                                          * (inputs.box_[YY][XX] * inputs.box_[ZZ][YY]
+                                             - inputs.box_[YY][YY] * inputs.box_[ZZ][XX]);
 
-        MetatomicTimer toCPUTimer("toCPU", mpiComm_);
+                virialTensor = (-stress_tensor * volume)
+                                       .to(torch::kCPU).to(torch::kFloat64);
+            }
+            else
+            {
+                virialTensor = torch::zeros({ 3, 3 }, torch::kFloat64);
+            }
 
-        forceTensor  = torch_positions.grad().to(torch::kCPU).to(torch::kFloat64);
-        virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
+            ncTimer.stop();
+        }
+        else
+        {
+            // Conservative: backward pass for forces and virial via autograd
+            MetatomicTimer backwardTimer("backward", mpiComm_);
 
-        toCPUTimer.stop();
+            torch_positions.mutable_grad() = torch::Tensor();
+            strain.mutable_grad()          = torch::Tensor();
+
+            // Backpropagate through all returned per-atom energies.
+            // In parallel, output is restricted to home atoms via selected_atoms.
+            // Forces propagate to ALL local atoms (home + halo) via the NL autograd.
+            energy_tensor.backward(-torch::ones_like(energy_tensor));
+
+            backwardTimer.stop();
+
+            MetatomicTimer toCPUTimer("toCPU", mpiComm_);
+
+            forceTensor  = torch_positions.grad().to(torch::kCPU).to(torch::kFloat64);
+            virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
+
+            toCPUTimer.stop();
+        }
     }
 
     // Force distribution: home forces applied directly, non-home forces
     // exchanged via sparse indexed communication (or dense fallback for
     // small systems). ForceWithVirial is NOT communicated by dd_move_f.
+    // In non-conservative mode, the model returns forces for home atoms
+    // only (via selected_atoms), so we skip halo force exchange.
     MetatomicTimer forceScatterTimer("forceScatter", mpiComm_);
 
     const double* forceData = forceTensor.data_ptr<double>();
+    const int32_t nForceAtoms = static_cast<int32_t>(forceTensor.size(0));
 
-    if (mpiComm_.isParallel())
+    if (data_->nonConservative)
+    {
+        // NC mode: forces are for home atoms only (or all atoms in serial).
+        // Apply directly, no halo exchange needed.
+        for (int32_t i = 0; i < nForceAtoms; i++)
+        {
+            int32_t gmxIdx = mtaToGmxLocal_[i];
+            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceData[3 * i]);
+            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceData[3 * i + 1]);
+            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceData[3 * i + 2]);
+        }
+    }
+    else if (mpiComm_.isParallel())
     {
         distributeNonHomeForces(forceData, outputs);
     }

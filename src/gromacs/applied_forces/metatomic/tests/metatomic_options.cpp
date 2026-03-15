@@ -103,6 +103,16 @@ public:
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-device", std::string("cpu"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant",
                                               std::string(""));
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-uncertainty-threshold",
+                                              std::string("auto"));
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant-energy-uq",
+                                              std::string(""));
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-non-conservative",
+                                              std::string("false"));
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant-nc-forces",
+                                              std::string(""));
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant-nc-stress",
+                                              std::string(""));
         return mdpValueBuilder.build();
     }
 

@@ -85,6 +85,17 @@ struct MetatomicParameters
     //! predictions
     std::string variant;
 
+    //! Uncertainty threshold: "auto" (100 meV/atom), "off", or a number in kJ/mol
+    std::string uncertaintyThreshold = "auto";
+    //! Variant override for energy_uncertainty output
+    std::string variantEnergyUq;
+
+    //! Enable non-conservative mode (forces/stress predicted directly, no backward pass)
+    bool nonConservative = false;
+    //! Variant overrides for non-conservative outputs
+    std::string variantNcForces;
+    std::string variantNcStress;
+
     // TODO: how should we translate atomic types?
 
     //! stores atom group name for which metatomic should compute the energy
