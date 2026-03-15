@@ -70,10 +70,11 @@ jobs:
         working-directory: pixi_envs/orgs/metatensor/gromacs
         run: cd mta_test && pixi run -e metatomic-cpu python create_model.py
 
-      - name: Run tests (skip dd8/dd12)
+      - name: Run tests (skip dd8/dd12/gpu)
         working-directory: pixi_envs/orgs/metatensor/gromacs
         env:
           GMX_BIN: ${{ matrix.gmx_bin }}
+          GMX_METATOMIC_DEVICE: cpu
         run: |
           pixi run -e metatomic-cpu pytest mta_test/ -v \
-            -m "not dd8 and not dd12"
+            -m "not dd8 and not dd12 and not gpu"
