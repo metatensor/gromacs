@@ -70,6 +70,7 @@
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/math/boxmatrix.h"
 #include "gromacs/mdlib/broadcaststructs.h"
+#include "gromacs/mdlib/gmx_omp_nthreads.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/mdtypes/forceoutput.h"
@@ -200,16 +201,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                      data_->sparseThreshold);
     }
 
-    // Force single-threaded PyTorch operations in all parallel runs.
-    // In thread-MPI, ranks share a process; in real MPI, each rank is a process.
-    // In both cases, GROMACS manages CPU affinity, and having PyTorch spawn its
-    // own internal thread pool (defaulting to all cores) leads to catastrophic
-    // oversubscription and context switching overhead.
-    if (mpiComm_.isParallel())
-    {
-        at::set_num_threads(1);
-    }
-
     try
     {
         torch::optional<std::string> extensions_directory = torch::nullopt;
@@ -242,6 +233,62 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     const auto deviceType =
             metatomic_torch::pick_device(data_->capabilities->supported_devices, desiredDevice);
     data_->device = torch::Device(deviceType);
+
+    // Set PyTorch intra-op thread count based on device and MPI mode.
+    // For GPU devices, CPU overhead is minimal so we keep 1 thread to avoid
+    // oversubscription with GROMACS threads.  For CPU devices, model inference
+    // (matmuls, convolutions) benefits from multi-threading.
+    if (data_->device.is_cpu())
+    {
+#if GMX_THREAD_MPI
+        // Thread-MPI: ranks share a process.  PyTorch's global thread pool
+        // would be contended by all ranks calling forward() concurrently,
+        // so keep at 1 to avoid oversubscription.
+        if (mpiComm_.isParallel())
+        {
+            at::set_num_threads(1);
+        }
+#else
+        // Real MPI (or no MPI): each rank is a separate process.
+        // Use the GROMACS-assigned OpenMP thread count so that PyTorch
+        // can parallelize matrix operations within each rank's allocation.
+        if (mpiComm_.isParallel())
+        {
+            int ntomp = gmx_omp_nthreads_get(ModuleMultiThread::Default);
+            at::set_num_threads(std::max(1, ntomp));
+        }
+        // Serial: let PyTorch use its default (all cores)
+#endif
+    }
+    else
+    {
+        // GPU/other device: model runs on accelerator, CPU work is minimal.
+        if (mpiComm_.isParallel())
+        {
+            at::set_num_threads(1);
+        }
+    }
+
+    // JIT fusion: dynamic strategy with depth limit of 10 improves CPU
+    // inference throughput (matches LAMMPS pair_metatomic).
+    torch::jit::FusionStrategy strategy = { { torch::jit::FusionBehavior::DYNAMIC, 10 } };
+    torch::jit::setFusionStrategy(strategy);
+
+    // Allow disabling graph optimization when it is counterproductive.
+    if (const char* jitEnv = std::getenv("GMX_METATOMIC_DISABLE_TORCH_JIT_OPTIMIZATION"))
+    {
+        if (std::string(jitEnv) == "1")
+        {
+            torch::jit::setGraphExecutorOptimize(false);
+            GMX_LOG(logger_.info)
+                    .asParagraph()
+                    .appendText("Metatomic TorchScript graph optimization disabled");
+        }
+    }
+
+    GMX_LOG(logger_.info)
+            .asParagraph()
+            .appendTextFormatted("Metatomic PyTorch threads: %d", at::get_num_threads());
 
     // Cache NL Labels that are constant across steps (avoids per-step
     // string vector + tensor allocation for component and properties).
