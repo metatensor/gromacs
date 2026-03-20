@@ -636,8 +636,13 @@ void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
                         }
                     }
 
-                    // If at least 2 atoms are embedded then remove interaction
-                    if (numEmbedded >= 2)
+                    // ONIOM subtractive: remove only if ALL atoms are embedded.
+                    // Boundary angles (2 ML + 1 MM) are kept in E_MM(real)
+                    // and are NOT in E_MM(model) or E_ML(model), so they are
+                    // counted exactly once.  SETTLE is still removed if >= 2
+                    // embedded atoms (water constraint within ML region).
+                    const bool allEmbedded = (numEmbedded == NRAL(ftype));
+                    if (allEmbedded || (ftype == InteractionFunction::SETTLE && numEmbedded >= 2))
                     {
                         // If this is SETTLE then replace it with two InteractionFunction::ConnectBonds
                         if (ftype == InteractionFunction::SETTLE)
@@ -748,8 +753,11 @@ void modifyEmbeddedFourCenterInteractions(gmx_mtop_t*              mtop,
                         }
                     }
 
-                    // If at least 3 atoms are embedded then remove interaction
-                    if (numEmbedded >= 3)
+                    // ONIOM subtractive: remove only if ALL 4 atoms are
+                    // embedded.  Boundary dihedrals (3 ML + 1 MM, 2 ML + 2 MM,
+                    // etc.) are kept in E_MM(real) and are NOT part of
+                    // E_MM(model) or E_ML(model), so they are counted once.
+                    if (numEmbedded == NRAL(ftype))
                     {
                         numDihedralsRemoved++;
                     }
