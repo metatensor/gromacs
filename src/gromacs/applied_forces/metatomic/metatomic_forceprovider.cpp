@@ -238,35 +238,14 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // For GPU devices, CPU overhead is minimal so we keep 1 thread to avoid
     // oversubscription with GROMACS threads.  For CPU devices, model inference
     // (matmuls, convolutions) benefits from multi-threading.
-    if (data_->device.is_cpu())
+    // Set PyTorch thread count to match GROMACS OpenMP threads.
+    // This is critical for thread-MPI builds: PyTorch's default (all cores)
+    // conflicts with thread-MPI's internal threading, causing incorrect
+    // forces and simulation blow-up.  For real MPI with multiple ranks,
+    // this also prevents oversubscription.
     {
-#if GMX_THREAD_MPI
-        // Thread-MPI: ranks share a process.  PyTorch's global thread pool
-        // would be contended by all ranks calling forward() concurrently,
-        // so keep at 1 to avoid oversubscription.
-        if (mpiComm_.isParallel())
-        {
-            at::set_num_threads(1);
-        }
-#else
-        // Real MPI (or no MPI): each rank is a separate process.
-        // Use the GROMACS-assigned OpenMP thread count so that PyTorch
-        // can parallelize matrix operations within each rank's allocation.
-        if (mpiComm_.isParallel())
-        {
-            int ntomp = gmx_omp_nthreads_get(ModuleMultiThread::Default);
-            at::set_num_threads(std::max(1, ntomp));
-        }
-        // Serial: let PyTorch use its default (all cores)
-#endif
-    }
-    else
-    {
-        // GPU/other device: model runs on accelerator, CPU work is minimal.
-        if (mpiComm_.isParallel())
-        {
-            at::set_num_threads(1);
-        }
+        int ntomp = gmx_omp_nthreads_get(ModuleMultiThread::Default);
+        at::set_num_threads(std::max(1, ntomp));
     }
 
     // JIT fusion: dynamic strategy with depth limit of 10 improves CPU
