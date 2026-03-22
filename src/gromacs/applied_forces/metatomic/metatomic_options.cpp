@@ -83,13 +83,20 @@ static const std::string VARIANT_ENERGY_UQ_TAG     = "variant-energy-uq";
 static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
 static const std::string VARIANT_NC_FORCES_TAG     = "variant-nc-forces";
 static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
+static const std::string LINK_ATOMS_TAG            = "link-atoms";
+static const std::string ELECTROSTATIC_EMBEDDING_TAG = "electrostatic-embedding";
 
 namespace
 {
 // TODO(rg): this is duplicated from the nnpotoptions
 
 //! \brief Helper function to preprocess topology for MTA
-void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, const MDLogger& logger, WarningHandler* wi)
+void preprocessTopology(gmx_mtop_t*                    mtop,
+                        ArrayRef<const Index>           mtaIndices,
+                        const MDLogger&                 logger,
+                        WarningHandler*                 wi,
+                        bool                            buildLinks,
+                        std::vector<LinkFrontierAtom>*  linkFrontierOut)
 {
     // convert mtaIndices to set for faster lookup
     std::set<int> mtaIndicesSet(mtaIndices.begin(), mtaIndices.end());
@@ -116,14 +123,23 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
     // 4) Make F_CONNBOND between atoms within QM region
     modifyEmbeddedTwoCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
 
-    // 5) Remove angles and settles containing 2 or more QM atoms
+    // 5) Remove angles and settles containing all-ML atoms (ONIOM)
     modifyEmbeddedThreeCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
 
-    // 6) Remove dihedrals containing 3 or more QM atoms
+    // 6) Remove dihedrals containing all-ML atoms (ONIOM)
     modifyEmbeddedFourCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
 
     // 7) Check for constrained bonds in subsystem
     checkConstrainedBonds(mtop, mtaIndicesSet, isMTABlock, wi);
+
+    // 8) Build link frontier atoms at ML/MM boundary bonds
+    if (buildLinks && linkFrontierOut != nullptr)
+    {
+        *linkFrontierOut = buildLinkFrontier(mtop, mtaIndicesSet, isMTABlock, logger);
+        GMX_LOG(logger.info)
+                .appendTextFormatted("Number of link frontier atoms: %zu",
+                                     linkFrontierOut->size());
+    }
 
     // finalize topology
     mtop->finalize();
@@ -156,6 +172,10 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG);
+    addMdpTransformFromString<bool>(
+            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG);
+    addMdpTransformFromString<bool>(
+            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ELECTROSTATIC_EMBEDDING_TAG);
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -174,6 +194,8 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(BooleanOption(NON_CONSERVATIVE_TAG.c_str()).store(&params_.nonConservative));
     section.addOption(StringOption(VARIANT_NC_FORCES_TAG.c_str()).store(&params_.variantNcForces));
     section.addOption(StringOption(VARIANT_NC_STRESS_TAG.c_str()).store(&params_.variantNcStress));
+    section.addOption(BooleanOption(LINK_ATOMS_TAG.c_str()).store(&params_.linkAtoms));
+    section.addOption(BooleanOption(ELECTROSTATIC_EMBEDDING_TAG.c_str()).store(&params_.electrostaticEmbedding));
 }
 
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
@@ -209,6 +231,10 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG, params_.variantNcForces);
         addMdpOutputValue<std::string>(
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG, params_.variantNcStress);
+        addMdpOutputValue<bool>(
+                builder, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG, params_.linkAtoms);
+        addMdpOutputValue<bool>(
+                builder, METATOMIC_MODULE_NAME, ELECTROSTATIC_EMBEDDING_TAG, params_.electrostaticEmbedding);
     }
 }
 
@@ -245,7 +271,29 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
     {
         return;
     }
-    preprocessTopology(top, params_.mtaIndices_, logger(), wi_);
+
+    // Collect MM charges before preprocessing (which may modify charges)
+    if (params_.electrostaticEmbedding)
+    {
+        for (const auto& molblock : top->molblock)
+        {
+            const auto& moltype = top->moltype[molblock.type];
+            for (int m = 0; m < molblock.nmol; m++)
+            {
+                for (int a = 0; a < moltype.atoms.nr; a++)
+                {
+                    params_.mmCharges_.push_back(moltype.atoms.atom[a].q);
+                }
+            }
+        }
+        GMX_LOG(logger().info)
+                .appendTextFormatted("Metatomic: collected %zu point charges for "
+                                     "electrostatic embedding",
+                                     params_.mmCharges_.size());
+    }
+
+    preprocessTopology(top, params_.mtaIndices_, logger(), wi_,
+                       params_.linkAtoms, &params_.linkFrontier_);
 }
 
 void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
