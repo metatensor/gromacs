@@ -164,6 +164,9 @@ struct MetatomicData
     //! Uncertainty threshold in kJ/mol. Atoms above this trigger a warning.
     double uncertaintyThreshold = 0.0;
 
+    //! Link frontier atoms for ONIOM link atom support.
+    std::vector<LinkFrontierAtom> linkFrontier;
+
     //! Non-conservative mode: forces/stress predicted directly, no backward pass.
     bool nonConservative = false;
     //! Output keys for non-conservative forces and stress.
@@ -484,6 +487,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                         "stress from '%s'",
                         data_->nc_forces_key.c_str(),
                         data_->nc_stress_key.c_str());
+    }
+
+    // Store link frontier from preprocessing
+    data_->linkFrontier = options_.params_.linkFrontier_;
+    if (!data_->linkFrontier.empty())
+    {
+        GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendTextFormatted("Metatomic: %zu link atoms at ML/MM boundary",
+                                     data_->linkFrontier.size());
     }
 
     GMX_LOG(logger_.info)
@@ -1153,6 +1166,43 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     copy_mat(inputs.box_, box_);
 
+    // Link atom setup: find MTA indices for link frontier atoms and
+    // overwrite boundary MM atom types to hydrogen.  The position
+    // replacement is done INSIDE the autograd graph (after torch tensor
+    // creation) so that forces are automatically correct via chain rule.
+    if (!data_->linkFrontier.empty())
+    {
+        bool needTypesRebuild = false;
+        // Build a map from GROMACS global atom index -> MTA local model index
+        // for link atom index lookups.  mtaToGmxLocal_ maps model index -> gmx
+        // local index; gmxLocalToMtaIdx_ maps gmx local -> model index.
+        // Link frontier stores GROMACS global indices, so we use gmxLocalToMtaIdx_.
+        for (auto& link : data_->linkFrontier)
+        {
+            int32_t embGmxGlobal = link.getEmbeddedIndex();
+            int32_t mmGmxGlobal  = link.getMMIndex();
+
+            // In serial mode, global == local for the first N atoms
+            int32_t embMtaIdx = (embGmxGlobal < static_cast<int32_t>(gmxLocalToMtaIdx_.size()))
+                                    ? gmxLocalToMtaIdx_[embGmxGlobal] : -1;
+            int32_t mmMtaIdx  = (mmGmxGlobal < static_cast<int32_t>(gmxLocalToMtaIdx_.size()))
+                                    ? gmxLocalToMtaIdx_[mmGmxGlobal] : -1;
+            // Always set input indices (initialize to -1 if not found)
+            link.setInputIndices(embMtaIdx, mmMtaIdx);
+            if (embMtaIdx >= 0 && mmMtaIdx >= 0)
+            {
+                atomNumbers_[mmMtaIdx] = link.linkAtomNumber();  // H = 1
+                needTypesRebuild = true;
+            }
+        }
+        if (needTypesRebuild)
+        {
+            data_->cachedTypes = torch::tensor(
+                    atomNumbers_, torch::TensorOptions().dtype(torch::kInt32))
+                    .to(data_->device);
+        }
+    }
+
     // Newton NL mode: in parallel, each rank needs ALL pairs involving its
     // home atoms (not just the ones assigned by the eighth-shell DD
     // decomposition). Uses the GROMACS pairlist as the pair source, then
@@ -1255,6 +1305,35 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         auto strained_cell      = torch::matmul(torch_cell, strain);
         auto strained_positions = torch::matmul(torch_positions, strain);
+
+        // Link atom position replacement INSIDE the autograd graph.
+        // r_link = r_emb + d_link * (r_MM - r_emb) / |r_MM - r_emb|
+        // By computing this with torch operations, autograd automatically
+        // computes dE/dr_emb and dE/dr_MM via the chain rule through r_link.
+        // No manual spreadForce redistribution needed.
+        if (!data_->linkFrontier.empty())
+        {
+            for (const auto& link : data_->linkFrontier)
+            {
+                int32_t embIdx = link.getInputIndexEmb();
+                int32_t mmIdx  = link.getInputIndexMM();
+                if (embIdx < 0 || mmIdx < 0
+                    || embIdx >= numLocalMta_ || mmIdx >= numLocalMta_)
+                {
+                    continue;
+                }
+
+                auto r_emb = strained_positions.index({embIdx});
+                auto r_mm  = strained_positions.index({mmIdx});
+                auto direction = r_mm - r_emb;
+                auto dist = direction.norm();
+                auto r_link = r_emb + link.linkDistance() * direction / dist;
+
+                // Replace boundary MM position with link atom position
+                // Using index_put_ keeps the operation in the autograd graph
+                strained_positions.index_put_({mmIdx}, r_link);
+            }
+        }
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 data_->cachedTypes, strained_positions, strained_cell, data_->cachedPbc);
@@ -1608,7 +1687,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     else
     {
-        // Serial: apply forces directly
+        // Apply forces directly. When link atoms are used, autograd has
+        // already computed the correct forces on r_emb and r_MM via the
+        // chain rule through r_link (because the link position computation
+        // is in the autograd graph). No manual spreadForce needed.
         for (int32_t i = 0; i < numLocalMta_; i++)
         {
             int32_t gmxIdx = mtaToGmxLocal_[i];
