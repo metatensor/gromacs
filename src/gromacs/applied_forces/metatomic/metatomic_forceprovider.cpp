@@ -241,11 +241,15 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // For GPU devices, CPU overhead is minimal so we keep 1 thread to avoid
     // oversubscription with GROMACS threads.  For CPU devices, model inference
     // (matmuls, convolutions) benefits from multi-threading.
-    // Set PyTorch thread count to match GROMACS OpenMP threads.
-    // This is critical for thread-MPI builds: PyTorch's default (all cores)
-    // conflicts with thread-MPI's internal threading, causing incorrect
-    // forces and simulation blow-up.  For real MPI with multiple ranks,
-    // this also prevents oversubscription.
+    // Synchronize PyTorch's thread count with GROMACS's ntomp.
+    //
+    // at::set_num_threads updates PyTorch's cached thread count AND
+    // MKL's thread pool (via mkl_set_num_threads), while GROMACS's
+    // omp_set_num_threads only updates the OpenMP ICV.  Without this
+    // call, PyTorch/MKL may retain the init-time default (all cores).
+    //
+    // For real MPI, ntomp defaults to all cores for single-rank and to
+    // the per-rank count for multi-rank, so the behavior is unchanged.
     {
         int ntomp = gmx_omp_nthreads_get(ModuleMultiThread::Default);
         at::set_num_threads(std::max(1, ntomp));
@@ -1166,10 +1170,13 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     copy_mat(inputs.box_, box_);
 
-    // Link atom setup: find MTA indices for link frontier atoms and
-    // overwrite boundary MM atom types to hydrogen.  The position
-    // replacement is done INSIDE the autograd graph (after torch tensor
-    // creation) so that forces are automatically correct via chain rule.
+    // Link atom setup: boundary MM atoms are replaced with hydrogen link
+    // atoms in the model input.  Positions are overwritten here (in C++),
+    // then recomputed inside the autograd graph (via torch ops) so that
+    // forces are automatically correct via the chain rule.
+    //
+    // The user sees this as: "N embedded atoms, M of which are link atoms
+    // (hydrogen caps at ML/MM boundary bonds)."
     if (!data_->linkFrontier.empty())
     {
         bool needTypesRebuild = false;
