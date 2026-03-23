@@ -86,7 +86,6 @@ static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
 static const std::string VARIANT_NC_FORCES_TAG     = "variant-nc-forces";
 static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
 static const std::string LINK_ATOMS_TAG            = "link-atoms";
-static const std::string ELECTROSTATIC_EMBEDDING_TAG = "electrostatic-embedding";
 
 namespace
 {
@@ -176,8 +175,6 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG);
     addMdpTransformFromString<bool>(
             rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG);
-    addMdpTransformFromString<bool>(
-            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ELECTROSTATIC_EMBEDDING_TAG);
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -197,7 +194,6 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(StringOption(VARIANT_NC_FORCES_TAG.c_str()).store(&params_.variantNcForces));
     section.addOption(StringOption(VARIANT_NC_STRESS_TAG.c_str()).store(&params_.variantNcStress));
     section.addOption(BooleanOption(LINK_ATOMS_TAG.c_str()).store(&params_.linkAtoms));
-    section.addOption(BooleanOption(ELECTROSTATIC_EMBEDDING_TAG.c_str()).store(&params_.electrostaticEmbedding));
 }
 
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
@@ -235,8 +231,6 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG, params_.variantNcStress);
         addMdpOutputValue<bool>(
                 builder, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG, params_.linkAtoms);
-        addMdpOutputValue<bool>(
-                builder, METATOMIC_MODULE_NAME, ELECTROSTATIC_EMBEDDING_TAG, params_.electrostaticEmbedding);
     }
 }
 
@@ -274,24 +268,19 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
         return;
     }
 
-    // Collect MM charges before preprocessing (which may modify charges)
-    if (params_.electrostaticEmbedding)
+    // Always collect MM charges (cheap). The force provider will pass them
+    // to the model only if the model declares point_charges in its
+    // requested_inputs (model-driven, not user-controlled).
+    for (const auto& molblock : top->molblock)
     {
-        for (const auto& molblock : top->molblock)
+        const auto& moltype = top->moltype[molblock.type];
+        for (int m = 0; m < molblock.nmol; m++)
         {
-            const auto& moltype = top->moltype[molblock.type];
-            for (int m = 0; m < molblock.nmol; m++)
+            for (int a = 0; a < moltype.atoms.nr; a++)
             {
-                for (int a = 0; a < moltype.atoms.nr; a++)
-                {
-                    params_.mmCharges_.push_back(moltype.atoms.atom[a].q);
-                }
+                params_.mmCharges_.push_back(moltype.atoms.atom[a].q);
             }
         }
-        GMX_LOG(logger().info)
-                .appendTextFormatted("Metatomic: collected %zu point charges for "
-                                     "electrostatic embedding",
-                                     params_.mmCharges_.size());
     }
 
     if (params_.linkAtoms)

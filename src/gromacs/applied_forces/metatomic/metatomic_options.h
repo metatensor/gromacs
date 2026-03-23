@@ -105,8 +105,6 @@ struct MetatomicParameters
 
     //! Enable ONIOM link atoms at cut bonds between ML and MM regions
     bool linkAtoms = false;
-    //! Enable electrostatic embedding (pass MM point charges to ML model)
-    bool electrostaticEmbedding = false;
 
     std::vector<Index>            mtaIndices_;
     std::vector<Index>            mmIndices_;
