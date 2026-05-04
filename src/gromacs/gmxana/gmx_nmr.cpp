@@ -417,12 +417,11 @@ int gmx_nmr(int argc, char* argv[])
 
     FILE /* *out     = NULL,*/ *out_disre = nullptr, *fp_pairs = nullptr, *fort = nullptr,
                                *fodt = nullptr, *foten = nullptr;
-    ener_file_t  fp;
-    int          timecheck = 0;
-    gmx_enxnm_t* enm       = nullptr;
-    t_enxframe   fr;
-    int          nre, teller, teller_disre;
-    int          nor = 0, nex = 0, norfr = 0, enx_i = 0;
+    ener_file_t fp;
+    int         timecheck = 0;
+    t_enxframe  fr;
+    int         teller, teller_disre;
+    int         nor = 0, nex = 0, norfr = 0, enx_i = 0;
     real *bounds = nullptr, *violaver = nullptr, *oobs = nullptr, *orient = nullptr, *odrms = nullptr;
     int *    index = nullptr, *pair = nullptr, norsel = 0, *orsel = nullptr, *or_label = nullptr;
     int      nbounds = 0, npairs;
@@ -431,8 +430,6 @@ int gmx_nmr(int argc, char* argv[])
     double   sumaver, sumt;
     int *    set = nullptr, i, j, k, nset, sss;
     std::vector<std::string> pairleg, odtleg, otenleg, leg;
-    const char *             anm_j, *anm_k, *resnm_j, *resnm_k;
-    int                      resnr_j, resnr_k;
     const char*              orinst_sub = "@ subtitle \"instantaneous\"\n";
     gmx_output_env_t*        oenv;
     t_enxblock*              blk_disre = nullptr;
@@ -481,9 +478,8 @@ int gmx_nmr(int argc, char* argv[])
         gmx_fatal(FARGS, "Cannot do sum of violation (-viol) and other analysis in a single call.");
     }
 
-    fp = open_enx(ftp2fn(efEDR, NFILE, fnm), "r");
-    do_enxnms(fp, &nre, &enm);
-    free_enxnms(nre, enm);
+    fp                                 = open_enx(ftp2fn(efEDR, NFILE, fnm), "r");
+    const std::vector<gmx_enxnm_t> enm = readEnxNames(fp);
 
     t_inputrec  irInstance;
     t_inputrec* ir = &irInstance;
@@ -678,16 +674,20 @@ int gmx_nmr(int argc, char* argv[])
                               ndisre,
                               ilist.size() / 3);
                 }
-                int molb = 0;
+                MTopLookUp mTopLookUp(*topInfo.mtop());
                 for (i = 0; i < ndisre; i++)
                 {
                     j = fa[3 * i + 1];
                     k = fa[3 * i + 2];
                     GMX_ASSERT(topInfo.hasTopology(), "Need to have a valid topology");
-                    mtopGetAtomAndResidueName(*topInfo.mtop(), j, &molb, &anm_j, &resnr_j, &resnm_j, nullptr);
-                    mtopGetAtomAndResidueName(*topInfo.mtop(), k, &molb, &anm_k, &resnr_k, &resnm_k, nullptr);
-                    pairleg.emplace_back(gmx::formatString(
-                            "%d %s %d %s (%d)", resnr_j, anm_j, resnr_k, anm_k, ip[fa[3 * i]].disres.label));
+                    const auto resJ = mTopLookUp.getAtomAndResidueNameAndNumber(j);
+                    const auto resK = mTopLookUp.getAtomAndResidueNameAndNumber(k);
+                    pairleg.emplace_back(gmx::formatString("%d %s %d %s (%d)",
+                                                           resJ.residueNumber,
+                                                           resJ.atomName,
+                                                           resK.residueNumber,
+                                                           resK.atomName,
+                                                           ip[fa[3 * i]].disres.label));
                 }
                 set = select_it(ndisre, pairleg, &nset);
                 for (i = 0; (i < nset); i++)

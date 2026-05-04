@@ -520,12 +520,14 @@ static void check_shells_inputrec(gmx_mtop_t* mtop, t_inputrec* ir, WarningHandl
             nshells++;
         }
     }
-    if ((nshells > 0) && (ir->nstcalcenergy != 1))
+    if ((nshells > 0) && (ir->outputControl.nstcalcenergy != 1))
     {
         wi->setFileAndLineNumber("unknown", -1);
-        std::string warningMessage = gmx::formatString(
-                "There are %d shells, changing nstcalcenergy from %d to 1", nshells, ir->nstcalcenergy);
-        ir->nstcalcenergy = 1;
+        std::string warningMessage =
+                gmx::formatString("There are %d shells, changing nstcalcenergy from %d to 1",
+                                  nshells,
+                                  ir->outputControl.nstcalcenergy);
+        ir->outputControl.nstcalcenergy = 1;
         wi->addWarning(warningMessage);
     }
 }
@@ -1402,13 +1404,15 @@ interpolate1d(double xmin, double dx, const double* ya, const double* y2a, doubl
 }
 
 
-static void setup_cmap(int gridExtent, int nc, gmx::ArrayRef<const real> grid, gmx_cmap_t* cmap_grid)
+static CmapGrids fillCmapGrids(gmx::ArrayRef<const CmapInteractionType> cmapTypes)
 {
-    int    i, j, k, ii, jj, kk, idx;
-    int    offset;
+    size_t i, j, k, ii, jj;
     double dx, xmin, v, v1, v2, v12;
     double phi, psi;
 
+    // Note that only FEP state A is used
+    const auto          gridExtents = cmapTypes[0].gridA_.asConstView().extents();
+    const size_t        gridExtent  = gridExtents.extent(0);
     std::vector<double> tmp_u(2 * gridExtent, 0.0);
     std::vector<double> tmp_u2(2 * gridExtent, 0.0);
     std::vector<double> tmp_yy(2 * gridExtent, 0.0);
@@ -1419,14 +1423,12 @@ static void setup_cmap(int gridExtent, int nc, gmx::ArrayRef<const real> grid, g
     dx   = 360.0 / gridExtent;
     xmin = -180.0 - dx * gridExtent / 2;
 
-    for (kk = 0; kk < nc; kk++)
-    {
-        /* Compute an offset depending on which cmap we are using
-         * Offset will be the map number multiplied with the
-         * gridExtent * gridExtent * 2
-         */
-        offset = kk * gridExtent * gridExtent * 2;
+    CmapGrids cmapGrids;
+    cmapGrids.reserve(cmapTypes.size());
 
+    for (const CmapInteractionType& cmapType : cmapTypes)
+    {
+        CmapGrid newGrid(gridExtents);
         for (i = 0; i < 2 * gridExtent; i++)
         {
             ii = (i + gridExtent - gridExtent / 2) % gridExtent;
@@ -1434,7 +1436,7 @@ static void setup_cmap(int gridExtent, int nc, gmx::ArrayRef<const real> grid, g
             for (j = 0; j < 2 * gridExtent; j++)
             {
                 jj                               = (j + gridExtent - gridExtent / 2) % gridExtent;
-                tmp_grid[i * gridExtent * 2 + j] = grid[offset + ii * gridExtent + jj];
+                tmp_grid[i * gridExtent * 2 + j] = cmapType.gridA_(ii, jj);
             }
         }
 
@@ -1473,31 +1475,16 @@ static void setup_cmap(int gridExtent, int nc, gmx::ArrayRef<const real> grid, g
                 spline1d(dx, tmp_y1.data(), 2 * gridExtent, tmp_u.data(), tmp_u2.data());
                 interpolate1d(xmin, dx, tmp_y1.data(), tmp_u2.data(), phi, &v2, &v12);
 
-                idx                                       = ii * gridExtent + jj;
-                cmap_grid->cmapdata[kk].cmap[idx * 4]     = grid[offset + ii * gridExtent + jj];
-                cmap_grid->cmapdata[kk].cmap[idx * 4 + 1] = v1;
-                cmap_grid->cmapdata[kk].cmap[idx * 4 + 2] = v2;
-                cmap_grid->cmapdata[kk].cmap[idx * 4 + 3] = v12;
+                newGrid(ii, jj)[0] = cmapType.gridA_(ii, jj);
+                newGrid(ii, jj)[1] = v1;
+                newGrid(ii, jj)[2] = v2;
+                newGrid(ii, jj)[3] = v12;
             }
         }
+        cmapGrids.emplace_back(std::move(newGrid));
     }
+    return cmapGrids;
 }
-
-static void init_cmap_grid(gmx_cmap_t* cmap_grid, int ngrid, int gridExtent)
-{
-    int i, nelem;
-
-    cmap_grid->gridExtent = gridExtent;
-    nelem                 = cmap_grid->gridExtent * cmap_grid->gridExtent;
-
-    cmap_grid->cmapdata.resize(ngrid);
-
-    for (i = 0; i < ngrid; i++)
-    {
-        cmap_grid->cmapdata[i].cmap.resize(4 * nelem);
-    }
-}
-
 
 static int count_constraints(const gmx_mtop_t*                        mtop,
                              gmx::ArrayRef<const MoleculeInformation> mi,
@@ -2246,8 +2233,9 @@ int gmx_grompp(int argc, char* argv[])
     gmx::MDModules mdModules;
     t_inputrec     irInstance;
     t_inputrec*    ir = &irInstance;
-    t_gromppopts   optsInstance;
-    t_gromppopts*  opts = &optsInstance;
+
+    t_gromppopts  optsInstance;
+    t_gromppopts* opts = &optsInstance;
     snew(opts->include, STRLEN);
     snew(opts->define, STRLEN);
 
@@ -2295,7 +2283,41 @@ int gmx_grompp(int argc, char* argv[])
                 .asParagraph()
                 .appendTextFormatted("checking input for internal consistency...");
     }
-    check_ir(mdparin, mdModules.notifiers(), ir, opts, &wi);
+    check_ir(mdparin, &mdModules, ir, opts, &wi);
+
+    // Sync ir->outputControl back to ir->params for TPR serialization
+    // OutputControl may have been modified during validation in check_ir(), so we need to update
+    // the key-value tree before the TPR file is written. We only update the
+    // output-control section, preserving all other module data.
+    {
+        gmx::KeyValueTreeBuilder kvtBuilder;
+
+        // Copy existing params except output-control
+        if (ir->params)
+        {
+            for (const auto& prop : ir->params->properties())
+            {
+                if (prop.key() != "output-control")
+                {
+                    kvtBuilder.rootObject().addRawValue(prop.key(), gmx::KeyValueTreeValue(prop.value()));
+                }
+            }
+        }
+
+        // Add updated output-control section with current values
+        auto outputControlObj = kvtBuilder.rootObject().addObject("output-control");
+        outputControlObj.addValue<int>("nstlog", ir->outputControl.nstlog);
+        outputControlObj.addValue<int>("nstxout", ir->outputControl.nstxout);
+        outputControlObj.addValue<int>("nstvout", ir->outputControl.nstvout);
+        outputControlObj.addValue<int>("nstfout", ir->outputControl.nstfout);
+        outputControlObj.addValue<int>("nstenergy", ir->outputControl.nstenergy);
+        outputControlObj.addValue<int>("nstxout-compressed", ir->outputControl.nstxout_compressed);
+        outputControlObj.addValue<real>("x-compression-precision", ir->outputControl.x_compression_precision);
+        outputControlObj.addValue<int>("nstcalcenergy", ir->outputControl.nstcalcenergy);
+
+        delete ir->params;
+        ir->params = new gmx::KeyValueTreeObject(kvtBuilder.build());
+    }
 
     if (ir->ld_seed == -1)
     {
@@ -2472,16 +2494,13 @@ int gmx_grompp(int argc, char* argv[])
     }
 
     /* If we are using CMAP, setup the pre-interpolation grid */
-    if (interactions[InteractionFunction::DihedralEnergyCorrectionMap].ncmap() > 0)
+    if (!interactions[InteractionFunction::DihedralEnergyCorrectionMap].cmapTypes_.empty())
     {
-        init_cmap_grid(
-                &sys.ffparams.cmap_grid,
-                interactions[InteractionFunction::DihedralEnergyCorrectionMap].numCmaps_,
-                interactions[InteractionFunction::DihedralEnergyCorrectionMap].cmapGridExtent_.value());
-        setup_cmap(interactions[InteractionFunction::DihedralEnergyCorrectionMap].cmapGridExtent_.value(),
-                   interactions[InteractionFunction::DihedralEnergyCorrectionMap].numCmaps_,
-                   interactions[InteractionFunction::DihedralEnergyCorrectionMap].cmap,
-                   &sys.ffparams.cmap_grid);
+        sys.ffparams.cmapGrids =
+                fillCmapGrids(interactions[InteractionFunction::DihedralEnergyCorrectionMap].cmapTypes_);
+        // Note that CMAP grids defined by the force field that are
+        // not used by the topology are not pruned before being
+        // written to the .tpr file. This is mildly wasteful.
     }
 
     set_wall_atomtype(&atypes, opts, ir, &wi, logger);

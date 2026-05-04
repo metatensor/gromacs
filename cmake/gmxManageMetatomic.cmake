@@ -61,9 +61,26 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
         endforeach()
     endif()
 
-    # Bring the `torch` target in scope to allow evaluation
-    # of cmake generator expression from `metatensor_torch`
-    find_package(Torch REQUIRED)
+    # Mirror gmxManageNNPot's CUDA-architectures workaround: torch unsets
+    # CMAKE_CUDA_ARCHITECTURES inside its config, so save+restore around the
+    # find_package call.
+    set(_cmake_cuda_architectures_bak "${CMAKE_CUDA_ARCHITECTURES}")
+    unset(CMAKE_CUDA_ARCHITECTURES CACHE)
+    if (NOT GMX_USE_NVTX)
+        # Stub nvToolsExt to prevent torch CMake from failing on systems
+        # without it. Same workaround as gmxManageNNPot.
+        if(NOT TARGET CUDA::nvToolsExt)
+            add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
+        endif()
+    endif()
+
+    # Bring the `torch` target in scope to allow evaluation of cmake
+    # generator expressions from `metatensor_torch`. Use QUIET (not REQUIRED)
+    # so that GMX_METATOMIC=AUTO can silently disable when torch is absent
+    # (e.g. on Windows / macOS GitHub runners). The else()/elseif() arms
+    # below honor the AUTO/TORCH distinction.
+    find_package(Torch 2.0.0 QUIET)
+    set(CMAKE_CUDA_ARCHITECTURES "${_cmake_cuda_architectures_bak}" CACHE STRING "")
     set(TORCH_ALREADY_SEARCHED TRUE CACHE BOOL "True if a search for libtorch has already been done")
     mark_as_advanced(TORCH_ALREADY_SEARCHED)
 
@@ -109,6 +126,79 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
             endif()
         endif()
 
+        ################ definition of metatensor and metatomic targets ################
+        # These are torch-dependent: only declare when Torch was found, so
+        # AUTO mode on platforms without torch leaves the build clean.
+
+        set(METATENSOR_CORE_VERSION "0.1.17")
+        set(METATENSOR_CORE_SHA256 "42119e11908239915ccc187d7ca65449b461f1d4b5af4d6df1fb613d687da76a")
+
+        set(METATENSOR_TORCH_VERSION "0.8.0")
+        set(METATENSOR_TORCH_SHA256 "61d383ce958deafe0e3916088185527680c9118588722b17ec5c39cfbaa6da55")
+
+        set(METATOMIC_TORCH_VERSION "0.1.7")
+        set(METATOMIC_TORCH_SHA256 "726f5711b70c4b8cc80d9bc6c3ce6f3449f31d20acc644ab68dab083aa4ea572")
+
+        set(DOWNLOAD_METATENSOR_DEFAULT ON)
+        find_package(metatensor_torch ${METATENSOR_TORCH_VERSION} QUIET)
+        if (metatensor_torch_FOUND)
+            set(DOWNLOAD_METATENSOR_DEFAULT OFF)
+        endif()
+
+        set(DOWNLOAD_METATOMIC_DEFAULT ON)
+        find_package(metatomic_torch ${METATOMIC_TORCH_VERSION} QUIET)
+        if (metatomic_torch_FOUND)
+            set(DOWNLOAD_METATOMIC_DEFAULT OFF)
+        endif()
+
+
+        option(DOWNLOAD_METATENSOR "Download metatensor package instead of using an already installed one" ${DOWNLOAD_METATENSOR_DEFAULT})
+        option(DOWNLOAD_METATOMIC "Download metatomic package instead of using an already installed one" ${DOWNLOAD_METATOMIC_DEFAULT})
+
+        include(FetchContent)
+
+        if (DOWNLOAD_METATENSOR)
+            set(URL_BASE "https://github.com/metatensor/metatensor/releases/download")
+            FetchContent_Declare(metatensor
+                URL ${URL_BASE}/metatensor-core-v${METATENSOR_CORE_VERSION}/metatensor-core-cxx-${METATENSOR_CORE_VERSION}.tar.gz
+                URL_HASH SHA256=${METATENSOR_CORE_SHA256}
+            )
+
+            message(STATUS "Fetching metatensor v${METATENSOR_CORE_VERSION} from github")
+            FetchContent_MakeAvailable(metatensor)
+
+            FetchContent_Declare(metatensor-torch
+                URL ${URL_BASE}/metatensor-torch-v${METATENSOR_TORCH_VERSION}/metatensor-torch-cxx-${METATENSOR_TORCH_VERSION}.tar.gz
+                URL_HASH SHA256=${METATENSOR_TORCH_SHA256}
+            )
+
+            message(STATUS "Fetching metatensor-torch v${METATENSOR_TORCH_VERSION} from github")
+            FetchContent_MakeAvailable(metatensor-torch)
+        else()
+            # make sure to fail the configuration if cmake can not find metatensor-torch
+            find_package(metatensor_torch REQUIRED ${METATENSOR_TORCH_VERSION})
+        endif()
+
+        if (DOWNLOAD_METATOMIC)
+            set(URL_BASE "https://github.com/metatensor/metatomic/releases/download")
+            FetchContent_Declare(metatomic-torch
+                URL ${URL_BASE}/metatomic-torch-v${METATOMIC_TORCH_VERSION}/metatomic-torch-cxx-${METATOMIC_TORCH_VERSION}.tar.gz
+                URL_HASH SHA256=${METATOMIC_TORCH_SHA256}
+            )
+
+            message(STATUS "Fetching metatomic-torch v${METATOMIC_TORCH_VERSION} from github")
+            FetchContent_MakeAvailable(metatomic-torch)
+        else()
+            # make sure to fail the configuration if cmake can not find metatomic-torch
+            find_package(metatomic_torch REQUIRED ${METATOMIC_TORCH_VERSION})
+        endif()
+
+        list(APPEND GMX_COMMON_LIBRARIES
+            metatensor
+            metatomic_torch
+            metatensor_torch
+        )
+
     elseif(GMX_METATOMIC STREQUAL "TORCH")
         message(FATAL_ERROR "Torch not found. Please install libtorch and add its installation prefix"
                             " to CMAKE_PREFIX_PATH or set Torch_DIR to a directory containing "
@@ -118,76 +208,5 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
             message(STATUS "Torch not found. Metatomic potential support will be disabled.")
         endif()
     endif()
-
-    ################ definition of metatensor and metatomic targets ################
-
-    set(METATENSOR_CORE_VERSION "0.1.17")
-    set(METATENSOR_CORE_SHA256 "42119e11908239915ccc187d7ca65449b461f1d4b5af4d6df1fb613d687da76a")
-
-    set(METATENSOR_TORCH_VERSION "0.8.0")
-    set(METATENSOR_TORCH_SHA256 "61d383ce958deafe0e3916088185527680c9118588722b17ec5c39cfbaa6da55")
-
-    set(METATOMIC_TORCH_VERSION "0.1.7")
-    set(METATOMIC_TORCH_SHA256 "726f5711b70c4b8cc80d9bc6c3ce6f3449f31d20acc644ab68dab083aa4ea572")
-
-    set(DOWNLOAD_METATENSOR_DEFAULT ON)
-    find_package(metatensor_torch ${METATENSOR_TORCH_VERSION} QUIET)
-    if (metatensor_torch_FOUND)
-        set(DOWNLOAD_METATENSOR_DEFAULT OFF)
-    endif()
-
-    set(DOWNLOAD_METATOMIC_DEFAULT ON)
-    find_package(metatomic_torch ${METATOMIC_TORCH_VERSION} QUIET)
-    if (metatomic_torch_FOUND)
-        set(DOWNLOAD_METATOMIC_DEFAULT OFF)
-    endif()
-
-
-    option(DOWNLOAD_METATENSOR "Download metatensor package instead of using an already installed one" ${DOWNLOAD_METATENSOR_DEFAULT})
-    option(DOWNLOAD_METATOMIC "Download metatomic package instead of using an already installed one" ${DOWNLOAD_METATOMIC_DEFAULT})
-
-    include(FetchContent)
-
-    if (DOWNLOAD_METATENSOR)
-        set(URL_BASE "https://github.com/metatensor/metatensor/releases/download")
-        FetchContent_Declare(metatensor
-            URL ${URL_BASE}/metatensor-core-v${METATENSOR_CORE_VERSION}/metatensor-core-cxx-${METATENSOR_CORE_VERSION}.tar.gz
-            URL_HASH SHA256=${METATENSOR_CORE_SHA256}
-        )
-
-        message(STATUS "Fetching metatensor v${METATENSOR_CORE_VERSION} from github")
-        FetchContent_MakeAvailable(metatensor)
-
-        FetchContent_Declare(metatensor-torch
-            URL ${URL_BASE}/metatensor-torch-v${METATENSOR_TORCH_VERSION}/metatensor-torch-cxx-${METATENSOR_TORCH_VERSION}.tar.gz
-            URL_HASH SHA256=${METATENSOR_TORCH_SHA256}
-        )
-
-        message(STATUS "Fetching metatensor-torch v${METATENSOR_TORCH_VERSION} from github")
-        FetchContent_MakeAvailable(metatensor-torch)
-    else()
-        # make sure to fail the configuration if cmake can not find metatensor-torch
-        find_package(metatensor_torch REQUIRED ${METATENSOR_TORCH_VERSION})
-    endif()
-
-    if (DOWNLOAD_METATOMIC)
-        set(URL_BASE "https://github.com/metatensor/metatomic/releases/download")
-        FetchContent_Declare(metatomic-torch
-            URL ${URL_BASE}/metatomic-torch-v${METATOMIC_TORCH_VERSION}/metatomic-torch-cxx-${METATOMIC_TORCH_VERSION}.tar.gz
-            URL_HASH SHA256=${METATOMIC_TORCH_SHA256}
-        )
-
-        message(STATUS "Fetching metatomic-torch v${METATOMIC_TORCH_VERSION} from github")
-        FetchContent_MakeAvailable(metatomic-torch)
-    else()
-        # make sure to fail the configuration if cmake can not find metatomic-torch
-        find_package(metatomic_torch REQUIRED ${METATOMIC_TORCH_VERSION})
-    endif()
-
-    list(APPEND GMX_COMMON_LIBRARIES
-        metatensor
-        metatomic_torch
-        metatensor_torch
-    )
 
 endif()

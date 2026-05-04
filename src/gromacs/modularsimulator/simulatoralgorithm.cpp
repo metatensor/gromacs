@@ -261,10 +261,10 @@ void ModularSimulatorAlgorithm::simulatorTeardown()
     // Stop measuring walltime
     walltime_accounting_end_time(wallTimeAccounting_);
 
-    if (!thisRankHasPmeDuty(cr_.dd))
+    if (fr_->pmePpComm)
     {
-        /* Tell the PME only node to finish */
-        gmx_pme_send_finish(cr_.dd);
+        // Tell the PME-only rank to finish
+        fr_->pmePpComm->sendFinish();
     }
 
     walltime_accounting_set_nsteps_done(wallTimeAccounting_, step_ - inputRec_->init_step);
@@ -303,7 +303,7 @@ void ModularSimulatorAlgorithm::postStep(Step step, Time gmx_unused time)
     // Output stuff
     if (cr_.commMyGroup.isMainRank())
     {
-        if (do_per_step(step, inputRec_->nstlog))
+        if (do_per_step(step, inputRec_->outputControl.nstlog))
         {
             if (std::fflush(fpLog_) != 0)
             {
@@ -333,9 +333,10 @@ void ModularSimulatorAlgorithm::postStep(Step step, Time gmx_unused time)
             mdLog_,
             fpLog_,
             &cr_,
+            fr_->pmePpComm.get(),
             fr_->nbv.get(),
             nrnb_,
-            fr_->pmedata,
+            fr_->pmedata.get(),
             pmeLoadBalanceHelper_ ? &pmeLoadBalanceHelper_->loadBalancingObject() : nullptr,
             wallCycle_,
             wallTimeAccounting_);
@@ -522,6 +523,9 @@ ModularSimulatorAlgorithm ModularSimulatorAlgorithmBuilder::build()
                                         legacySimulatorData_->fr_,
                                         legacySimulatorData_->wallTimeAccounting_);
     registerWithInfrastructureAndSignallers(algorithm.signalHelper_.get());
+
+    const t_inputrec* inputrec = legacySimulatorData_->inputRec_;
+
     algorithm.statePropagatorData_        = std::move(statePropagatorData_);
     algorithm.energyData_                 = std::move(energyData_);
     algorithm.freeEnergyPerturbationData_ = std::move(freeEnergyPerturbationData_);
@@ -560,14 +564,16 @@ ModularSimulatorAlgorithm ModularSimulatorAlgorithmBuilder::build()
             legacySimulatorData_->wallTimeAccounting_);
 
     // Build topology holder
-    algorithm.topologyHolder_ = topologyHolderBuilder_.build(legacySimulatorData_->topGlobal_,
-                                                             legacySimulatorData_->top_,
-                                                             legacySimulatorData_->cr_,
-                                                             legacySimulatorData_->inputRec_,
-                                                             legacySimulatorData_->fr_,
-                                                             legacySimulatorData_->mdAtoms_,
-                                                             legacySimulatorData_->constr_,
-                                                             legacySimulatorData_->virtualSites_);
+    algorithm.topologyHolder_ =
+            topologyHolderBuilder_.build(legacySimulatorData_->topGlobal_,
+                                         legacySimulatorData_->top_,
+                                         legacySimulatorData_->cr_,
+                                         legacySimulatorData_->inputRec_,
+                                         legacySimulatorData_->fr_,
+                                         legacySimulatorData_->mdAtoms_,
+                                         legacySimulatorData_->constr_,
+                                         legacySimulatorData_->runScheduleWork_->simulationWork,
+                                         legacySimulatorData_->virtualSites_);
     registerWithInfrastructureAndSignallers(algorithm.topologyHolder_.get());
 
     // Build PME load balance helper
@@ -624,6 +630,7 @@ ModularSimulatorAlgorithm ModularSimulatorAlgorithmBuilder::build()
                                            legacySimulatorData_->nrnb_,
                                            legacySimulatorData_->wallCycleCounters_,
                                            legacySimulatorData_->fr_,
+                                           legacySimulatorData_->runScheduleWork_->simulationWork,
                                            legacySimulatorData_->virtualSites_,
                                            legacySimulatorData_->imdSession_,
                                            legacySimulatorData_->pullWork_);
@@ -672,8 +679,7 @@ ModularSimulatorAlgorithm ModularSimulatorAlgorithmBuilder::build()
             registerWithInfrastructureAndSignallers(signaller.get());
             algorithm.signallerList_.emplace(algorithm.signallerList_.begin(), std::move(signaller));
         };
-        const auto* inputrec   = legacySimulatorData_->inputRec_;
-        auto        virialMode = EnergySignallerVirialMode::Off;
+        auto virialMode = EnergySignallerVirialMode::Off;
         if (inputrec->pressureCouplingOptions.epc != PressureCoupling::No)
         {
             if (EI_VV(inputrec->eI))
@@ -686,21 +692,22 @@ ModularSimulatorAlgorithm ModularSimulatorAlgorithmBuilder::build()
             }
         }
         addSignaller(energySignallerBuilder_.build(
-                inputrec->nstcalcenergy,
+                inputrec->outputControl.nstcalcenergy,
                 computeFepPeriod(*inputrec, legacySimulatorData_->replExParams_),
                 inputrec->pressureCouplingOptions.nstpcouple,
                 virialMode));
-        addSignaller(trajectorySignallerBuilder_.build(inputrec->nstxout,
-                                                       inputrec->nstvout,
-                                                       inputrec->nstfout,
-                                                       inputrec->nstxout_compressed,
+        addSignaller(trajectorySignallerBuilder_.build(inputrec->outputControl.nstxout,
+                                                       inputrec->outputControl.nstvout,
+                                                       inputrec->outputControl.nstfout,
+                                                       inputrec->outputControl.nstxout_compressed,
                                                        trajectoryElement->tngBoxOut(),
                                                        trajectoryElement->tngLambdaOut(),
                                                        trajectoryElement->tngBoxOutCompressed(),
                                                        trajectoryElement->tngLambdaOutCompressed(),
-                                                       inputrec->nstenergy));
-        addSignaller(loggingSignallerBuilder_.build(
-                inputrec->nstlog, inputrec->init_step, legacySimulatorData_->startingBehavior_));
+                                                       inputrec->outputControl.nstenergy));
+        addSignaller(loggingSignallerBuilder_.build(inputrec->outputControl.nstlog,
+                                                    inputrec->init_step,
+                                                    legacySimulatorData_->startingBehavior_));
         addSignaller(lastStepSignallerBuilder_.build(
                 inputrec->nsteps, inputrec->init_step, algorithm.stopHandler_.get()));
         addSignaller(neighborSearchSignallerBuilder_.build(

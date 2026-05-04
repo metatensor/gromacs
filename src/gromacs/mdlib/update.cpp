@@ -754,7 +754,7 @@ static void do_update_md(int                                  start,
         || stepAccelerationType != AccelerationType::None)
     {
         // If there's no Parrinello-Rahman scaling this step, we need to pass a zero matrix instead
-        Matrix3x3        zero = { 0._real };
+        Matrix3x3        zero;
         const Matrix3x3& parrinelloRahmanMToUseThisStep =
                 parrinelloRahmanVelocityScaling != ParrinelloRahmanVelocityScaling::No ? parrinelloRahmanM
                                                                                        : zero;
@@ -1307,7 +1307,7 @@ static void do_update_sd(int                                 start,
             (doParrinelloRahmanThisStep ? ParrinelloRahmanVelocityScaling::Anisotropic
                                         : ParrinelloRahmanVelocityScaling::No);
     // If there's no Parrinello-Rahman scaling this step, we need to pass a zero matrix instead
-    Matrix3x3        zero = { 0._real };
+    Matrix3x3        zero;
     const Matrix3x3& parrinelloRahmanMToUseThisStep =
             parrinelloRahmanVelocityScaling != ParrinelloRahmanVelocityScaling::No ? parrinelloRahmanM
                                                                                    : zero;
@@ -1441,9 +1441,9 @@ static void do_update_bd(int                                 start,
 extern void init_ekinstate(ekinstate_t* ekinstate, const t_inputrec* ir)
 {
     ekinstate->ekin_n = ir->opts.ngtc;
-    snew(ekinstate->ekinh, ekinstate->ekin_n);
-    snew(ekinstate->ekinf, ekinstate->ekin_n);
-    snew(ekinstate->ekinh_old, ekinstate->ekin_n);
+    ekinstate->ekinh.resize(ekinstate->ekin_n);
+    ekinstate->ekinf.resize(ekinstate->ekin_n);
+    ekinstate->ekinh_old.resize(ekinstate->ekin_n);
     ekinstate->ekinscalef_nhc.resize(ekinstate->ekin_n);
     ekinstate->ekinscaleh_nhc.resize(ekinstate->ekin_n);
     ekinstate->vscale_nhc.resize(ekinstate->ekin_n);
@@ -1453,8 +1453,7 @@ extern void init_ekinstate(ekinstate_t* ekinstate, const t_inputrec* ir)
 }
 
 void update_ekinstate(ekinstate_t*          ekinstate,
-                      const gmx_ekindata_t* ekind,
-                      const bool            sumEkin,
+                      const gmx_ekindata_t& ekind,
                       const gmx::MpiComm&   mpiComm,
                       const gmx_domdec_t*   dd)
 {
@@ -1465,7 +1464,7 @@ void update_ekinstate(ekinstate_t*          ekinstate,
      * to ekind->ekinh_old and ekind->dekindl_old.
      */
 
-    const bool reduceEkin = (sumEkin && havePPDomainDecomposition(dd));
+    const bool reduceEkin = (ekind.needToReduceEkinhOld && havePPDomainDecomposition(dd));
 
     if (reduceEkin)
     {
@@ -1474,7 +1473,7 @@ void update_ekinstate(ekinstate_t*          ekinstate,
          * precision so we get binary identical reduced results compared with
          * the reduction in compte_globals() which also uses double precision.
          */
-        const int           ntcg = ekind->numTemperatureCouplingGroups();
+        const int           ntcg = ekind.numTemperatureCouplingGroups();
         std::vector<double> buffer(ntcg * 2 * DIM * DIM + 1);
         int                 bufIndex = 0;
         for (int g = 0; g < ntcg; g++)
@@ -1483,18 +1482,18 @@ void update_ekinstate(ekinstate_t*          ekinstate,
             {
                 for (int j = 0; j < DIM; j++)
                 {
-                    buffer[bufIndex++] = ekind->tcstat[g].ekinh[i][j];
+                    buffer[bufIndex++] = ekind.tcstat[g].ekinh[i][j];
                 }
             }
             for (int i = 0; i < DIM; i++)
             {
                 for (int j = 0; j < DIM; j++)
                 {
-                    buffer[bufIndex++] = ekind->tcstat[g].ekinf[i][j];
+                    buffer[bufIndex++] = ekind.tcstat[g].ekinf[i][j];
                 }
             }
         }
-        buffer[bufIndex++] = ekind->dekindl;
+        buffer[bufIndex++] = ekind.dekindl;
 
         mpiComm.sumReduce(bufIndex, buffer.data());
 
@@ -1529,10 +1528,10 @@ void update_ekinstate(ekinstate_t*          ekinstate,
         {
             for (int g = 0; g < ekinstate->ekin_n; g++)
             {
-                copy_mat(ekind->tcstat[g].ekinh, ekinstate->ekinh[g]);
-                copy_mat(ekind->tcstat[g].ekinf, ekinstate->ekinf[g]);
+                ekinstate->ekinh[g] = ekind.tcstat[g].ekinh;
+                ekinstate->ekinf[g] = ekind.tcstat[g].ekinf;
             }
-            ekinstate->dekindl = ekind->dekindl;
+            ekinstate->dekindl = ekind.dekindl;
         }
 
         /* These terms are likely not part of the state at all and can be removed
@@ -1540,11 +1539,11 @@ void update_ekinstate(ekinstate_t*          ekinstate,
          */
         for (int g = 0; g < ekinstate->ekin_n; g++)
         {
-            ekinstate->ekinscalef_nhc[g] = ekind->tcstat[g].ekinscalef_nhc;
-            ekinstate->ekinscaleh_nhc[g] = ekind->tcstat[g].ekinscaleh_nhc;
-            ekinstate->vscale_nhc[g]     = ekind->tcstat[g].vscale_nhc;
+            ekinstate->ekinscalef_nhc[g] = ekind.tcstat[g].ekinscalef_nhc;
+            ekinstate->ekinscaleh_nhc[g] = ekind.tcstat[g].ekinscaleh_nhc;
+            ekinstate->vscale_nhc[g]     = ekind.tcstat[g].vscale_nhc;
         }
-        ekinstate->mvcos = ekind->cosacc.mvcos;
+        ekinstate->mvcos = ekind.cosacc.mvcos;
     }
 }
 
@@ -1556,8 +1555,8 @@ void restore_ekinstate_from_state(const gmx::MpiComm& mpiComm, gmx_ekindata_t* e
     {
         for (i = 0; i < ekinstate->ekin_n; i++)
         {
-            copy_mat(ekinstate->ekinh[i], ekind->tcstat[i].ekinh);
-            copy_mat(ekinstate->ekinf[i], ekind->tcstat[i].ekinf);
+            ekind->tcstat[i].ekinh          = ekinstate->ekinh[i];
+            ekind->tcstat[i].ekinf          = ekinstate->ekinf[i];
             ekind->tcstat[i].ekinscalef_nhc = ekinstate->ekinscalef_nhc[i];
             ekind->tcstat[i].ekinscaleh_nhc = ekinstate->ekinscaleh_nhc[i];
             ekind->tcstat[i].vscale_nhc     = ekinstate->vscale_nhc[i];
@@ -1574,10 +1573,10 @@ void restore_ekinstate_from_state(const gmx::MpiComm& mpiComm, gmx_ekindata_t* e
         for (i = 0; i < n; i++)
         {
             gmx_bcast(DIM * DIM * sizeof(ekind->tcstat[i].ekinh[0][0]),
-                      ekind->tcstat[i].ekinh[0],
+                      &ekind->tcstat[i].ekinh[0][0],
                       mpiComm.comm());
             gmx_bcast(DIM * DIM * sizeof(ekind->tcstat[i].ekinf[0][0]),
-                      ekind->tcstat[i].ekinf[0],
+                      &ekind->tcstat[i].ekinf[0][0],
                       mpiComm.comm());
 
             gmx_bcast(sizeof(ekind->tcstat[i].ekinscalef_nhc),
@@ -1637,7 +1636,7 @@ void Update::Impl::update_sd_second_half(const t_inputrec&                 input
          */
         real dt = inputRecord.delta_t;
 
-        Matrix3x3 parrinelloRahmanM{ 0._real };
+        Matrix3x3 parrinelloRahmanM;
         real      dtPressureCouple = 0;
 
         wallcycle_start(wcycle, WallCycleCounter::Update);

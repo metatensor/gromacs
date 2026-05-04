@@ -53,7 +53,7 @@
 #include "gromacs/domdec/domdec.h"
 #include "gromacs/domdec/domdec_struct.h"
 #include "gromacs/ewald/ewald.h"
-#include "gromacs/ewald/pme_pp_comm_gpu.h"
+#include "gromacs/ewald/pme_internal.h"
 #include "gromacs/fileio/filetypes.h"
 #include "gromacs/gmxlib/network.h"
 #include "gromacs/gpu_utils/gpu_utils.h"
@@ -1137,6 +1137,7 @@ void init_forcerec(FILE*                            fplog,
     }
 }
 
-t_forcerec::t_forcerec() = default;
+// TODO clean this up as part of #5573
+t_forcerec::t_forcerec(const bool /* useGpuPmePpCommunication */) {}
 
 t_forcerec::~t_forcerec() = default;

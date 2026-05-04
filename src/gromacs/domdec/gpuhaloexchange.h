@@ -56,7 +56,6 @@ struct gmx_wallcycle;
 class DeviceContext;
 class DeviceStream;
 class GpuEventSynchronizer;
-struct t_commrec;
 
 namespace gmx
 {
@@ -156,6 +155,7 @@ public:
     GpuHaloExchangeNvshmemHelper(const gmx_domdec_t&       dd,
                                  const DeviceContext&      context,
                                  const DeviceStream&       stream,
+                                 const std::optional<int>& rankOfControlledPmeRank,
                                  const std::optional<int>& peerRank,
                                  gmx_wallcycle*            wcycle,
                                  MPI_Comm                  mpi_comm_mygroup,
@@ -181,9 +181,7 @@ public:
     std::unique_ptr<int> fusedPpHaloExchange_;
 #endif
     // Fused pass-through API (defined in gpuhaloexchange_impl_gpu.cpp)
-    void                  reinitAllHaloExchanges(const t_commrec&   cr,
-                                                 DeviceBuffer<RVec> d_coordinatesBuffer,
-                                                 DeviceBuffer<RVec> d_forcesBuffer);
+    void reinitAllHaloExchanges(DeviceBuffer<RVec> d_coordinatesBuffer, DeviceBuffer<RVec> d_forcesBuffer);
     GpuEventSynchronizer* launchAllCoordinateExchanges(const matrix          box,
                                                        GpuEventSynchronizer* dependencyEvent);
     GpuEventSynchronizer* launchAllForceExchanges(bool accumulateForces,
@@ -207,6 +205,12 @@ private:
     DeviceBuffer<uint64_t> d_ppHaloExSyncBase_;
     //! Device stream
     const DeviceStream& stream_;
+
+    //! Data structures used on PP ranks to implement symmetric allocations
+    //! \{
+    //! Rank of partner PME rank controlled by this PP rank, if any
+    std::optional<int> rankOfControlledPmeRank_;
+    //! \}
 
     //! Data structures used on PME-only ranks to implement symmetric allocations
     /*! \{ */

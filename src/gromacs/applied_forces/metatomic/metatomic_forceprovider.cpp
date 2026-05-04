@@ -147,9 +147,6 @@ struct MetatomicData
             "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c"
     };
 
-    //! Whether debug logging to per-rank files is enabled (GMX_METATOMIC_DEBUG).
-    bool debugEnabled = false;
-
     //! Cached types and PBC tensors (re-created on AtomsRedistributed).
     torch::Tensor cachedTypes;
     torch::Tensor cachedPbc;
@@ -189,8 +186,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     {
         MetatomicTimer::enable(std::string(timerEnv) != "0");
     }
-
-    data_->debugEnabled = (std::getenv("GMX_METATOMIC_DEBUG") != nullptr);
 
     if (const char* env = std::getenv("GMX_METATOMIC_SPARSE_THRESHOLD"))
     {
@@ -304,40 +299,10 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             .asParagraph()
             .appendTextFormatted("Metatomic using device: %s", data_->device.str().c_str());
 
-    if (data_->debugEnabled)
-    {
-        double interactionRange = data_->capabilities->engine_interaction_range("nm");
-        std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
-        FILE*       fp    = std::fopen(fname.c_str(), "w");
-        if (fp)
-        {
-            std::fprintf(fp,
-                         "=== Metatomic init (rank %d) ===\n"
-                         "interaction_range(nm)=%.6f\n",
-                         mpiComm_.rank(),
-                         interactionRange);
-            std::fclose(fp);
-        }
-    }
-
     auto requests_ivalue = data_->model.run_method("requested_neighbor_lists");
     for (const auto& request_ivalue : requests_ivalue.toList())
     {
         auto nl_opt = request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
-        if (data_->debugEnabled)
-        {
-            std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
-            FILE*       fp    = std::fopen(fname.c_str(), "a");
-            if (fp)
-            {
-                std::fprintf(fp,
-                             "NL request: cutoff()=%.6f, engine_cutoff(nm)=%.6f, full_list=%s\n",
-                             nl_opt->cutoff(),
-                             nl_opt->engine_cutoff("nm"),
-                             nl_opt->full_list() ? "true" : "false");
-                std::fclose(fp);
-            }
-        }
         data_->nl_requests.push_back(nl_opt);
     }
 
@@ -622,22 +587,6 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             }
         }
 
-        if (data_->debugEnabled)
-        {
-            std::string fname = "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
-            FILE*       fp    = std::fopen(fname.c_str(), "a");
-            if (fp)
-            {
-                std::fprintf(fp,
-                             "gatherAtoms: home=%zu halo=%zu duplicatesSkipped=%d gmxLocalEntries=%zu\n",
-                             homeGmxLocal.size(),
-                             haloGmxLocal.size(),
-                             numDuplicatesSkipped,
-                             gmxLocalToMtaIdx_.size());
-                std::fclose(fp);
-            }
-        }
-
         numHomeMta_  = static_cast<int32_t>(homeGmxLocal.size());
         numLocalMta_ = numHomeMta_ + static_cast<int32_t>(haloGmxLocal.size());
 
@@ -707,22 +656,6 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
     data_->cachedPbc = preparePbcType(options_.params_.pbcType_.get(), data_->device);
 
-    // Debug: dump local-to-global mapping
-    if (data_->debugEnabled)
-    {
-        std::string fname =
-                "metatomic_atoms_rank_" + std::to_string(mpiComm_.rank()) + ".csv";
-        FILE* fp = std::fopen(fname.c_str(), "w");
-        if (fp)
-        {
-            std::fprintf(fp, "localIdx,globalMta,isHome\n");
-            for (int32_t i = 0; i < numLocalMta_; i++)
-            {
-                std::fprintf(fp, "%d,%d,%d\n", i, mtaToGlobalMta_[i], i < numHomeMta_ ? 1 : 0);
-            }
-            std::fclose(fp);
-        }
-    }
 }
 
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
@@ -880,22 +813,6 @@ int32_t MetatomicForceProvider::exchangeBackwardGhosts(
         }
     }
 
-    if (data_->debugEnabled && totalAdded > 0)
-    {
-        std::string fname =
-                "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
-        FILE* fp = std::fopen(fname.c_str(), "a");
-        if (fp)
-        {
-            std::fprintf(fp,
-                         "exchangeBackwardGhosts: added %d, numLocalMta=%d (home=%d), "
-                         "uniqueGlobalMta=%zu\n",
-                         totalAdded, numLocalMta_, numHomeMta_,
-                         existingGlobalMta.size());
-            std::fclose(fp);
-        }
-    }
-
     return totalAdded;
 }
 
@@ -1040,22 +957,6 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
         sendBuf.swap(recvBuf);
     }
 
-    if (data_->debugEnabled)
-    {
-        std::string fname =
-                "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
-        FILE* fp = std::fopen(fname.c_str(), "a");
-        if (fp)
-        {
-            std::fprintf(fp,
-                         "exchangeBackwardPairs(ring): added %zu pairs "
-                         "(pairlist=%d, total=%zu)\n",
-                         backwardPairsMta_.size() / 2,
-                         nMyPairs,
-                         pairlistMta_.size() / 2 + backwardPairsMta_.size() / 2);
-            std::fclose(fp);
-        }
-    }
 }
 
 
@@ -1360,35 +1261,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 nlVectorsBuffer_.resize(nPairs * 3);
             }
 
-            // Debug: dump global pair indices + distances for comparison
-            if (data_->debugEnabled)
-            {
-                std::string fname =
-                        "metatomic_pairs_rank_" + std::to_string(mpiComm_.rank()) + ".csv";
-                FILE* fp2 = std::fopen(fname.c_str(), "w");
-                if (fp2)
-                {
-                    std::fprintf(fp2, "globalI,globalJ,shift_a,shift_b,shift_c,dist\n");
-                    for (int64_t p = 0; p < nPairs; p++)
-                    {
-                        const int32_t lI = nlSamplesBuffer_[5 * p + 0];
-                        const int32_t lJ = nlSamplesBuffer_[5 * p + 1];
-                        const double ddx = nlVectorsBuffer_[3 * p + 0];
-                        const double ddy = nlVectorsBuffer_[3 * p + 1];
-                        const double ddz = nlVectorsBuffer_[3 * p + 2];
-                        const double dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-                        std::fprintf(fp2, "%d,%d,%d,%d,%d,%.8f\n",
-                                     mtaToGlobalMta_[lI],
-                                     mtaToGlobalMta_[lJ],
-                                     nlSamplesBuffer_[5 * p + 2],
-                                     nlSamplesBuffer_[5 * p + 3],
-                                     nlSamplesBuffer_[5 * p + 4],
-                                     dist);
-                    }
-                    std::fclose(fp2);
-                }
-            }
-
             // Wrap raw buffers as tensors (zero-copy on CPU, then move to device)
             MetatomicTimer fromBlobTimer("fromBlob", mpiComm_);
             auto samples_tensor = torch::from_blob(
@@ -1507,31 +1379,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         // In parallel, selected_atoms restricts output to home atoms only,
         // so this sums only home atom energies (each home atom has a complete NL).
         energy = energy_tensor.sum().item<double>();
-
-        // Diagnostic: log pairlist size, per-rank energy and MPI sum
-        if (data_->debugEnabled)
-        {
-            double mpiSumEnergy = energy;
-            if (mpiComm_.isParallel())
-            {
-                mpiComm_.sumReduce(1, &mpiSumEnergy);
-            }
-            std::string fname =
-                    "metatomic_debug_rank_" + std::to_string(mpiComm_.rank()) + ".log";
-            FILE* fp = std::fopen(fname.c_str(), "a");
-            if (fp)
-            {
-                std::fprintf(fp,
-                             "nlPairs=%zu, numLocalMta=%d, numHomeMta=%d, "
-                             "energy: perRank=%.6f, mpiSum=%.6f\n",
-                             nlSamplesBuffer_.size() / 5,
-                             numLocalMta_,
-                             numHomeMta_,
-                             energy,
-                             mpiSumEnergy);
-                std::fclose(fp);
-            }
-        }
 
         if (data_->nonConservative)
         {

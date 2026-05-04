@@ -42,6 +42,8 @@
 
 #include "gmxpre.h"
 
+#include "config.h"
+
 #include "metatomic_mdmodule.h"
 
 #include "gromacs/domdec/localatomset.h"
@@ -60,8 +62,10 @@
 
 #include <cmath>
 
-#include <metatensor/torch.hpp>
-#include <metatomic/torch.hpp>
+#if GMX_TORCH
+#    include <metatensor/torch.hpp>
+#    include <metatomic/torch.hpp>
+#endif
 
 namespace gmx
 {
@@ -178,6 +182,7 @@ public:
         { energyOutputRequest->energyOutputToMetatomicPot_ = true; };
         notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
 
+#if GMX_TORCH
         const auto setPlainPairlistRangeFunction = [this](PlainPairlistRanges* ranges)
         {
             // Temporary: Load model just to peek at cutoff.
@@ -243,6 +248,7 @@ public:
         };
         // Register the callback
         notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);
+#endif // GMX_TORCH
     }
 
     /*! \brief Requests to be notified during the simulation.

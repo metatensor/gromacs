@@ -133,8 +133,8 @@ gcc.
 
 The xlc compiler is not supported and version 16.1 does not compile on
 POWER architectures for |Gromacs|\ -\ |version|. We recommend to use
-the GCC compiler, version 9.x to 11.x. Note: there are
-:ref:`known issues <gmx-users-known-issues>` with GCC 12 and newer.
+the GCC compiler. Note: there are
+:ref:`known issues <gmx-users-known-issues>` with some versions of GCC 12-14.
 
 You may also need the most recent version of other compiler toolchain
 components beside the compiler itself (e.g. assembler or linker);
@@ -269,7 +269,7 @@ HIP
 
 Supported hardware:
 
-* AMD GPUs: GFX9, CDNA 1/2, RDNA 1/2/3 GPUs
+* AMD GPUs: GFX9, CDNA 1/2,3 RDNA 1/2/3 GPUs
 
 Requirements:
 
@@ -279,11 +279,12 @@ Limitations:
 
 * Available from |Gromacs| 2025
 * |Gromacs| 2025 supports only main non-bonded kernels
+* |Gromacs| 2026 has full offload support
 
 Experimental branch:
-* Experimental feature branch supporting all compute kernels: `HIP feature branch <https://gitlab.com/gromacs/gromacs/-/tree/4947-hip-feature-enablement>`_
-* Supported by AMD and aimed to get merged in the next major release
-* Updated together with 2025 releases to be based on latest fixes
+* Experimental feature branch with remaining AMD specific optimizations: `HIP feature branch <https://gitlab.com/gromacs/gromacs/-/tree/4947-hip-feature-enablement>`_
+* Supported by AMD, with aim to merge all remaining code during the coming release cycle
+* Updated together with 2026 releases to be based on latest fixes
 * For support, `contact acmnpv here <mailto:paul.bauer.q@gmail.com>`_
 
 More information can be found in the `AMD-HIP`_ section.
@@ -1222,14 +1223,14 @@ H5MD trajectory output file format
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 `H5MD`_ is a specification for output data from molecular dynamics simulations built on
-the HDF5 format. In |Gromacs| 2026 this is added as an experimental feature. 
+the HDF5 format. In |Gromacs| 2026 this is added as an experimental feature.
 
 Build instructions
 """"""""""""""""""""""""""""""
 
 To enable support for H5MD output |Gromacs| you need to have an installed copy of the
 `HDF5`_ library. The minimum supported version is |GMX_HDF5_MINIMUM_REQUIRED_VERSION|.
-If the library is installed you can build with H5MD support by 
+If the library is installed you can build with H5MD support by
 
 ::
 

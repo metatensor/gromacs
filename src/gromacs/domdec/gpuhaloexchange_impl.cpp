@@ -133,6 +133,7 @@ GpuEventSynchronizer* GpuHaloExchange::getForcesReadyOnDeviceEvent()
 GpuHaloExchangeNvshmemHelper::GpuHaloExchangeNvshmemHelper(const gmx_domdec_t&  dd,
                                                            const DeviceContext& context,
                                                            const DeviceStream&  stream,
+                                                           const std::optional<int>& /* rankOfControlledPmeRank */,
                                                            const std::optional<int>& /* peerRank */,
                                                            gmx_wallcycle* /*wcycle*/,
                                                            MPI_Comm /*mpi_comm_mygroup*/,
@@ -176,8 +177,7 @@ void GpuHaloExchangeNvshmemHelper::reinit()
 }
 
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-void GpuHaloExchangeNvshmemHelper::reinitAllHaloExchanges(const t_commrec& /*cr*/,
-                                                          DeviceBuffer<RVec> /*d_coordinatesBuffer*/,
+void GpuHaloExchangeNvshmemHelper::reinitAllHaloExchanges(DeviceBuffer<RVec> /*d_coordinatesBuffer*/,
                                                           DeviceBuffer<RVec> /*d_forcesBuffer*/)
 {
     GMX_ASSERT(false,

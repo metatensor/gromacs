@@ -39,6 +39,7 @@
 #include <optional>
 #include <vector>
 
+#include "gromacs/ewald/pme_pp.h"
 #include "gromacs/mdtypes/atominfo.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/pbcutil/ishift.h"
@@ -69,7 +70,6 @@ class GpuForceReduction;
 class ForceProviders;
 class MdGpuGraph;
 class StatePropagatorDataGpu;
-class PmePpCommGpu;
 class WholeMoleculeTransform;
 } // namespace gmx
 
@@ -133,7 +133,7 @@ struct t_forcerec
     // implemented in a single source file, so that not every source
     // file that includes this one needs to understand how to find the
     // destructors of the objects pointed to by unique_ptr members.
-    t_forcerec();
+    t_forcerec(bool useGpuPmePpCommunication);
     ~t_forcerec();
 
     std::unique_ptr<interaction_const_t> ic;
@@ -213,8 +213,8 @@ struct t_forcerec
     std::vector<ForceHelperBuffers> forceHelperBuffers;
 
     /* Data for PPPM/PME/Ewald */
-    gmx_pme_t*   pmedata                = nullptr;
-    LongRangeVdW ljpme_combination_rule = LongRangeVdW::Geom;
+    std::unique_ptr<gmx_pme_t> pmedata;
+    LongRangeVdW               ljpme_combination_rule = LongRangeVdW::Geom;
 
     /* Non bonded Parameter lists */
     int               ntype          = 0; /* Number of atom types */
@@ -272,8 +272,8 @@ struct t_forcerec
     // TODO: Should not be here. This is here only to pass the pointer around.
     gmx::DeviceStreamManager* deviceStreamManager = nullptr;
 
-    /* For PME-PP GPU communication */
-    std::unique_ptr<gmx::PmePpCommGpu> pmePpCommGpu;
+    //! Manages communication with the partner PME rank, when active
+    std::unique_ptr<gmx::PmePpComm> pmePpComm;
 
     /* For GPU force reduction (on both local and non-local atoms) */
     gmx::EnumerationArray<gmx::AtomLocality, std::unique_ptr<gmx::GpuForceReduction>> gpuForceReduction;
