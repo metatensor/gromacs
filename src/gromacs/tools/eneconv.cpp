@@ -75,7 +75,7 @@ struct gmx_output_env_t;
 #    define FLT_MAX 1e36
 #endif
 
-static int* select_it(int nre, gmx_enxnm_t* nm, int* nset)
+static int* select_it(gmx::ArrayRef<const gmx_enxnm_t> nm, int* nset)
 {
     gmx_bool* bE;
     int       n, k, j, i;
@@ -90,13 +90,15 @@ static int* select_it(int nre, gmx_enxnm_t* nm, int* nset)
     fprintf(stderr, "Select the terms you want to scale from the following list\n");
     fprintf(stderr, "End your selection with 0\n");
 
+    const int nre = nm.ssize();
+
     if (bVerbose)
     {
         for (k = 0; (k < nre);)
         {
             for (j = 0; (j < 4) && (k < nre); j++, k++)
             {
-                fprintf(stderr, " %3d=%14s", k + 1, nm[k].name);
+                fprintf(stderr, " %3d=%14s", k + 1, nm[k].name.c_str());
             }
             fprintf(stderr, "\n");
         }
@@ -157,20 +159,19 @@ static void sort_files(gmx::ArrayRef<std::string> files, real* settime)
 static int scan_ene_files(const std::vector<std::string>& files, real* readtime, real* timestep, int* nremax)
 {
     /* Check number of energy terms and start time of all files */
-    int          nre, nremin = 0, nresav = 0;
-    ener_file_t  in;
-    real         t1, t2;
-    char         inputstring[STRLEN];
-    gmx_enxnm_t* enm;
-    t_enxframe*  fr;
+    int         nremin = 0, nresav = 0;
+    ener_file_t in;
+    real        t1, t2;
+    char        inputstring[STRLEN];
+    t_enxframe* fr;
 
     snew(fr, 1);
 
     for (size_t f = 0; f < files.size(); f++)
     {
-        in  = open_enx(files[f].c_str(), "r");
-        enm = nullptr;
-        do_enxnms(in, &nre, &enm);
+        in                                 = open_enx(files[f].c_str(), "r");
+        const std::vector<gmx_enxnm_t> enm = readEnxNames(in);
+        const int                      nre = gmx::ssize(enm);
 
         if (f == 0)
         {
@@ -218,7 +219,6 @@ static int scan_ene_files(const std::vector<std::string>& files, real* readtime,
             close_enx(in);
         }
         fprintf(stderr, "\n");
-        free_enxnms(nre, enm);
     }
 
     free_enxframe(fr);
@@ -381,16 +381,16 @@ static void update_ee_sum(int         nre,
         {
             for (i = 0; i < nre; i++)
             {
-                ee_sum[i].esum = fr->ener[i].e;
-                ee_sum[i].eav  = 0;
+                ee_sum[i].esum     = fr->ener[i].e;
+                ee_sum[i].sumSqDev = 0;
             }
         }
         else
         {
             for (i = 0; i < nre; i++)
             {
-                ee_sum[i].esum = fr->ener[i].esum;
-                ee_sum[i].eav  = fr->ener[i].eav;
+                ee_sum[i].esum     = fr->ener[i].esum;
+                ee_sum[i].sumSqDev = fr->ener[i].sumSqDev;
             }
         }
         nsteps = fr->nsteps;
@@ -402,9 +402,9 @@ static void update_ee_sum(int         nre,
         {
             for (i = 0; i < nre; i++)
             {
-                ee_sum[i].eav += gmx::square(ee_sum[i].esum / nsum
-                                             - (ee_sum[i].esum + fr->ener[i].e) / (nsum + 1))
-                                 * nsum * (nsum + 1);
+                ee_sum[i].sumSqDev += gmx::square(ee_sum[i].esum / nsum
+                                                  - (ee_sum[i].esum + fr->ener[i].e) / (nsum + 1))
+                                      * nsum * (nsum + 1);
                 ee_sum[i].esum += fr->ener[i].e;
             }
         }
@@ -412,10 +412,11 @@ static void update_ee_sum(int         nre,
         {
             for (i = 0; i < fr->nre; i++)
             {
-                ee_sum[i].eav += fr->ener[i].eav
-                                 + gmx::square(ee_sum[i].esum / nsum
-                                               - (ee_sum[i].esum + fr->ener[i].esum) / (nsum + fr->nsum))
-                                           * nsum * (nsum + fr->nsum) / static_cast<double>(fr->nsum);
+                ee_sum[i].sumSqDev +=
+                        fr->ener[i].sumSqDev
+                        + gmx::square(ee_sum[i].esum / nsum
+                                      - (ee_sum[i].esum + fr->ener[i].esum) / (nsum + fr->nsum))
+                                  * nsum * (nsum + fr->nsum) / static_cast<double>(fr->nsum);
                 ee_sum[i].esum += fr->ener[i].esum;
             }
         }
@@ -461,18 +462,13 @@ int gmx_eneconv(int argc, char* argv[])
         "updated correctly. Only the actual energy is correct. One thus has to compute "
         "statistics in another way."
     };
-    ener_file_t  in = nullptr, out = nullptr;
-    gmx_enxnm_t* enm = nullptr;
-#if 0
-    ener_file_t       in, out = NULL;
-    gmx_enxnm_t      *enm = NULL;
-#endif
+    ener_file_t       in = nullptr, out = nullptr;
     t_enxframe *      fr, *fro;
     int64_t           ee_sum_step = 0, ee_sum_nsteps, ee_sum_nsum;
     t_energy*         ee_sum;
     int64_t           lastfilestep, laststep, startstep_file = 0;
     int               noutfr;
-    int               nre, nremax, this_nre, kkk, nset, *set = nullptr;
+    int               nre, nremax, kkk, nset, *set = nullptr;
     double            last_t;
     real *            readtime, *settime, timestep, tadjust;
     char              buf[22], buf2[22];
@@ -556,21 +552,21 @@ int gmx_eneconv(int argc, char* argv[])
     last_t = fro->t;
     for (size_t f = 0; f < files.size(); f++)
     {
-        bNewFile   = TRUE;
-        bNewOutput = TRUE;
-        in         = open_enx(files[f].c_str(), "r");
-        enm        = nullptr;
-        do_enxnms(in, &this_nre, &enm);
+        bNewFile                           = TRUE;
+        bNewOutput                         = TRUE;
+        in                                 = open_enx(files[f].c_str(), "r");
+        const std::vector<gmx_enxnm_t> enm = readEnxNames(in);
+
         if (f == 0)
         {
             if (scalefac != 1)
             {
-                set = select_it(nre, enm, &nset);
+                set = select_it(enm, &nset);
             }
 
             /* write names to the output file */
             out = open_enx(opt2fn("-o", NFILE, fnm), "w");
-            do_enxnms(out, &nre, &enm);
+            writeEnxNames(out, enm);
         }
 
         /* start reading from the next file */
@@ -671,8 +667,8 @@ int gmx_eneconv(int argc, char* argv[])
                     /* Copy the energy sums */
                     for (int i = 0; i < nre; i++)
                     {
-                        fro->ener[i].esum = ee_sum[i].esum;
-                        fro->ener[i].eav  = ee_sum[i].eav;
+                        fro->ener[i].esum     = ee_sum[i].esum;
+                        fro->ener[i].sumSqDev = ee_sum[i].sumSqDev;
                     }
                 }
                 /* We wrote the energies, so reset the counts */
@@ -686,7 +682,7 @@ int gmx_eneconv(int argc, char* argv[])
                         fro->ener[set[kkk]].e *= scalefac;
                         if (fro->nsum > 0)
                         {
-                            fro->ener[set[kkk]].eav *= scalefac * scalefac;
+                            fro->ener[set[kkk]].sumSqDev *= scalefac * scalefac;
                             fro->ener[set[kkk]].esum *= scalefac;
                         }
                     }
@@ -805,7 +801,6 @@ int gmx_eneconv(int argc, char* argv[])
 
         /* move energies to lastee */
         close_enx(in);
-        free_enxnms(this_nre, enm);
 
         fprintf(stderr, "\n");
     }

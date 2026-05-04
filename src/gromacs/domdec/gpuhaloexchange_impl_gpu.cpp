@@ -217,7 +217,7 @@ void GpuHaloExchange::Impl::reinitHalo(DeviceBuffer<Float3> d_coordinatesBuffer,
         // the pointers will not change until the next NS step.
 
         // Coordinates buffer:
-        Float3* recvPtr = &asMpiPointer(d_x_)[atomOffset_];
+        Float3* recvPtr = &asRawDevicePointer(d_x_)[atomOffset_];
         MPI_Sendrecv(&recvPtr,
                      sizeof(void*),
                      MPI_BYTE,
@@ -232,7 +232,7 @@ void GpuHaloExchange::Impl::reinitHalo(DeviceBuffer<Float3> d_coordinatesBuffer,
                      MPI_STATUS_IGNORE);
 
         // Force buffer:
-        recvPtr = asMpiPointer(d_recvBuf_);
+        recvPtr = asRawDevicePointer(d_recvBuf_);
         MPI_Sendrecv(&recvPtr,
                      sizeof(void*),
                      MPI_BYTE,
@@ -310,11 +310,11 @@ GpuEventSynchronizer* GpuHaloExchange::Impl::communicateHaloCoordinates(const ma
 
     if (receiveInPlace_)
     {
-        communicateHaloData(asMpiPointer(d_sendBuf_),
+        communicateHaloData(asRawDevicePointer(d_sendBuf_),
                             0,
                             xSendSize_,
                             sendRankX_,
-                            GMX_THREAD_MPI ? remoteXPtr_ : asMpiPointer(d_x_),
+                            GMX_THREAD_MPI ? remoteXPtr_ : asRawDevicePointer(d_x_),
                             GMX_THREAD_MPI ? 0 : atomOffset_,
                             xRecvSize_,
                             recvRankX_,
@@ -352,11 +352,11 @@ void GpuHaloExchange::Impl::communicateHaloForces(bool accumulateForces,
     // Communicate halo data
     if (receiveInPlace_)
     {
-        communicateHaloData(asMpiPointer(d_f_),
+        communicateHaloData(asRawDevicePointer(d_f_),
                             atomOffset_,
                             fSendSize_,
                             sendRankF_,
-                            GMX_THREAD_MPI ? remoteFPtr_ : asMpiPointer(d_recvBuf_),
+                            GMX_THREAD_MPI ? remoteFPtr_ : asRawDevicePointer(d_recvBuf_),
                             0,
                             fRecvSize_,
                             recvRankF_,
@@ -698,14 +698,20 @@ GpuEventSynchronizer* GpuHaloExchange::getForcesReadyOnDeviceEvent()
     return impl_->getForcesReadyOnDeviceEvent();
 }
 
-GpuHaloExchangeNvshmemHelper::GpuHaloExchangeNvshmemHelper(const gmx_domdec_t&       dd,
-                                                           const DeviceContext&      context,
-                                                           const DeviceStream&       stream,
+GpuHaloExchangeNvshmemHelper::GpuHaloExchangeNvshmemHelper(const gmx_domdec_t&  dd,
+                                                           const DeviceContext& context,
+                                                           const DeviceStream&  stream,
+                                                           const std::optional<int>& rankOfControlledPmeRank,
                                                            const std::optional<int>& peerRank,
                                                            gmx_wallcycle*            wcycle,
                                                            MPI_Comm mpi_comm_mygroup,
                                                            MPI_Comm mpi_comm_mysim_world) :
-    dd_(dd), stream_(stream), peerRank_(peerRank), context_(context), wcycle_(wcycle)
+    dd_(dd),
+    stream_(stream),
+    rankOfControlledPmeRank_(rankOfControlledPmeRank),
+    peerRank_(peerRank),
+    context_(context),
+    wcycle_(wcycle)
 {
 #if GMX_NVSHMEM
     fusedPpHaloExchange_ = std::make_unique<gmx::FusedGpuHaloExchange>(
@@ -724,15 +730,14 @@ GpuHaloExchangeNvshmemHelper::~GpuHaloExchangeNvshmemHelper()
     }
 }
 // Fused pass-through API definitions to avoid incomplete-type usage in header
-void GpuHaloExchangeNvshmemHelper::reinitAllHaloExchanges(const t_commrec&   cr,
-                                                          DeviceBuffer<RVec> d_coordinatesBuffer,
+void GpuHaloExchangeNvshmemHelper::reinitAllHaloExchanges(DeviceBuffer<RVec> d_coordinatesBuffer,
                                                           DeviceBuffer<RVec> d_forcesBuffer)
 {
 #if GMX_NVSHMEM
     fusedPpHaloExchange_->reinitAllHaloExchanges(
-            cr, d_coordinatesBuffer, d_forcesBuffer, d_ppHaloExSyncBase_, totalNumPulses_);
+            dd_, d_coordinatesBuffer, d_forcesBuffer, d_ppHaloExSyncBase_, totalNumPulses_);
 #else
-    GMX_UNUSED_VALUE(cr);
+    GMX_UNUSED_VALUE(dd_);
     GMX_UNUSED_VALUE(d_coordinatesBuffer);
     GMX_UNUSED_VALUE(d_forcesBuffer);
 #endif
@@ -838,11 +843,16 @@ void GpuHaloExchangeNvshmemHelper::reinit()
             totalNumPulses += dd_.comm->cd[d].numPulses();
         }
 #if GMX_MPI
-        // we use PP rank which receives virial and energy from PME rank
-        // to send the number of pulses data to PME rank.
-        if (dd_.pme_receive_vir_ener)
+        // Send from the same PP rank that controls the PME rank in
+        // PmePpComm.
+        if (rankOfControlledPmeRank_.has_value())
         {
-            MPI_Send(&totalNumPulses, 1, MPI_INT, dd_.pme_nodeid, 0, dd_.mpiCommMySim().comm());
+            MPI_Send(&totalNumPulses,
+                     1,
+                     MPI_INT,
+                     rankOfControlledPmeRank_.value(),
+                     0,
+                     dd_.mpiCommMySim().comm());
         }
 #endif
     }

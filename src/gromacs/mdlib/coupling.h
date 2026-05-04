@@ -40,9 +40,9 @@
 #include <array>
 #include <vector>
 
-#include "gromacs/math/matrix.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/utility/enumerationhelpers.h"
+#include "gromacs/utility/matrix.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/vectypes.h"
 
@@ -217,7 +217,12 @@ void update_annealing_target_temp(const t_inputrec& ir, real t, gmx_ekindata_t* 
 real calc_temp(real ekin, real nrdf);
 /* Calculate the temperature */
 
-real calc_pres(PbcType pbcType, int nwall, const matrix box, const tensor ekin, const tensor vir, tensor pres);
+real calc_pres(PbcType               pbcType,
+               int                   nwall,
+               const matrix          box,
+               const gmx::Matrix3x3& ekin,
+               const gmx::Matrix3x3& vir,
+               gmx::Matrix3x3*       pres);
 /* Calculate the pressure tensor, returns the scalar pressure.
  * The unit of pressure is bar.
  */

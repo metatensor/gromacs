@@ -39,11 +39,11 @@
 #include <memory>
 #include <vector>
 
-#include "gromacs/math/matrix.h"
 #include "gromacs/math/paddedvector.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/utility/arrayref.h"
+#include "gromacs/utility/matrix.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/vectypes.h"
 
@@ -269,13 +269,11 @@ void init_ekinstate(ekinstate_t* ekinstate, const t_inputrec* ir);
  *
  * \param[out] ekinstate  The kinetic energy state to update
  * \param[in]  ekind      The kinetic energy data to store
- * \param[in]  sumEkin    Whether kinetic energy terms still need to be summed over all ranks
- * \param[in]  mpiComm    Communication data for my group, needed when sumEkin==true
+ * \param[in]  mpiComm    Communication data for my group, needed when ekind.needToReduceEkinhOld==true
  * \param[in]  dd         Domain decomposition object, pass nullptr when DD is not in use
  */
 void update_ekinstate(ekinstate_t*          ekinstate,
-                      const gmx_ekindata_t* ekind,
-                      bool                  sumEkin,
+                      const gmx_ekindata_t& ekind,
                       const gmx::MpiComm&   mpiComm,
                       const gmx_domdec_t*   dd);
 

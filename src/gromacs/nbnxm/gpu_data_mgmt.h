@@ -44,10 +44,12 @@
 #define GMX_NBNXN_GPU_DATA_MGMT_H
 
 #include <memory>
+#include <optional>
 
 #include "gromacs/gpu_utils/gpu_macros.h"
 #include "gromacs/mdtypes/interaction_const.h"
 #include "gromacs/mdtypes/locality.h"
+#include "gromacs/utility/arrayref.h"
 
 #include "nbnxm.h"
 
@@ -90,8 +92,8 @@ NbnxmGpu* gpu_init(const DeviceStreamManager gmx_unused& deviceStreamManager,
                    const PairlistParams gmx_unused&      listParams,
                    const nbnxn_atomdata_t gmx_unused*    nbat,
                    /* true if both local and non-local are done on GPU */
-                   bool gmx_unused                     bLocalAndNonlocal,
-                   const std::optional<int> gmx_unused nLambda) GPU_FUNC_TERM_WITH_RETURN(nullptr);
+                   bool gmx_unused bLocalAndNonlocal,
+                   const std::optional<size_t> gmx_unused nLambda) GPU_FUNC_TERM_WITH_RETURN(nullptr);
 
 /** Initializes pair-list data for GPU, called at every pair search step. */
 GPU_FUNC_QUALIFIER
@@ -104,7 +106,7 @@ GPU_FUNC_QUALIFIER
 void gpu_init_feppairlist(NbnxmGpu gmx_unused*           nb,
                           const AtomPairlist gmx_unused& h_feplist,
                           InteractionLocality gmx_unused iloc,
-                          const GridSet gmx_unused&      gridSet) GPU_FUNC_TERM;
+                          ArrayRef<const int> gmx_unused atomIndices) GPU_FUNC_TERM;
 
 /** Initializes atom-data on the GPU, called at every pair search step. */
 GPU_FUNC_QUALIFIER

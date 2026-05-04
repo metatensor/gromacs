@@ -59,17 +59,17 @@ class GpuEventSynchronizer;
 
 namespace gmx
 {
+class DeviceStreamManager;
 
+#ifndef DOXYGEN
 /*! \internal
  * \brief Main data structure for SYCL nonbonded force calculations.
  */
 struct NbnxmGpu
 {
-    /*! \brief GPU device context.
-     *
-     * \todo Make it constant reference, once NbnxmGpu is a proper class.
-     */
-    const DeviceContext* deviceContext_;
+    NbnxmGpu(const DeviceStreamManager& deviceStreamManager, std::optional<size_t> nLambda);
+    //! GPU device context.
+    const DeviceContext& deviceContext;
     /*! \brief true if doing both local/non-local NB work on GPU */
     bool bUseTwoStreams = false;
     /*! \brief true indicates that the nonlocal_done event was marked */
@@ -85,17 +85,17 @@ struct NbnxmGpu
     /*! \brief size of atom indices allocated in device buffer */
     int atomIndicesSize_alloc = 0;
     /*! \brief x buf ops num of atoms */
-    DeviceBuffer<int> numAtomsPerColumn;
-    /*! \brief number of elements in numAtomsPerColumn */
-    int numAtomsPerColumnSize = 0;
+    DeviceBuffer<int> numAtomsPerCell;
+    /*! \brief number of elements in numAtomsPerCell */
+    int numAtomsPerCellSize = 0;
     /*! \brief number of elements allocated in device buffer */
-    int numAtomsPerColumnAlloc = 0;
+    int numAtomsPerCellAlloc = 0;
     /*! \brief x buf ops bin index mapping */
-    DeviceBuffer<int> columnToBin;
-    /*! \brief number of elements in columnToBin */
-    int columnToBinSize = 0;
+    DeviceBuffer<int> cellToBin;
+    /*! \brief number of elements in cellToBin */
+    int cellToBinSize = 0;
     /*! \brief number of elements allocated in device buffer */
-    int columnToBinAlloc = 0;
+    int cellToBinAlloc = 0;
     /*! \brief parameters required for the non-bonded calc. */
     NBParamGpu* nbparam = nullptr;
     /*! \brief pair-list data structures (local and non-local) */
@@ -107,7 +107,7 @@ struct NbnxmGpu
     /*! \brief staging area where fshift/energies get downloaded. Will be removed in SYCL. */
     NBStagingData nbst;
     /*! \brief local and non-local GPU streams */
-    EnumerationArray<InteractionLocality, const DeviceStream*> deviceStreams;
+    EnumerationArray<InteractionLocality, const DeviceStream*> deviceStreams = { { nullptr } };
 
     /*! \brief True if event-based timing is enabled. Always false for SYCL. */
     bool bDoTime = false;
@@ -143,6 +143,7 @@ struct NbnxmGpu
      * will be true. */
     EnumerationArray<InteractionLocality, bool> haveWork = { { false } };
 };
+#endif
 
 } // namespace gmx
 

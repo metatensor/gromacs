@@ -221,6 +221,9 @@ TorchModel::TorchModel(const std::string& fileName,
         loadModelExtensions(ext_libs, logger_);
     }
 
+    // disable graph optimizations in torchscript, can cause issues with some models
+    torch::jit::setGraphExecutorOptimize(false);
+
     // try loading the model
     if (mpiComm_.isMainRank())
     {
@@ -249,7 +252,7 @@ void TorchModel::prepareAtomPositions(ArrayRef<RVec> positions)
     inputs_.push_back(posTensor);
 }
 
-void TorchModel::prepareAtomNumbers(ArrayRef<int> atomTypes)
+void TorchModel::prepareAtomNumbers(ArrayRef<int32_t> atomTypes)
 {
     const int     N = atomTypes.size();
     torch::Tensor typesTensor =
@@ -285,23 +288,23 @@ void TorchModel::prepareMMCharges(ArrayRef<real> charges)
     inputs_.push_back(chargesTensor);
 }
 
-void TorchModel::prepareBox(matrix* box)
+void TorchModel::prepareBox(matrix& box)
 {
     torch::Tensor boxTensor =
-            torch::from_blob(*box, { DIM, DIM }, torch::TensorOptions().dtype(torchRealType));
+            torch::from_blob(box, { DIM, DIM }, torch::TensorOptions().dtype(torchRealType));
     boxTensor = boxTensor.to(torch::kFloat32).to(device_);
     inputs_.push_back(boxTensor);
 }
 
-void TorchModel::preparePbcType(PbcType* pbcType)
+void TorchModel::preparePbcType(PbcType& pbcType)
 {
     torch::Tensor pbcTensor =
             torch::tensor({ true, true, true }, torch::TensorOptions().dtype(torch::kBool));
-    if (*pbcType == PbcType::XY)
+    if (pbcType == PbcType::XY)
     {
         pbcTensor[2] = false;
     }
-    else if (*pbcType != PbcType::Xyz)
+    else if (pbcType != PbcType::Xyz)
     {
         GMX_THROW(InconsistentInputError(
                 "Option use_pbc was set to true, but PBC type is not supported."));
@@ -310,7 +313,7 @@ void TorchModel::preparePbcType(PbcType* pbcType)
     inputs_.push_back(pbcTensor);
 }
 
-void TorchModel::prepareAtomPairs(ArrayRef<int> atomPairs)
+void TorchModel::prepareAtomPairs(ArrayRef<int32_t> atomPairs)
 {
     const int     numPairs    = atomPairs.size() / 2;
     torch::Tensor pairsTensor = torch::from_blob(
@@ -338,19 +341,19 @@ void TorchModel::prepareNNPCharge(real charge)
 
 void TorchModel::evaluateModel(gmx_enerdata_t*                  enerd,
                                ArrayRef<RVec>                   forces,
-                               ArrayRef<const int>              indexLookup,
-                               ArrayRef<const int>              mmIndices,
+                               ArrayRef<const int32_t>          indexLookup,
+                               ArrayRef<const int32_t>          mmIndices,
                                ArrayRef<const std::string>      inputs,
                                ArrayRef<RVec>                   positions,
-                               ArrayRef<int>                    atomNumbers,
-                               ArrayRef<int>                    atomPairs,
+                               ArrayRef<int32_t>                atomNumbers,
+                               ArrayRef<int32_t>                atomPairs,
                                ArrayRef<RVec>                   pairShifts,
                                ArrayRef<RVec>                   positionsMM,
                                ArrayRef<real>                   chargesMM,
                                real                             nnpCharge,
                                ArrayRef<const LinkFrontierAtom> linkFrontier,
-                               matrix*                          box /* = nullptr*/,
-                               PbcType*                         pbcType /* = nullptr*/)
+                               matrix&                          box,
+                               PbcType&                         pbcType)
 {
     // prepare inputs for NN model
     // order in input vector is the same as in mdp file
@@ -495,10 +498,8 @@ void TorchModel::evaluateModel(gmx_enerdata_t*                  enerd,
     t_pbc pbc;
     if (!linkFrontier.empty())
     {
-        GMX_RELEASE_ASSERT(box && pbcType,
-                           "PBC information required when using link atoms with NNP");
         // set pbc struct
-        set_pbc(&pbc, *pbcType, *box);
+        set_pbc(&pbc, pbcType, box);
     }
     for (const auto& link : linkFrontier)
     {

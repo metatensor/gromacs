@@ -45,6 +45,7 @@
 #ifdef DIM
 #    undef DIM
 #endif
+#include <torch/csrc/jit/runtime/graph_executor.h>
 #include <torch/cuda.h>
 #include <torch/script.h>
 #include <torch/torch.h>
@@ -105,19 +106,19 @@ public:
      */
     void evaluateModel(gmx_enerdata_t*                  enerd,
                        ArrayRef<RVec>                   forces,
-                       ArrayRef<const int>              indexLookup,
-                       ArrayRef<const int>              mmIndices,
+                       ArrayRef<const int32_t>          indexLookup,
+                       ArrayRef<const int32_t>          mmIndices,
                        ArrayRef<const std::string>      inputs,
                        ArrayRef<RVec>                   positions,
-                       ArrayRef<int>                    atomNumbers,
-                       ArrayRef<int>                    atomPairs,
+                       ArrayRef<int32_t>                atomNumbers,
+                       ArrayRef<int32_t>                atomPairs,
                        ArrayRef<RVec>                   pairShifts,
                        ArrayRef<RVec>                   positionsMM,
                        ArrayRef<real>                   chargesMM,
                        real                             nnpCharge,
                        ArrayRef<const LinkFrontierAtom> linkFrontier,
-                       matrix*                          box     = nullptr,
-                       PbcType*                         pbcType = nullptr) override;
+                       matrix&                          box,
+                       PbcType&                         pbcType) override;
 
     //! helper function to check if model outputs forces
     bool outputsForces() const override;
@@ -126,10 +127,10 @@ private:
     //! Functions to prepare inputs for NN model. Create input torch::Tensors for the model.
     //! \{
     void prepareAtomPositions(ArrayRef<RVec> positions);
-    void prepareAtomNumbers(ArrayRef<int> atomTypes);
-    void prepareBox(matrix* box);
-    void preparePbcType(PbcType* pbcType);
-    void prepareAtomPairs(ArrayRef<int> atomPairs);
+    void prepareAtomNumbers(ArrayRef<int32_t> atomTypes);
+    void prepareBox(matrix& box);
+    void preparePbcType(PbcType& pbcType);
+    void prepareAtomPairs(ArrayRef<int32_t> atomPairs);
     void preparePairShifts(ArrayRef<RVec> pairShifts);
     void prepareMMPositions(ArrayRef<RVec> pos);
     void prepareMMCharges(ArrayRef<real> charges);

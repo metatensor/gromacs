@@ -41,15 +41,13 @@
 
 #include "h5md_framedataset.h"
 
+#include "gromacs/fileio/h5md/exceptions.h"
+#include "gromacs/fileio/h5md/h5md_guard.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/stringutil.h"
 #include "gromacs/utility/vectypes.h"
-
-#include "h5md_error.h"
-#include "h5md_guard.h"
-#include "h5md_util.h" // required for GMX_ASSERT calls
 
 namespace gmx
 {
@@ -160,9 +158,6 @@ template<typename ValueType>
 H5mdFrameDataSet<ValueType>::H5mdFrameDataSet(H5mdFrameDataSet<ValueType>&&) noexcept = default;
 
 template<typename ValueType>
-H5mdFrameDataSet<ValueType>& H5mdFrameDataSet<ValueType>::operator=(H5mdFrameDataSet<ValueType>&&) noexcept = default;
-
-template<typename ValueType>
 const DataSetDims& H5mdFrameDataSet<ValueType>::frameDims() const
 {
     return frameDescription_.dims();
@@ -240,7 +235,7 @@ void H5mdFrameDataSet<ValueType>::writeNextFrame(ArrayRef<const ValueType> value
         // If our write failed we shrink the data set back to its original number of frames before
         // throwing. Ignore any error here, as we are already handling a bigger problem.
         H5Dset_extent(Base::id(), extentForNumFrames(numFrames_).data());
-        GMX_H5MD_THROW_UPON_ERROR(true, "Error writing frame data.");
+        GMX_THROW(H5mdError("Error writing frame data."));
     }
 
     // Only increment frame index if the write was successful.

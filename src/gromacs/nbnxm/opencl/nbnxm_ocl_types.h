@@ -76,6 +76,7 @@ enum ePruneKind
 
 namespace gmx
 {
+class DeviceStreamManager;
 
 /*! \internal
  * \brief Data structure shared between the OpenCL device code and OpenCL host code
@@ -130,16 +131,15 @@ typedef struct cl_nbparam_params
 } cl_nbparam_params_t;
 
 
+#ifndef DOXYGEN
 /*! \internal
  * \brief Main data structure for OpenCL nonbonded force calculations.
  */
 struct NbnxmGpu
 {
-    /* \brief OpenCL device context
-     *
-     * \todo Make it constant reference, once NbnxmGpu is a proper class.
-     */
-    const DeviceContext* deviceContext_;
+    NbnxmGpu(const DeviceStreamManager& deviceStreamManager, std::optional<size_t> nLambda);
+    //! GPU device context.
+    const DeviceContext& deviceContext;
     //! OpenCL runtime data (context, kernels)
     struct gmx_device_runtime_data_t* dev_rundata = nullptr;
 
@@ -190,20 +190,20 @@ struct NbnxmGpu
     /*! \brief size of atom indices allocated in device buffer */
     int atomIndicesSize_alloc = 0;
     /*! \brief x buf ops num of atoms */
-    DeviceBuffer<int> numAtomsPerColumn;
-    /*! \brief number of elements in numAtomsPerColumn */
-    int numAtomsPerColumnSize = 0;
+    DeviceBuffer<int> numAtomsPerCell;
+    /*! \brief number of elements in numAtomsPerCell */
+    int numAtomsPerCellSize = 0;
     /*! \brief number of elements allocated in device buffer */
-    int numAtomsPerColumnAlloc = 0;
+    int numAtomsPerCellAlloc = 0;
     /*! \brief x buf ops bin index mapping */
-    DeviceBuffer<int> columnToBin;
-    /*! \brief number of elements in columnToBin */
-    int columnToBinSize = 0;
+    DeviceBuffer<int> cellToBin;
+    /*! \brief number of elements in cellToBin */
+    int cellToBinSize = 0;
     /*! \brief number of elements allocated in device buffer */
-    int columnToBinAlloc = 0;
+    int cellToBinAlloc = 0;
 
     //! local and non-local GPU queues
-    gmx::EnumerationArray<InteractionLocality, const DeviceStream*> deviceStreams;
+    gmx::EnumerationArray<InteractionLocality, const DeviceStream*> deviceStreams = { { nullptr } };
 
     /*! \brief Events used for synchronization */
     /*! \{ */
@@ -231,6 +231,7 @@ struct NbnxmGpu
     //! Timing data. TODO: deprecate this and query timers for accumulated data instead
     std::unique_ptr<gmx_wallclock_gpu_nbnxn_t> timings;
 };
+#endif
 
 } // namespace gmx
 
