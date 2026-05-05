@@ -128,6 +128,12 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     return torch::tensor({ true, true, true }, options);
 }
 
+/*! \brief Whether a requested model input uses GROMACS atom charges. */
+static bool isChargeInput(const std::string& name)
+{
+    return name == "charges" || name.rfind("charges/", 0) == 0;
+}
+
 /*! \brief Internal data structure for Metatomic runtime states. */
 struct MetatomicData
 {
@@ -138,6 +144,8 @@ struct MetatomicData
     torch::ScalarType                                 dtype             = torch::kFloat32;
     bool                                              check_consistency = false;
     torch::Device                                     device            = torch::kCPU;
+    //! Requested Metatomic per-atom charge input names.
+    std::vector<std::string> requestedChargeInputs;
 
     //! Cached NL Labels that are identical every step (created once in constructor).
     metatensor_torch::Labels cachedNLComponent;
@@ -344,6 +352,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     data_->evaluations_options = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
     data_->evaluations_options->set_length_unit("nm");
+
+    auto requestedInputs = data_->model.run_method("requested_inputs").toGenericDict();
+    for (const auto& entry : requestedInputs)
+    {
+        std::string inputName = entry.key().toStringRef();
+        if (isChargeInput(inputName))
+        {
+            data_->requestedChargeInputs.push_back(inputName);
+        }
+    }
 
     auto outputs    = data_->capabilities->outputs();
     auto v_energy   = normalize_variant(options_.params_.variant);
@@ -1344,6 +1362,65 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
                 data_->cachedTypes, strained_positions, strained_cell, data_->cachedPbc);
+
+        if (!data_->requestedChargeInputs.empty())
+        {
+            if (options_.params_.mmCharges_.empty())
+            {
+                GMX_THROW(InconsistentInputError(
+                        "Metatomic model requests charges, but topology charges are not available."));
+            }
+
+            std::vector<real> chargeValues;
+            chargeValues.reserve(numLocalMta_);
+            for (int32_t i = 0; i < numLocalMta_; ++i)
+            {
+                const int32_t mtaIndex = mtaToGlobalMta_[i];
+                if (mtaIndex < 0
+                    || mtaIndex >= static_cast<int32_t>(options_.params_.mtaIndices_.size()))
+                {
+                    GMX_THROW(InconsistentInputError(
+                            "Metatomic charge input contains an invalid atom index."));
+                }
+                const Index globalAtom = options_.params_.mtaIndices_[mtaIndex];
+                if (globalAtom < 0
+                    || globalAtom >= static_cast<Index>(options_.params_.mmCharges_.size()))
+                {
+                    GMX_THROW(InconsistentInputError(
+                            "Metatomic charge input contains an atom without a stored charge."));
+                }
+                chargeValues.push_back(options_.params_.mmCharges_[globalAtom]);
+            }
+
+            auto charges = torch::tensor(chargeValues, cpu_blob_options)
+                                   .reshape({ static_cast<int64_t>(numLocalMta_), 1 })
+                                   .to(data_->device, data_->dtype);
+            auto intOptions = torch::TensorOptions().dtype(torch::kInt32).device(data_->device);
+            auto samplesTensor = torch::zeros({ numLocalMta_, 2 }, intOptions);
+            samplesTensor.index_put_({ torch::indexing::Slice(), 1 },
+                                     torch::arange(numLocalMta_, intOptions));
+
+            auto samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                    std::vector<std::string>{ "system", "atom" }, samplesTensor);
+            auto properties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                    std::vector<std::string>{ "charge" },
+                    torch::zeros({ 1, 1 }, intOptions));
+            auto keys = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                    std::vector<std::string>{ "_" },
+                    torch::zeros({ 1, 1 }, intOptions));
+
+            auto block = torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
+                    charges, samples, std::vector<metatensor_torch::Labels>{}, properties);
+            auto chargeMap = torch::make_intrusive<metatensor_torch::TensorMapHolder>(
+                    keys, std::vector<metatensor_torch::TensorBlock>{ block });
+            chargeMap->set_info("quantity", "charge");
+            chargeMap->set_info("unit", "e");
+
+            for (const auto& inputName : data_->requestedChargeInputs)
+            {
+                system->add_data(inputName, chargeMap);
+            }
+        }
 
         tensorPrepTimer.stop();
 

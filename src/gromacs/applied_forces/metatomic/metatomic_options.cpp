@@ -86,6 +86,7 @@ static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
 static const std::string VARIANT_NC_FORCES_TAG     = "variant-nc-forces";
 static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
 static const std::string LINK_ATOMS_TAG            = "link-atoms";
+static const std::string MM_CHARGES_TAG            = "mm-charges";
 
 namespace
 {
@@ -268,9 +269,8 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
         return;
     }
 
-    // Always collect MM charges (cheap). The force provider will pass them
-    // to the model only if the model declares point_charges in its
-    // requested_inputs (model-driven, not user-controlled).
+    // Topology charges come from the unmodified topology so model-requested
+    // charge inputs remain independent of embedded-system preprocessing.
     for (const auto& molblock : top->molblock)
     {
         const auto& moltype = top->moltype[molblock.type];
@@ -367,6 +367,16 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
         GroupIndexAdder.addValue(indexValue);
     }
 
+    if (!params_.mmCharges_.empty())
+    {
+        auto chargesAdder =
+                treeBuilder.addUniformArray<real>(METATOMIC_MODULE_NAME + "-" + MM_CHARGES_TAG);
+        for (const auto& charge : params_.mmCharges_)
+        {
+            chargesAdder.addValue(charge);
+        }
+    }
+
     // Serialize link frontier as flat [embIdx, mmIdx, ...] pairs
     if (!params_.linkFrontier_.empty())
     {
@@ -401,6 +411,17 @@ void MetatomicOptions::readParamsFromKvt(const KeyValueTreeObject& tree)
                    std::end(kvtIndexArray),
                    std::begin(params_.mtaIndices_),
                    [](const KeyValueTreeValue& val) { return val.cast<std::int64_t>(); });
+
+    std::string chargeKey = METATOMIC_MODULE_NAME + "-" + MM_CHARGES_TAG;
+    if (tree.keyExists(chargeKey))
+    {
+        auto chargeArray = tree[chargeKey].asArray().values();
+        params_.mmCharges_.resize(chargeArray.size());
+        std::transform(std::begin(chargeArray),
+                       std::end(chargeArray),
+                       std::begin(params_.mmCharges_),
+                       [](const KeyValueTreeValue& val) { return val.cast<real>(); });
+    }
 
     // Deserialize link frontier
     std::string linkKey = METATOMIC_MODULE_NAME + "-link-frontier";

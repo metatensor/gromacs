@@ -3759,6 +3759,23 @@ interface implementation follow :ref:`nnpot`.
    (0.1) [nm] Distance between link atom and the bonded MM atom.
 
 
+.. _mdp-metatomic:
+
+Metatomic simulations
+^^^^^^^^^^^^^^^^^^^^^
+
+The Metatomic interface evaluates exported atomistic models through the
+applied-forces framework. Further details are described in :ref:`metatomic`.
+
+.. mdp:: metatomic-link-atoms
+
+   (false) Enable hydrogen link atoms at bonds crossing the Metatomic/MM
+   boundary. Direct MM neighbors bonded to selected Metatomic atoms are included
+   in the embedded atom set and represented as hydrogen caps during model
+   evaluation. This requires a model trained for link-atom-capped boundary
+   chemistry.
+
+
 .. _mdp-fmm:
 
 Fast Multipole Method (FMM) Interface
