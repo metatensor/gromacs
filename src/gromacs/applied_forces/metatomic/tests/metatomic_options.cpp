@@ -229,6 +229,23 @@ TEST_F(MetatomicOptionsTest, InternalsToKvtAndBack)
     EXPECT_EQ(mtaIndicesBefore, params2.mtaIndices_);
 }
 
+TEST_F(MetatomicOptionsTest, ChargesToKvtAndBack)
+{
+    MetatomicOptions metatomicOptions;
+    fillOptionsFromMdpValues(metatomicBuildInputMdpValues(), &metatomicOptions);
+
+    const std::vector<real> charges = { 0.1_real, -0.2_real, 0.3_real };
+    metatomicOptions.params_.mmCharges_ = charges;
+
+    KeyValueTreeBuilder builder;
+    EXPECT_NO_THROW(metatomicOptions.writeParamsToKvt(builder.rootObject()));
+
+    metatomicOptions.params_.mmCharges_.clear();
+    EXPECT_NO_THROW(metatomicOptions.readParamsFromKvt(builder.build()));
+
+    EXPECT_EQ(charges, metatomicOptions.parameters().mmCharges_);
+}
+
 } // namespace test
 
 } // namespace gmx

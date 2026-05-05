@@ -116,7 +116,7 @@ struct MetatomicParameters
 
     //! Link frontier atoms (bonds crossing ML/MM boundary)
     std::vector<LinkFrontierAtom> linkFrontier_;
-    //! MM point charges for electrostatic embedding (indexed by global atom)
+    //! Topology charges indexed by global atom
     std::vector<real>             mmCharges_;
 };
 
