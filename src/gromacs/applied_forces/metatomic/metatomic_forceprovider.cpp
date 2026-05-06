@@ -743,12 +743,12 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
     }
 }
 
-/*! \brief Convert GROMACS excluded pairlist to MTA model indices.
+/*! \brief Convert GROMACS pairlists to MTA model indices.
  *
  * Called on every PairlistConstructed signal. Maps GROMACS local buffer
- * indices in excludedPairlist_ to MTA model indices via gmxLocalToMtaIdx_,
- * and negates cell shifts (GROMACS shifts first atom, metatensor shifts
- * second atom).
+ * indices in the plain interacting and excluded pairlists to MTA model
+ * indices via gmxLocalToMtaIdx_, and negates cell shifts (GROMACS shifts
+ * first atom, metatensor shifts second atom).
  */
 void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& signal)
 {
@@ -761,20 +761,26 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
     // Sign convention: GROMACS shifts atom I (first): d = x[I]+shift - x[J].
     // Metatensor shifts atom J (second): r_ij = x[J]+cell·box - x[I].
     // So metatensor cell shift = -GROMACS cell shift.
-    for (const auto& entry : signal.excludedPairlist_)
+    const auto appendPairlistEntries = [this](const auto& pairlistEntries)
     {
-        const auto& [atomPair, shiftIndex] = entry;
-        const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
-        const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
-
-        if (idxA != -1 && idxB != -1)
+        for (const auto& entry : pairlistEntries)
         {
-            pairlistMta_.push_back(idxA);
-            pairlistMta_.push_back(idxB);
-            const IVec gmxShift = shiftIndexToXYZ(shiftIndex);
-            cellShiftsMta_.push_back(IVec(-gmxShift[XX], -gmxShift[YY], -gmxShift[ZZ]));
+            const auto& [atomPair, shiftIndex] = entry;
+            const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
+            const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
+
+            if (idxA != -1 && idxB != -1)
+            {
+                pairlistMta_.push_back(idxA);
+                pairlistMta_.push_back(idxB);
+                const IVec gmxShift = shiftIndexToXYZ(shiftIndex);
+                cellShiftsMta_.push_back(IVec(-gmxShift[XX], -gmxShift[YY], -gmxShift[ZZ]));
+            }
         }
-    }
+    };
+
+    appendPairlistEntries(signal.pairlist_);
+    appendPairlistEntries(signal.excludedPairlist_);
 }
 
 
