@@ -15,5 +15,6 @@ metatomic-variant-energy-uq =
 metatomic-non-conservative = false
 metatomic-variant-nc-forces = 
 metatomic-variant-nc-stress = 
+metatomic-link-atoms     = false
 </String>
 </ReferenceData>
