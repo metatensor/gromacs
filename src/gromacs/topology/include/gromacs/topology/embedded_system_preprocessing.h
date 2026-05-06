@@ -183,7 +183,7 @@ void modifyEmbeddedTwoCenterInteractions(gmx_mtop_t*              mtop,
 
 /*! \brief Modifies three-centers interactions (i.e. Angles, Settles)
  *
- * Removes any other three-centers bonded interactions including 2 or more embedded atoms
+ * Removes three-center bonded interactions where all atoms are embedded
  * Any restraints and constraints will be kept
  * Any F_SETTLE containing embedded atoms will be converted to the pair of F_CONNBONDS
  * \param[in,out] mtop topology to be modified
@@ -198,7 +198,7 @@ void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
 
 /*! \brief Modifies four-centers interactions
  *
- * Removes any other four-centers bonded interactions including 3 or more embedded atoms
+ * Removes four-center bonded interactions where all atoms are embedded
  * Any restraints and constraints will be kept
  * \param[in,out] mtop topology to be modified
  * \param[in] embeddedIndices set with global indices of embedded atoms

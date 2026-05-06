@@ -1089,46 +1089,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     copy_mat(inputs.box_, box_);
 
-    // Link atom setup: boundary MM atoms are replaced with hydrogen link
-    // atoms in the model input.  Positions are overwritten here (in C++),
-    // then recomputed inside the autograd graph (via torch ops) so that
-    // forces are automatically correct via the chain rule.
-    //
-    // The user sees this as: "N embedded atoms, M of which are link atoms
-    // (hydrogen caps at ML/MM boundary bonds)."
-    if (!data_->linkFrontier.empty())
-    {
-        bool needTypesRebuild = false;
-        // Build a map from GROMACS global atom index -> MTA local model index
-        // for link atom index lookups.  mtaToGmxLocal_ maps model index -> gmx
-        // local index; gmxLocalToMtaIdx_ maps gmx local -> model index.
-        // Link frontier stores GROMACS global indices, so we use gmxLocalToMtaIdx_.
-        for (auto& link : data_->linkFrontier)
-        {
-            int32_t embGmxGlobal = link.getEmbeddedIndex();
-            int32_t mmGmxGlobal  = link.getMMIndex();
-
-            // In serial mode, global == local for the first N atoms
-            int32_t embMtaIdx = (embGmxGlobal < static_cast<int32_t>(gmxLocalToMtaIdx_.size()))
-                                    ? gmxLocalToMtaIdx_[embGmxGlobal] : -1;
-            int32_t mmMtaIdx  = (mmGmxGlobal < static_cast<int32_t>(gmxLocalToMtaIdx_.size()))
-                                    ? gmxLocalToMtaIdx_[mmGmxGlobal] : -1;
-            // Always set input indices (initialize to -1 if not found)
-            link.setInputIndices(embMtaIdx, mmMtaIdx);
-            if (embMtaIdx >= 0 && mmMtaIdx >= 0)
-            {
-                atomNumbers_[mmMtaIdx] = link.linkAtomNumber();  // H = 1
-                needTypesRebuild = true;
-            }
-        }
-        if (needTypesRebuild)
-        {
-            data_->cachedTypes = torch::tensor(
-                    atomNumbers_, torch::TensorOptions().dtype(torch::kInt32))
-                    .to(data_->device);
-        }
-    }
-
     // Newton NL mode: in parallel, each rank needs ALL pairs involving its
     // home atoms (not just the ones assigned by the eighth-shell DD
     // decomposition). Uses the GROMACS pairlist as the pair source, then
@@ -1161,10 +1121,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             MetatomicTimer timer("exchangeBackwardGhosts", mpiComm_);
             exchangeBackwardGhosts(inputs.dd_, inputs.box_, maxCutoff);
         }
-
-        // Rebuild cachedTypes after backward ghost exchange extended atomNumbers_
-        data_->cachedTypes =
-                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
 
         // Step 2: Exchange backward-direction pairs.  Discovers pairs from
         // other ranks' pairlists that involve this rank's home atoms.
@@ -1199,6 +1155,51 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         cellShiftsMta_.insert(cellShiftsMta_.end(),
                               backwardShiftsMta_.begin(),
                               backwardShiftsMta_.end());
+    }
+
+    bool needTypesRebuild = useNewtonNL;
+    // Boundary MM atoms are represented as hydrogen link atoms in the model
+    // input. The frontier stores GROMACS global atom indices, while runtime
+    // model arrays are indexed by local MTA model index. The conversion goes
+    // through mtaIndices_ so it works for serial execution, DD home atoms,
+    // halo atoms, and backward ghosts.
+    if (!data_->linkFrontier.empty())
+    {
+        std::unordered_map<int32_t, int32_t> globalAtomToModelIdx;
+        globalAtomToModelIdx.reserve(numLocalMta_);
+        for (int32_t i = 0; i < numLocalMta_; ++i)
+        {
+            const int32_t globalMtaIdx = mtaToGlobalMta_[i];
+            if (globalMtaIdx >= 0
+                && globalMtaIdx < static_cast<int32_t>(options_.params_.mtaIndices_.size()))
+            {
+                globalAtomToModelIdx.emplace(
+                        static_cast<int32_t>(options_.params_.mtaIndices_[globalMtaIdx]), i);
+            }
+        }
+
+        for (auto& link : data_->linkFrontier)
+        {
+            const auto embIt = globalAtomToModelIdx.find(link.getEmbeddedIndex());
+            const auto mmIt  = globalAtomToModelIdx.find(link.getMMIndex());
+
+            const int32_t embMtaIdx =
+                    (embIt != globalAtomToModelIdx.end()) ? embIt->second : -1;
+            const int32_t mmMtaIdx = (mmIt != globalAtomToModelIdx.end()) ? mmIt->second : -1;
+
+            link.setInputIndices(embMtaIdx, mmMtaIdx);
+            if (embMtaIdx >= 0 && mmMtaIdx >= 0)
+            {
+                atomNumbers_[mmMtaIdx] = link.linkAtomNumber();
+                needTypesRebuild       = true;
+            }
+        }
+    }
+
+    if (needTypesRebuild)
+    {
+        data_->cachedTypes =
+                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
     }
 
     // Model inference
