@@ -1669,8 +1669,27 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             {
                 selectedModelIndices.reserve(numHomeMta_ + activeLinkAtoms.size());
                 selectedSet.reserve(numHomeMta_ + activeLinkAtoms.size());
+                std::unordered_map<int32_t, bool> linkModelIndexOwnedByHomeEmbedded;
+                linkModelIndexOwnedByHomeEmbedded.reserve(activeLinkAtoms.size());
+                for (const auto& link : activeLinkAtoms)
+                {
+                    const bool ownedByHomeEmbedded = link.embeddedModelIndex < numHomeMta_;
+                    auto [it, inserted] =
+                            linkModelIndexOwnedByHomeEmbedded.emplace(link.linkModelIndex,
+                                                                      ownedByHomeEmbedded);
+                    if (!inserted)
+                    {
+                        it->second = it->second || ownedByHomeEmbedded;
+                    }
+                }
                 for (int32_t i = 0; i < numHomeMta_; ++i)
                 {
+                    const auto linkOwnership = linkModelIndexOwnedByHomeEmbedded.find(i);
+                    if (linkOwnership != linkModelIndexOwnedByHomeEmbedded.end()
+                        && !linkOwnership->second)
+                    {
+                        continue;
+                    }
                     selectedModelIndices.push_back(i);
                     selectedSet.insert(i);
                 }
