@@ -3806,15 +3806,24 @@ Metatomic simulations
 The Metatomic interface evaluates exported atomistic models through the
 applied-forces framework. Further details are described in :ref:`metatomic`.
 
+.. mdp:: metatomic-oniom
+
+   (false) Enable the subtractive ONIOM topology preprocessing for the selected
+   Metatomic input group. When enabled, bonded and non-bonded
+   molecular-mechanics terms represented by the model are removed from the
+   classical force-field contribution and the Metatomic model contribution is
+   added through the applied-forces framework. When disabled, the Metatomic
+   contribution is added on top of the unmodified molecular-mechanics topology.
+
 .. mdp:: metatomic-link-atoms
 
    (false) Enable hydrogen link atoms at bonds crossing the Metatomic/MM
    boundary. Direct MM neighbors bonded to selected Metatomic atoms are included
    in the embedded atom set and represented as hydrogen caps during model
-   evaluation. This requires a model trained for link-atom-capped boundary
-   chemistry. If a boundary MM atom is bonded to multiple selected Metatomic
-   atoms, each cut bond is represented by a distinct hydrogen cap in the model
-   input.
+   evaluation. This requires :mdp:`metatomic-oniom` and a model trained for
+   link-atom-capped boundary chemistry. If a boundary MM atom is bonded to
+   multiple selected Metatomic atoms, each cut bond is represented by a distinct
+   hydrogen cap in the model input.
 
 
 .. _mdp-fmm:

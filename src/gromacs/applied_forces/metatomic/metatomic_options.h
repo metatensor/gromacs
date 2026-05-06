@@ -103,6 +103,9 @@ struct MetatomicParameters
     //! (default whole System)
     std::string inputGroup = "System";
 
+    //! Enable subtractive ONIOM topology preprocessing
+    bool oniom = false;
+
     //! Enable ONIOM link atoms at cut bonds between ML and MM regions
     bool linkAtoms = false;
 
