@@ -378,16 +378,15 @@ if (SPHINX_FOUND)
         release-notes/2027/major/miscellaneous.rst
         release-notes/2027/major/api.rst
         release-notes/2026/2026.1.rst
+        release-notes/2026/2026.2.rst
         release-notes/2026/major/highlights.rst
         release-notes/2026/major/features.rst
         release-notes/2026/major/performance.rst
-        release-notes/2026/major/tools.rst
         release-notes/2026/major/bugs-fixed.rst
         release-notes/2026/major/removed-functionality.rst
         release-notes/2026/major/deprecated-functionality.rst
         release-notes/2026/major/portability.rst
         release-notes/2026/major/miscellaneous.rst
-        release-notes/2026/major/api.rst
         release-notes/2025/2025.1.rst
         release-notes/2025/2025.2.rst
         release-notes/2025/2025.3.rst
@@ -402,7 +401,6 @@ if (SPHINX_FOUND)
         release-notes/2025/major/deprecated-functionality.rst
         release-notes/2025/major/portability.rst
         release-notes/2025/major/miscellaneous.rst
-        release-notes/2025/major/api.rst
         release-notes/2024/2024.1.rst
         release-notes/2024/2024.2.rst
         release-notes/2024/2024.3.rst
@@ -415,11 +413,9 @@ if (SPHINX_FOUND)
         release-notes/2024/major/performance.rst
         release-notes/2024/major/tools.rst
         release-notes/2024/major/bugs-fixed.rst
-        release-notes/2024/major/removed-functionality.rst
         release-notes/2024/major/deprecated-functionality.rst
         release-notes/2024/major/portability.rst
         release-notes/2024/major/miscellaneous.rst
-        release-notes/2024/major/api.rst
         release-notes/2023/2023.1.rst
         release-notes/2023/2023.2.rst
         release-notes/2023/2023.3.rst

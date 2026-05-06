@@ -49,7 +49,6 @@
 #include <vector>
 
 #include "gromacs/domdec/domdec_zones.h"
-#include "gromacs/gpu_utils/hostallocator.h"
 #include "gromacs/topology/block.h"
 #include "gromacs/topology/idef.h"
 #include "gromacs/utility/defaultinitializationallocator.h"
@@ -64,7 +63,6 @@ struct gmx_domdec_comm_t;
 struct gmx_domdec_constraints_t;
 struct gmx_domdec_specat_comm_t;
 class gmx_ga2la_t;
-struct gmx_pme_comm_n_box_t;
 struct t_inputrec;
 class gmx_reverse_top_t;
 struct gmx_mtop_t;
@@ -142,12 +140,7 @@ struct gmx_domdec_t
     /* The cell index of the main rank */
     gmx::IVec main_ci = { 0, 0, 0 };
     /* Communication with the PME only nodes */
-    int                   numPmeOnlyRanks      = 0;
-    int                   pme_nodeid           = 0;
-    gmx_bool              pme_receive_vir_ener = false;
-    gmx_pme_comm_n_box_t* cnb                  = nullptr;
-    int                   nreq_pme             = 0;
-    MPI_Request           req_pme[8];
+    int numPmeOnlyRanks = 0;
 
     /* Properties of the unit cell */
     UnitCellInfo unitCellInfo;
@@ -207,9 +200,6 @@ struct gmx_domdec_t
 
     //! The handler for checking whether the local topology is missing interactions
     std::unique_ptr<gmx::LocalTopologyChecker> localTopologyChecker;
-
-    /* gmx_pme_recv_f buffer */
-    gmx::HostVector<gmx::RVec> pmeForceReceiveBuffer;
 
     //! GPU halo exchange aspects specific to NVSHMEM.
     std::unique_ptr<gmx::GpuHaloExchangeNvshmemHelper> gpuHaloExchangeNvshmemHelper;

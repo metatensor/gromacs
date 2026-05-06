@@ -71,7 +71,6 @@
 #include "gromacs/domdec/localtopologychecker.h"
 #include "gromacs/domdec/mdsetup.h"
 #include "gromacs/domdec/nsgrid.h"
-#include "gromacs/ewald/pme_pp.h"
 #include "gromacs/gmxlib/network.h"
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/imd/imd.h"
@@ -145,7 +144,7 @@ static void print_ddzone(FILE* fp, int d, int i, int j, gmx_ddzone_t* zone)
             zone->min0,
             zone->max1,
             zone->mch0,
-            zone->mch0,
+            zone->mch1,
             zone->p1_0,
             zone->p1_1);
 }
@@ -799,7 +798,7 @@ static void get_load_distribution(gmx_domdec_t* dd, gmx_wallcycle* wcycle)
 
     comm = dd->comm.get();
 
-    bSepPME = (dd->pme_nodeid >= 0);
+    bSepPME = (dd->numPmeOnlyRanks > 0);
 
     if (dd->ndim == 0 && bSepPME)
     {
@@ -2614,6 +2613,7 @@ void print_dd_statistics(gmx_domdec_t* dd, const t_inputrec& inputrec, FILE* fpl
 //!\brief TODO Remove fplog when group scheme and charge groups are gone
 void dd_partition_system(FILE*                     fplog,
                          const gmx::MDLogger&      mdlog,
+                         const SimulationWorkload& simulationWork,
                          int64_t                   step,
                          gmx_domdec_t*             dd,
                          bool                      bMainState,
@@ -2624,6 +2624,7 @@ void dd_partition_system(FILE*                     fplog,
                          gmx::ImdSession*          imdSession,
                          pull_t*                   pull_work,
                          t_state*                  state_local,
+                         StatePropagatorDataGpu*   stateGpu,
                          gmx::ForceBuffers*        f,
                          gmx::MDAtoms*             mdAtoms,
                          gmx_localtop_t*           top_local,
@@ -2699,7 +2700,8 @@ void dd_partition_system(FILE*                     fplog,
         bool bCheckWhetherToTurnDlbOn = dd_dlb_get_should_check_whether_to_turn_dlb_on(dd);
 
         /* Print load every nstlog, first and last step to the log file */
-        bool bLogLoad = ((inputrec.nstlog > 0 && step % inputrec.nstlog == 0) || comm->n_load_collect == 0
+        bool bLogLoad = ((inputrec.outputControl.nstlog > 0 && step % inputrec.outputControl.nstlog == 0)
+                         || comm->n_load_collect == 0
                          || (inputrec.nsteps >= 0
                              && (step + inputrec.nstlist > inputrec.init_step + inputrec.nsteps)));
 
@@ -2919,14 +2921,14 @@ void dd_partition_system(FILE*                     fplog,
         // This can only be done when are both redistributing this step and we have the correct
         // atom count per column from the old state. This is available when atoms were put on
         // the NBNxM grid at the last re-partitioning.
-        gmx::ArrayRef<const int> localGridNumAtomsPerColumn;
+        gmx::ArrayRef<const int> localGridNumAtomsPerCell;
         if (bRedist && comm->putAtomsOnGridAtLastPartitioning)
         {
-            localGridNumAtomsPerColumn = fr->nbv->getLocalGridNumAtomsPerColumn();
+            localGridNumAtomsPerCell = fr->nbv->getLocalGridNumAtomsPerCell();
         }
         comm->updateGroupsCog->addCogs(gmx::arrayRefFromArray(dd->globalAtomIndices.data(), dd->numHomeAtoms),
                                        state_local->x,
-                                       localGridNumAtomsPerColumn);
+                                       localGridNumAtomsPerCell);
 
         wallcycle_sub_stop(wcycle, WallCycleSubCounter::DDAddCogs);
     }
@@ -3178,26 +3180,9 @@ void dd_partition_system(FILE*                     fplog,
 
     /* Update atom data for mdatoms and several algorithms */
     wallcycle_sub_stop(wcycle, WallCycleSubCounter::DDTopOther);
-    mdAlgorithmsSetupAtomData(dd, inputrec, top_global, top_local, fr, f, mdAtoms, constr, vsite, nullptr);
+    mdAlgorithmsSetupAtomData(
+            simulationWork, dd, inputrec, top_global, top_local, fr, f, mdAtoms, constr, vsite, nullptr, stateGpu);
     wallcycle_sub_start_nocount(wcycle, WallCycleSubCounter::DDTopOther);
-
-    auto* mdatoms = mdAtoms->mdatoms();
-    if (!dd->hasPmeDuty)
-    {
-        /* Send the charges and/or c6/sigmas to our PME only node */
-        gmx_pme_send_parameters(dd,
-                                *fr->ic,
-                                mdatoms->nChargePerturbed != 0,
-                                mdatoms->nTypePerturbed != 0,
-                                mdatoms->chargeA,
-                                mdatoms->chargeB,
-                                mdatoms->sqrt_c6A,
-                                mdatoms->sqrt_c6B,
-                                mdatoms->sigmaA,
-                                mdatoms->sigmaB,
-                                dd_pme_maxshift_x(*dd),
-                                dd_pme_maxshift_y(*dd));
-    }
 
     if (dd->atomSets != nullptr)
     {
@@ -3266,9 +3251,10 @@ void dd_partition_system(FILE*                     fplog,
     // Now we have made the local atom sets and x is up to date, MDModules can be signaled
     MDModulesAtomsRedistributedSignal mdModulesAtomsRedistributedSignal(
             state_local->box,
-            gmx::makeConstArrayRef(state_local->x).subArray(0, comm->atomRanges.numHomeAtoms()),
-            gmx::makeConstArrayRef(dd->globalAtomIndices)
-                    .subArray(0, comm->atomRanges.end(DDAtomRanges::Type::Zones)));
+            makeConstArrayRef(state_local->x).subArray(0, comm->atomRanges.numHomeAtoms()),
+            makeConstArrayRef(mdAtoms->mdatoms()->chargeA).subArray(0, comm->atomRanges.numHomeAtoms()),
+            makeConstArrayRef(mdAtoms->mdatoms()->massT).subArray(0, comm->atomRanges.numHomeAtoms()),
+            makeConstArrayRef(dd->globalAtomIndices).subArray(0, comm->atomRanges.end(DDAtomRanges::Type::Zones)));
     mdModulesNotifiers.simulationRunNotifier_.notify(mdModulesAtomsRedistributedSignal);
 
     wallcycle_stop(wcycle, WallCycleCounter::Domdec);

@@ -122,7 +122,6 @@
 #include "gromacs/utility/message_string_collector.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/stringutil.h"
-#include "gromacs/utility/unique_cptr.h"
 #include "gromacs/utility/vec.h"
 #include "gromacs/utility/vectypes.h"
 
@@ -642,31 +641,47 @@ gmx_pme_t::gmx_pme_t(const gmx::MpiComm* mpiComm) :
 
 //! @endcond
 
-gmx_pme_t* gmx_pme_init(const gmx_domdec_t*              dd,
-                        const NumPmeDomains&             numPmeDomains,
-                        const t_inputrec*                ir,
-                        const matrix                     box,
-                        real                             haloExtentForAtomDisplacement,
-                        gmx_bool                         bFreeEnergy_q,
-                        gmx_bool                         bFreeEnergy_lj,
-                        gmx_bool                         bReproducible,
-                        real                             ewaldcoeff_q,
-                        real                             ewaldcoeff_lj,
-                        int                              nthread,
-                        PmeRunMode                       runMode,
-                        PmeGpu*                          pmeGpu,
-                        const DeviceContext*             deviceContext,
-                        const DeviceStream*              deviceStream,
-                        const PmeGpuProgram*             pmeGpuProgram,
-                        const gmx::MDLogger&             mdlog,
-                        std::shared_ptr<PmeGridsStorage> pmeGridsStoragePtr)
+gmx_pme_t::~gmx_pme_t() = default;
+
+/*! \brief Construct PME data
+ *
+ * \throws   gmx::InconsistentInputError if input grid sizes/PME order are inconsistent.
+ * \returns  Pointer to newly allocated and initialized PME data.
+ *
+ * \p pmeGpu can be passed in an reused, a new object is created when necessary
+ * \p pmeGridsStorage can be nullptr, in which case new PmeGridsStorage is allocated.
+ * When \p pmeGridsStorage is not a nullptr, grid storage is taken from there.
+ *
+ * \todo We should evolve something like a \c GpuManager that holds \c
+ * DeviceInformation* and \c PmeGpuProgram* and perhaps other
+ * related things whose lifetime can/should exceed that of a task (or
+ * perhaps task manager). See Issue #2522.
+ */
+static std::unique_ptr<gmx_pme_t> pmeInitWithStorage(const gmx_domdec_t*  dd,
+                                                     const NumPmeDomains& numPmeDomains,
+                                                     const t_inputrec*    ir,
+                                                     const matrix         box,
+                                                     real       haloExtentForAtomDisplacement,
+                                                     gmx_bool   bFreeEnergy_q,
+                                                     gmx_bool   bFreeEnergy_lj,
+                                                     gmx_bool   bReproducible,
+                                                     real       ewaldcoeff_q,
+                                                     real       ewaldcoeff_lj,
+                                                     int        nthread,
+                                                     PmeRunMode runMode,
+                                                     std::unique_ptr<PmeGpu>&& pmeGpu,
+                                                     const DeviceContext*      deviceContext,
+                                                     const DeviceStream*       deviceStream,
+                                                     const PmeGpuProgram*      pmeGpuProgram,
+                                                     const gmx::MDLogger&      mdlog,
+                                                     std::shared_ptr<PmeGridsStorage> pmeGridsStoragePtr)
 {
     if (debug)
     {
         fprintf(debug, "Creating PME data structures.\n");
     }
 
-    gmx::unique_cptr<gmx_pme_t, gmx_pme_destroy> pme(new gmx_pme_t(dd ? &dd->mpiComm() : nullptr));
+    std::unique_ptr<gmx_pme_t> pme = std::make_unique<gmx_pme_t>(dd ? &dd->mpiComm() : nullptr);
 
     /* When pmeGridsStorage!=nullptr we reuse storage for the PME grids.
      * We would like to reuse the fft grids, but that's harder
@@ -924,9 +939,6 @@ gmx_pme_t* gmx_pme_init(const gmx_domdec_t*              dd,
     pme->bsp_mod[YY].resize(pme->nky);
     pme->bsp_mod[ZZ].resize(pme->nkz);
 
-    pme->gpu     = pmeGpu; /* Carrying over the single GPU structure */
-    pme->runMode = runMode;
-
     /* The required size of the interpolation grid, including overlap.
      * The allocated size (pmegrid_n?) might be slightly larger.
      */
@@ -950,6 +962,67 @@ gmx_pme_t* gmx_pme_init(const gmx_domdec_t*              dd,
             pme->nkz, pme->pmegrid_start_iz, pme->pmegrid_nz_base, checkRoundingAtBoundary);
 
     pme->spline_work = std::make_unique<pme_spline_work>(pme->pme_order);
+
+    if (!pme->bP3M)
+    {
+        /* Use plain SPME B-spline interpolation */
+        pme->bsp_mod = make_bspline_moduli(pme->nkx, pme->nky, pme->nkz, pme->pme_order);
+    }
+    else
+    {
+        /* Use the P3M grid-optimized influence function */
+        pme->bsp_mod = make_p3m_bspline_moduli(pme->nkx, pme->nky, pme->nkz, pme->pme_order);
+    }
+
+    /* Use atc[0] for spreading */
+    const int firstDimIndex   = (numPmeDomains.x > 1 ? 0 : 1);
+    MPI_Comm  mpiCommFirstDim = (pme->nnodes > 1 ? pme->mpi_comm_d[firstDimIndex] : MPI_COMM_NULL);
+    bool      doSpread        = true;
+    pme->atc.emplace_back(mpiCommFirstDim, pme->nthread, pme->pme_order, firstDimIndex, doSpread);
+    if (pme->ndecompdim >= 2)
+    {
+        const int secondDimIndex = 1;
+        doSpread                 = false;
+        pme->atc.emplace_back(pme->mpi_comm_d[1], pme->nthread, pme->pme_order, secondDimIndex, doSpread);
+    }
+
+    pme->runMode = runMode;
+    if (pme->runMode != PmeRunMode::CPU)
+    {
+        // Initialize PME GPU before grids storage, because in mixed
+        // run mode they can do pinned host allocations.
+        if (pmeGpu)
+        {
+            // This must be a re-initialization
+            GMX_ASSERT(!pme->gpu, "We expect to have only a single PmeGpu object");
+            std::swap(pme->gpu, pmeGpu); /* Carrying over the single GPU structure */
+        }
+        // Initial check of validity of the input for running on the GPU
+        std::string errorString;
+        bool        canRunOnGpu = pme_gpu_check_restrictions(pme.get(), &errorString);
+        if (!canRunOnGpu)
+        {
+            GMX_THROW(gmx::NotImplementedError(errorString));
+        }
+        if (!pme->gpu)
+        {
+            GMX_RELEASE_ASSERT(deviceContext != nullptr,
+                               "Device context can not be nullptr when setting up PME on GPU.");
+            GMX_RELEASE_ASSERT(deviceStream != nullptr,
+                               "Device stream can not be nullptr when setting up PME on GPU.");
+
+            pme->gpu = std::make_unique<PmeGpu>(*pme, *deviceContext, *deviceStream, pmeGpuProgram);
+
+            // Set the box, this is only done once, here, when the box is constant
+            pme_gpu_update_input_box(pme->gpu.get(), box, pme->recipbox, &pme->boxVolume);
+        }
+        const bool useMdGpuGraph = false; // This will be reset later after PP communication
+        pme_gpu_reinit(pme->gpu.get(), pme.get(), useMdGpuGraph);
+    }
+    else
+    {
+        GMX_ASSERT(pme->gpu == nullptr, "Should not have PME GPU object when PME is on a CPU.");
+    }
 
     if (pme->doCoulomb)
     {
@@ -1002,61 +1075,59 @@ gmx_pme_t* gmx_pme_init(const gmx_domdec_t*              dd,
         }
     }
 
-    if (!pme->bP3M)
-    {
-        /* Use plain SPME B-spline interpolation */
-        pme->bsp_mod = make_bspline_moduli(pme->nkx, pme->nky, pme->nkz, pme->pme_order);
-    }
-    else
-    {
-        /* Use the P3M grid-optimized influence function */
-        pme->bsp_mod = make_p3m_bspline_moduli(pme->nkx, pme->nky, pme->nkz, pme->pme_order);
-    }
-
-    /* Use atc[0] for spreading */
-    const int firstDimIndex   = (numPmeDomains.x > 1 ? 0 : 1);
-    MPI_Comm  mpiCommFirstDim = (pme->nnodes > 1 ? pme->mpi_comm_d[firstDimIndex] : MPI_COMM_NULL);
-    bool      doSpread        = true;
-    pme->atc.emplace_back(mpiCommFirstDim, pme->nthread, pme->pme_order, firstDimIndex, doSpread);
-    if (pme->ndecompdim >= 2)
-    {
-        const int secondDimIndex = 1;
-        doSpread                 = false;
-        pme->atc.emplace_back(pme->mpi_comm_d[1], pme->nthread, pme->pme_order, secondDimIndex, doSpread);
-    }
-
-    // Initial check of validity of the input for running on the GPU
-    if (pme->runMode != PmeRunMode::CPU)
-    {
-        std::string errorString;
-        bool        canRunOnGpu = pme_gpu_check_restrictions(pme.get(), &errorString);
-        if (!canRunOnGpu)
-        {
-            GMX_THROW(gmx::NotImplementedError(errorString));
-        }
-        const bool useMdGpuGraph = false; // This will be reset later after PP communication
-        pme_gpu_reinit(pme.get(), deviceContext, deviceStream, pmeGpuProgram, useMdGpuGraph, box);
-    }
-    else
-    {
-        GMX_ASSERT(pme->gpu == nullptr, "Should not have PME GPU object when PME is on a CPU.");
-    }
-
     pme->pmeSolve = std::make_unique<PmeSolve>(pme->nthread, pme->nkx);
 
     // no exception was thrown during the init, so we hand over the PME structure handle
-    return pme.release();
+    return pme;
 }
 
-void gmx_pme_reinit(struct gmx_pme_t**  pmedata,
-                    const gmx_domdec_t* dd,
-                    struct gmx_pme_t*   pme_src,
-                    const t_inputrec*   ir,
-                    const ivec          grid_size,
-                    real                ewaldcoeff_q,
-                    real                ewaldcoeff_lj)
+std::unique_ptr<gmx_pme_t> gmx_pme_init(const gmx_domdec_t*  dd,
+                                        const NumPmeDomains& numPmeDomains,
+                                        const t_inputrec*    ir,
+                                        const matrix         box,
+                                        real                 haloExtentForAtomDisplacement,
+                                        gmx_bool             bFreeEnergy_q,
+                                        gmx_bool             bFreeEnergy_lj,
+                                        gmx_bool             bReproducible,
+                                        real                 ewaldcoeff_q,
+                                        real                 ewaldcoeff_lj,
+                                        int                  nthread,
+                                        PmeRunMode           runMode,
+                                        const DeviceContext* deviceContext,
+                                        const DeviceStream*  deviceStream,
+                                        const PmeGpuProgram* pmeGpuProgram,
+                                        const gmx::MDLogger& mdlog)
 {
-    GMX_RELEASE_ASSERT(pme_src != nullptr, "Need a source gmx_pme_t object");
+    return pmeInitWithStorage(dd,
+                              numPmeDomains,
+                              ir,
+                              box,
+                              haloExtentForAtomDisplacement,
+                              bFreeEnergy_q,
+                              bFreeEnergy_lj,
+                              bReproducible,
+                              ewaldcoeff_q,
+                              ewaldcoeff_lj,
+                              nthread,
+                              runMode,
+                              {},
+                              deviceContext,
+                              deviceStream,
+                              pmeGpuProgram,
+                              mdlog,
+                              nullptr);
+}
+
+std::unique_ptr<gmx_pme_t> gmx_pme_reinit(const gmx_domdec_t*       dd,
+                                          const gmx_pme_t&          pmeSrc,
+                                          std::unique_ptr<PmeGpu>&& pmeGpu,
+                                          const t_inputrec*         ir,
+                                          const ivec                grid_size,
+                                          real                      ewaldcoeff_q,
+                                          real                      ewaldcoeff_lj)
+{
+    GMX_ASSERT(pmeSrc.runMode == PmeRunMode::CPU || pmeGpu,
+               "Need a valid PmeGpu object when running PME on GPU");
 
     // Create a copy of t_inputrec fields that are used in gmx_pme_init().
     // TODO: This would be better as just copying a sub-structure that contains
@@ -1074,43 +1145,52 @@ void gmx_pme_reinit(struct gmx_pme_t**  pmedata,
     irc.nkz                    = grid_size[ZZ];
     irc.fourier_spacing        = ir->fourier_spacing;
 
+    std::unique_ptr<gmx_pme_t> pmedata;
+
     try
     {
         // This is reinit. Any logging should have been done at first init.
         // Here we should avoid writing notes for settings the user did not
         // set directly.
         const gmx::MDLogger dummyLogger;
-        const matrix        dummyBox = { { 0 } };
-        GMX_ASSERT(pmedata, "Invalid PME pointer");
-        NumPmeDomains numPmeDomains = { pme_src->nnodes_major, pme_src->nnodes_minor };
-        *pmedata                    = gmx_pme_init(dd,
-                                numPmeDomains,
-                                &irc,
-                                dummyBox,
-                                pme_src->haloExtentForAtomDisplacement,
-                                pme_src->bFEP_q,
-                                pme_src->bFEP_lj,
-                                false,
-                                ewaldcoeff_q,
-                                ewaldcoeff_lj,
-                                pme_src->nthread,
-                                pme_src->runMode,
-                                pme_src->gpu,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                dummyLogger,
-                                pme_src->pmeGridsStorage);
+        const matrix        dummyBox      = { { 0 } };
+        const NumPmeDomains numPmeDomains = { pmeSrc.nnodes_major, pmeSrc.nnodes_minor };
+        pmedata                           = pmeInitWithStorage(dd,
+                                     numPmeDomains,
+                                     &irc,
+                                     dummyBox,
+                                     pmeSrc.haloExtentForAtomDisplacement,
+                                     pmeSrc.bFEP_q,
+                                     pmeSrc.bFEP_lj,
+                                     false,
+                                     ewaldcoeff_q,
+                                     ewaldcoeff_lj,
+                                     pmeSrc.nthread,
+                                     pmeSrc.runMode,
+                                     std::move(pmeGpu),
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     dummyLogger,
+                                     pmeSrc.pmeGridsStorage);
         /* When running PME on the CPU not using domain decomposition,
          * the atom data is allocated once only in gmx_pme_(re)init().
          */
-        if (!pme_src->gpu && pme_src->nnodes == 1)
+        if (!pmedata->gpu && pmedata->nnodes == 1)
         {
-            gmx_pme_reinit_atoms(*pmedata, pme_src->atc[0].numAtoms(), {}, {});
+            gmx_pme_reinit_atoms(pmedata.get(), pmeSrc.atc[0].numAtoms(), {}, {});
+        }
+        // When the box is static and mixed mode is used, we need to set the box sizes in gmx_pme_t
+        if (pmeSrc.gpu)
+        {
+            copy_mat(pmeSrc.recipbox, pmedata->recipbox);
+            pmedata->boxVolume = pmeSrc.boxVolume;
         }
         // TODO this is mostly passing around current values
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR
+
+    return pmedata;
 }
 
 real gmx_pme_calc_energy(gmx_pme_t* pme, gmx::ArrayRef<const gmx::RVec> x, gmx::ArrayRef<const real> q)
@@ -1793,27 +1873,6 @@ void parallel_3dfft_destroy(gmx_parallel_3dfft* pfft_setup)
     gmx_parallel_3dfft_destroy(pfft_setup);
 }
 
-
-void gmx_pme_destroy(gmx_pme_t* pme)
-{
-    gmx_pme_destroy(pme, true);
-}
-
-void gmx_pme_destroy(gmx_pme_t* pme, bool destroyGpuData)
-{
-    if (!pme)
-    {
-        return;
-    }
-
-    if (pme->gpu != nullptr && destroyGpuData)
-    {
-        pme_gpu_destroy(pme->gpu);
-    }
-
-    delete pme;
-}
-
 void gmx_pme_reinit_atoms(gmx_pme_t*                pme,
                           const int                 numAtoms,
                           gmx::ArrayRef<const real> chargesA,
@@ -1823,7 +1882,8 @@ void gmx_pme_reinit_atoms(gmx_pme_t*                pme,
     {
         GMX_ASSERT(!(pme->bFEP_q && chargesB.empty()),
                    "B state charges must be specified if running Coulomb FEP on the GPU");
-        pme_gpu_reinit_atoms(pme->gpu, numAtoms, chargesA.data(), pme->bFEP_q ? chargesB.data() : nullptr);
+        pme_gpu_reinit_atoms(
+                pme->gpu.get(), numAtoms, chargesA.data(), pme->bFEP_q ? chargesB.data() : nullptr);
     }
     else
     {

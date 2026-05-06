@@ -36,9 +36,10 @@
 
 #include <cassert>
 #include <cmath>
-#include <cstdint>
+#include <cstddef>
 
 #include <algorithm>
+#include <functional>
 #include <type_traits>
 
 #include "gromacs/utility/real.h"
@@ -83,6 +84,9 @@ template<typename ValueType>
 class BasicVector
 {
 public:
+    //! The type of the elements
+    using value_type = ValueType;
+
     //! Underlying raw C array type (rvec/dvec/ivec).
     using RawArray = ValueType[DIM];
 
@@ -218,6 +222,13 @@ public:
     constexpr BasicVector<double> toDVec() const
     {
         return { double(x_[XX]), double(x_[YY]), double(x_[ZZ]) };
+    }
+
+    //! Conversion operator to enable static_cast between BasicVectors with different ValueType
+    template<typename T>
+    operator BasicVector<T>() const
+    {
+        return { static_cast<T>(x_[XX]), static_cast<T>(x_[YY]), static_cast<T>(x_[ZZ]) };
     }
 
     //! Converts to a raw C array where implicit conversion does not work.
@@ -380,4 +391,30 @@ static inline const ivec* as_ivec_array(const IVec* x)
 
 } // namespace gmx
 
-#endif // include guard
+namespace std
+{
+
+/*
+ * \brief
+ * std::hash specialization for BasicVector
+ */
+template<typename ValueType>
+struct hash<gmx::BasicVector<ValueType>>
+{
+    std::size_t operator()(const gmx::BasicVector<ValueType>& v) const noexcept
+    {
+        std::size_t h = 0;
+        // Use combine function like in boost
+        auto combine = [](std::size_t& hash_, const ValueType value_)
+        { hash_ ^= std::hash<ValueType>{}(value_) + 0x9e3779b9 + (hash_ << 6) + (hash_ >> 2); };
+        combine(h, v[XX]);
+        combine(h, v[YY]);
+        combine(h, v[ZZ]);
+        return h;
+    }
+};
+
+} // namespace std
+
+
+#endif // GMX_UTILITY_VECTYPES_H

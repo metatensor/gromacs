@@ -128,6 +128,7 @@
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/logger.h"
+#include "gromacs/utility/matrix.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
 #include "gromacs/utility/vec.h"
@@ -149,6 +150,7 @@ struct gmx_shellfc_t;
 struct pull_t;
 
 using gmx::ArrayRef;
+using gmx::Matrix3x3;
 using gmx::MDModulesNotifiers;
 using gmx::MdrunScheduleWorkload;
 using gmx::RVec;
@@ -184,10 +186,8 @@ static void print_em_start(FILE*                     fplog,
 }
 
 //! Stop counting time for EM
-static void em_time_end(gmx_walltime_accounting_t walltime_accounting, gmx_wallcycle* wcycle)
+static void em_time_end(gmx_walltime_accounting_t walltime_accounting)
 {
-    wallcycle_stop(wcycle, WallCycleCounter::Run);
-
     walltime_accounting_end_time(walltime_accounting);
 }
 
@@ -443,7 +443,7 @@ static void init_em(FILE*                        fplog,
         *shellfc = init_shell_flexcon(stdout,
                                       top_global,
                                       constr ? constr->numFlexibleConstraints() : 0,
-                                      ir->nstcalcenergy,
+                                      ir->outputControl.nstcalcenergy,
                                       haveDDAtomOrdering(*cr),
                                       runScheduleWork.simulationWork);
     }
@@ -470,6 +470,7 @@ static void init_em(FILE*                        fplog,
         /* Distribute the charge groups over the nodes from the main node */
         dd_partition_system(fplog,
                             mdlog,
+                            runScheduleWork.simulationWork,
                             ir->init_step,
                             cr->dd,
                             TRUE,
@@ -480,6 +481,7 @@ static void init_em(FILE*                        fplog,
                             imdSession,
                             pull_work,
                             &ems->s,
+                            fr->stateGpu,
                             &ems->f,
                             mdAtoms,
                             top,
@@ -496,8 +498,18 @@ static void init_em(FILE*                        fplog,
         /* Just copy the state */
         ems->s = *state_global;
 
-        mdAlgorithmsSetupAtomData(
-                cr->dd, *ir, top_global, top, fr, &ems->f, mdAtoms, constr, vsite, shellfc ? *shellfc : nullptr);
+        mdAlgorithmsSetupAtomData(runScheduleWork.simulationWork,
+                                  cr->dd,
+                                  *ir,
+                                  top_global,
+                                  top,
+                                  fr,
+                                  &ems->f,
+                                  mdAtoms,
+                                  constr,
+                                  vsite,
+                                  shellfc ? *shellfc : nullptr,
+                                  fr->stateGpu);
     }
 
     update_mdatoms(mdAtoms->mdatoms(), ems->s.lambda[FreeEnergyPerturbationCouplingType::Mass]);
@@ -550,20 +562,16 @@ static void init_em(FILE*                        fplog,
 }
 
 //! Finalize the minimization
-static void finish_em(const t_commrec*          cr,
-                      gmx_mdoutf_t              outf,
-                      gmx_walltime_accounting_t walltime_accounting,
-                      gmx_wallcycle*            wcycle)
+static void finish_em(const gmx::PmePpComm* pmePpComm, gmx_mdoutf_t outf, gmx_walltime_accounting_t walltime_accounting)
 {
-    if (!thisRankHasPmeDuty(cr->dd))
+    if (pmePpComm)
     {
-        /* Tell the PME only node to finish */
-        gmx_pme_send_finish(cr->dd);
+        pmePpComm->sendFinish();
     }
 
     done_mdoutf(outf);
 
-    em_time_end(walltime_accounting, wcycle);
+    em_time_end(walltime_accounting);
 }
 
 //! Swap two different EM states during minimization
@@ -818,28 +826,29 @@ static bool do_em_step(const t_commrec*                          cr,
 }
 
 //! Prepare EM for using domain decomposition parallellization
-static void em_dd_partition_system(FILE*                     fplog,
-                                   const gmx::MDLogger&      mdlog,
-                                   int                       step,
-                                   const t_commrec*          cr,
-                                   const gmx_mtop_t&         top_global,
-                                   const t_inputrec*         ir,
-                                   const MDModulesNotifiers& mdModulesNotifiers,
-
-                                   gmx::ImdSession*     imdSession,
-                                   pull_t*              pull_work,
-                                   em_state_t*          ems,
-                                   gmx_localtop_t*      top,
-                                   gmx::MDAtoms*        mdAtoms,
-                                   t_forcerec*          fr,
-                                   VirtualSitesHandler* vsite,
-                                   gmx::Constraints*    constr,
-                                   t_nrnb*              nrnb,
-                                   gmx_wallcycle*       wcycle)
+static void em_dd_partition_system(FILE*                          fplog,
+                                   const gmx::MDLogger&           mdlog,
+                                   const gmx::SimulationWorkload& simulationWork,
+                                   int                            step,
+                                   const t_commrec*               cr,
+                                   const gmx_mtop_t&              top_global,
+                                   const t_inputrec*              ir,
+                                   const MDModulesNotifiers&      mdModulesNotifiers,
+                                   gmx::ImdSession*               imdSession,
+                                   pull_t*                        pull_work,
+                                   em_state_t*                    ems,
+                                   gmx_localtop_t*                top,
+                                   gmx::MDAtoms*                  mdAtoms,
+                                   t_forcerec*                    fr,
+                                   VirtualSitesHandler*           vsite,
+                                   gmx::Constraints*              constr,
+                                   t_nrnb*                        nrnb,
+                                   gmx_wallcycle*                 wcycle)
 {
     /* Repartition the domain decomposition */
     dd_partition_system(fplog,
                         mdlog,
+                        simulationWork,
                         step,
                         cr->dd,
                         FALSE,
@@ -850,6 +859,7 @@ static void em_dd_partition_system(FILE*                     fplog,
                         imdSession,
                         pull_work,
                         &ems->s,
+                        fr->stateGpu,
                         &ems->f,
                         mdAtoms,
                         top,
@@ -990,7 +1000,7 @@ void EnergyEvaluator::run(em_state_t* ems, rvec mu_tot, tensor vir, tensor pres,
 {
     real     t;
     gmx_bool bNS;
-    tensor   force_vir, shake_vir, ekin;
+    tensor   force_vir, shake_vir;
     real     dvdl_constr;
     real     terminate = 0;
 
@@ -1026,6 +1036,7 @@ void EnergyEvaluator::run(em_state_t* ems, rvec mu_tot, tensor vir, tensor pres,
             /* Repartition the domain decomposition */
             em_dd_partition_system(fplog,
                                    mdlog,
+                                   runScheduleWork->simulationWork,
                                    count,
                                    cr,
                                    top_global,
@@ -1081,8 +1092,10 @@ void EnergyEvaluator::run(em_state_t* ems, rvec mu_tot, tensor vir, tensor pres,
     runScheduleWork->stepWork = setupStepWorkload(legacyForceFlags,
                                                   inputrec->mtsLevels,
                                                   step,
+                                                  {},
                                                   runScheduleWork->domainWork,
-                                                  runScheduleWork->simulationWork);
+                                                  runScheduleWork->simulationWork,
+                                                  *inputrec);
 
     /* Calc force & energy on new trial position  */
     /* do_force always puts the charge groups in the box and shifts again
@@ -1175,9 +1188,12 @@ void EnergyEvaluator::run(em_state_t* ems, rvec mu_tot, tensor vir, tensor pres,
         copy_mat(force_vir, vir);
     }
 
-    clear_mat(ekin);
-    enerd->term[InteractionFunction::Pressure] =
-            calc_pres(fr->pbcType, inputrec->nwall, ems->s.box, ekin, vir, pres);
+    // The kinetic energy is needed for calling calc_pres(); it is zero with EM
+    const Matrix3x3 ekin;
+    Matrix3x3       pressure;
+    enerd->term[InteractionFunction::Pressure] = calc_pres(
+            fr->pbcType, inputrec->nwall, ems->s.box, ekin, gmx::createMatrix3x3FromLegacyMatrix(vir), &pressure);
+    fillLegacyMatrix(pressure, pres);
 
     if (inputrec->efep != FreeEnergyPerturbationType::No)
     {
@@ -1316,6 +1332,8 @@ void LegacySimulator::do_cg()
     const char* CG = "Polak-Ribiere Conjugate Gradients";
 
     const bool isMainRank = cr_->commMyGroup.isMainRank();
+
+    const OutputControl& outputControl = inputRec_->outputControl;
 
     gmx_global_stat_t gstat;
     double            tmp, minstep;
@@ -1591,8 +1609,8 @@ void LegacySimulator::do_cg()
         }
 
         /* Write coordinates if necessary */
-        do_x = do_per_step(step, inputRec_->nstxout);
-        do_f = do_per_step(step, inputRec_->nstfout);
+        do_x = do_per_step(step, outputControl.nstxout);
+        do_f = do_per_step(step, outputControl.nstfout);
 
         write_em_traj(
                 fpLog_, cr_, outf, do_x, do_f, nullptr, topGlobal_, inputRec_, step, s_min, stateGlobal_, observablesHistory_);
@@ -1622,6 +1640,7 @@ void LegacySimulator::do_cg()
         {
             em_dd_partition_system(fpLog_,
                                    mdLog_,
+                                   runScheduleWork_->simulationWork,
                                    step,
                                    cr_,
                                    topGlobal_,
@@ -1741,6 +1760,7 @@ void LegacySimulator::do_cg()
                     /* Reload the old state */
                     em_dd_partition_system(fpLog_,
                                            mdLog_,
+                                           runScheduleWork_->simulationWork,
                                            -1,
                                            cr_,
                                            topGlobal_,
@@ -1928,8 +1948,8 @@ void LegacySimulator::do_cg()
                                              mu_tot,
                                              constr_);
 
-            do_log = do_per_step(step, inputRec_->nstlog);
-            do_ene = do_per_step(step, inputRec_->nstenergy);
+            do_log = do_per_step(step, outputControl.nstlog);
+            do_ene = do_per_step(step, outputControl.nstenergy);
 
             imdSession_->fillEnergyRecord(step, TRUE);
 
@@ -2015,8 +2035,8 @@ void LegacySimulator::do_cg()
     /* Note that with 0 < nstfout != nstxout we can end up with two frames
      * in the trajectory with the same step number.
      */
-    do_x = !do_per_step(step, inputRec_->nstxout);
-    do_f = (inputRec_->nstfout > 0 && !do_per_step(step, inputRec_->nstfout));
+    do_x = !do_per_step(step, outputControl.nstxout);
+    do_f = (outputControl.nstfout > 0 && !do_per_step(step, outputControl.nstfout));
 
     write_em_traj(
             fpLog_, cr_, outf, do_x, do_f, ftp2fn(efSTO, nFile_, fnm_), topGlobal_, inputRec_, step, s_min, stateGlobal_, observablesHistory_);
@@ -2031,7 +2051,7 @@ void LegacySimulator::do_cg()
         fprintf(fpLog_, "\nPerformed %d energy evaluations in total.\n", neval);
     }
 
-    finish_em(cr_, outf, wallTimeAccounting_, wallCycleCounters_);
+    finish_em(fr_->pmePpComm.get(), outf, wallTimeAccounting_);
 
     /* To print the actual number of steps we needed somewhere */
     walltime_accounting_set_nsteps_done(wallTimeAccounting_, step);
@@ -2043,6 +2063,8 @@ void LegacySimulator::do_lbfgs()
     static const char* LBFGS = "Low-Memory BFGS Minimizer";
 
     const bool isMainRank = cr_->commMyGroup.isMainRank();
+
+    const OutputControl& outputControl = inputRec_->outputControl;
 
     em_state_t        ems;
     gmx_global_stat_t gstat;
@@ -2307,8 +2329,8 @@ void LegacySimulator::do_lbfgs()
     {
 
         /* Write coordinates if necessary */
-        const bool do_x = do_per_step(stepGrad, inputRec_->nstxout);
-        const bool do_f = do_per_step(stepGrad, inputRec_->nstfout);
+        const bool do_x = do_per_step(stepGrad, outputControl.nstxout);
+        const bool do_f = do_per_step(stepGrad, outputControl.nstfout);
 
         int mdof_flags = 0;
         if (do_x)
@@ -2758,8 +2780,8 @@ void LegacySimulator::do_lbfgs()
                                              mu_tot,
                                              constr_);
 
-            do_log = do_per_step(stepGrad, inputRec_->nstlog);
-            do_ene = do_per_step(stepGrad, inputRec_->nstenergy);
+            do_log = do_per_step(stepGrad, outputControl.nstlog);
+            do_ene = do_per_step(stepGrad, outputControl.nstenergy);
 
             imdSession_->fillEnergyRecord(stepGrad, TRUE);
 
@@ -2840,8 +2862,8 @@ void LegacySimulator::do_lbfgs()
      * However, we should only do it if we did NOT already write this step
      * above (which we did if do_x or do_f was true).
      */
-    const bool do_x = !do_per_step(step, inputRec_->nstxout);
-    const bool do_f = !do_per_step(step, inputRec_->nstfout);
+    const bool do_x = !do_per_step(step, outputControl.nstxout);
+    const bool do_f = !do_per_step(step, outputControl.nstfout);
     write_em_traj(
             fpLog_, cr_, outf, do_x, do_f, ftp2fn(efSTO, nFile_, fnm_), topGlobal_, inputRec_, step, &ems, stateGlobal_, observablesHistory_);
 
@@ -2854,7 +2876,7 @@ void LegacySimulator::do_lbfgs()
         fprintf(fpLog_, "\nPerformed %d energy evaluations in total.\n", neval);
     }
 
-    finish_em(cr_, outf, wallTimeAccounting_, wallCycleCounters_);
+    finish_em(fr_->pmePpComm.get(), outf, wallTimeAccounting_);
 
     /* To print the actual number of steps we needed somewhere */
     walltime_accounting_set_nsteps_done(wallTimeAccounting_, step);
@@ -2865,6 +2887,8 @@ void LegacySimulator::do_steep()
     const char* SD = "Steepest Descents";
 
     const bool isMainRank = cr_->commMySim.isMainRank();
+
+    const OutputControl& outputControl = inputRec_->outputControl;
 
     gmx_global_stat_t gstat;
     real              stepsize;
@@ -3098,8 +3122,8 @@ void LegacySimulator::do_steep()
             }
 
             /* Write to trn, if necessary */
-            do_x = do_per_step(steps_accepted, inputRec_->nstxout);
-            do_f = do_per_step(steps_accepted, inputRec_->nstfout);
+            do_x = do_per_step(steps_accepted, outputControl.nstxout);
+            do_f = do_per_step(steps_accepted, outputControl.nstfout);
             write_em_traj(
                     fpLog_, cr_, outf, do_x, do_f, nullptr, topGlobal_, inputRec_, count, s_min, stateGlobal_, observablesHistory_);
         }
@@ -3113,6 +3137,7 @@ void LegacySimulator::do_steep()
                 /* Reload the old state */
                 em_dd_partition_system(fpLog_,
                                        mdLog_,
+                                       runScheduleWork_->simulationWork,
                                        count,
                                        cr_,
                                        topGlobal_,
@@ -3179,7 +3204,7 @@ void LegacySimulator::do_steep()
                   cr_,
                   outf,
                   TRUE,
-                  inputRec_->nstfout != 0,
+                  outputControl.nstfout != 0,
                   ftp2fn(efSTO, nFile_, fnm_),
                   topGlobal_,
                   inputRec_,
@@ -3196,7 +3221,7 @@ void LegacySimulator::do_steep()
         print_converged(fpLog_, SD, inputRec_->em_tol, count, bDone, nsteps, s_min, sqrtNumAtoms);
     }
 
-    finish_em(cr_, outf, wallTimeAccounting_, wallCycleCounters_);
+    finish_em(fr_->pmePpComm.get(), outf, wallTimeAccounting_);
 
     walltime_accounting_set_nsteps_done(wallTimeAccounting_, count);
 }
@@ -3562,7 +3587,7 @@ void LegacySimulator::do_nm()
         gmx_mtxio_write(ftp2fn(efMTX, nFile_, fnm_), sz, sz, full_matrix, sparse_matrix);
     }
 
-    finish_em(cr_, outf, wallTimeAccounting_, wallCycleCounters_);
+    finish_em(fr_->pmePpComm.get(), outf, wallTimeAccounting_);
 
     walltime_accounting_set_nsteps_done(wallTimeAccounting_, numSteps);
 }

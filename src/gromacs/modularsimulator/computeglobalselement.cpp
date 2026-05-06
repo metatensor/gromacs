@@ -173,7 +173,7 @@ void ComputeGlobalsElement<algorithm>::elementSetup()
     // Calculate the initial half step temperature, and save the ekinh_old
     for (int i = 0; (i < inputrec_->opts.ngtc); i++)
     {
-        copy_mat(energyData_->ekindata()->tcstat[i].ekinh, energyData_->ekindata()->tcstat[i].ekinh_old);
+        energyData_->ekindata()->tcstat[i].ekinh_old = energyData_->ekindata()->tcstat[i].ekinh;
     }
 
     // Clean up after pre-step use of compute()
@@ -321,7 +321,6 @@ void ComputeGlobalsElement<algorithm>::compute(gmx::Step            step,
                     energyData_->pressure(step),
                     signaller,
                     lastbox,
-                    energyData_->needToSumEkinhOld(),
                     flags,
                     step,
                     observablesReducer_);
