@@ -3812,7 +3812,9 @@ applied-forces framework. Further details are described in :ref:`metatomic`.
    boundary. Direct MM neighbors bonded to selected Metatomic atoms are included
    in the embedded atom set and represented as hydrogen caps during model
    evaluation. This requires a model trained for link-atom-capped boundary
-   chemistry.
+   chemistry. If a boundary MM atom is bonded to multiple selected Metatomic
+   atoms, each cut bond is represented by a distinct hydrogen cap in the model
+   input.
 
 
 .. _mdp-fmm:

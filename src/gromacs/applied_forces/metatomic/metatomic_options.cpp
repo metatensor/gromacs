@@ -92,6 +92,15 @@ namespace
 {
 // TODO(rg): this is duplicated from the nnpotoptions
 
+void addLinkFrontierAtom(std::set<int>*                 boundaryMM,
+                         std::vector<LinkFrontierAtom>* linkFrontier,
+                         int                            embeddedIndex,
+                         int                            mmIndex)
+{
+    boundaryMM->insert(mmIndex);
+    linkFrontier->emplace_back(embeddedIndex, mmIndex);
+}
+
 //! \brief Helper function to preprocess topology for MTA
 void preprocessTopology(gmx_mtop_t*                    mtop,
                         ArrayRef<const Index>           mtaIndices,
@@ -269,6 +278,9 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
         return;
     }
 
+    params_.mmCharges_.clear();
+    params_.linkFrontier_.clear();
+
     // Topology charges come from the unmodified topology so model-requested
     // charge inputs remain independent of embedded-system preprocessing.
     for (const auto& molblock : top->molblock)
@@ -316,16 +328,13 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
                     int a2 = moltype.ilist[ftype].iatoms[j + 2] + start;
                     bool a1_ml = origMtaSet.count(a1) > 0;
                     bool a2_ml = origMtaSet.count(a2) > 0;
-                    if (a1_ml && !a2_ml && boundaryMM.count(a2) == 0)
+                    if (a1_ml && !a2_ml)
                     {
-                        boundaryMM.insert(a2);
-                        // Store as LinkFrontierAtom: a1=embedded, a2=MM
-                        params_.linkFrontier_.emplace_back(a1, a2);
+                        addLinkFrontierAtom(&boundaryMM, &params_.linkFrontier_, a1, a2);
                     }
-                    else if (a2_ml && !a1_ml && boundaryMM.count(a1) == 0)
+                    else if (a2_ml && !a1_ml)
                     {
-                        boundaryMM.insert(a1);
-                        params_.linkFrontier_.emplace_back(a2, a1);
+                        addLinkFrontierAtom(&boundaryMM, &params_.linkFrontier_, a2, a1);
                     }
                 }
             }

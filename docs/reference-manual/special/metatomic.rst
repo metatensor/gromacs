@@ -26,6 +26,8 @@ bond. The link-atom position is part of the automatic differentiation graph, so
 forces are propagated back to the real atoms connected by the boundary bond.
 
 This option requires a model trained for link-atom-capped boundary chemistry.
+If the same boundary MM atom is bonded to multiple selected Metatomic atoms,
+each cut bond is represented by a distinct hydrogen cap in the model input.
 
 Model-requested charges
 -----------------------
@@ -35,4 +37,3 @@ Metatomic models can declare additional inputs through their
 ``charges/<variant>`` input, |Gromacs| provides a per-atom Metatomic
 ``TensorMap`` with ``quantity = charge`` and ``unit = e``. Charge inputs are
 model-controlled; no :ref:`mdp` option enables or disables them.
-
