@@ -139,17 +139,19 @@ struct ActiveLinkAtom
     int32_t embeddedModelIndex = -1;
     int32_t mmModelIndex       = -1;
     int32_t linkModelIndex     = -1;
+    IVec    mmCellShift        = IVec(0, 0, 0);
     real    linkDistance       = 0;
     int32_t linkAtomNumber     = 1;
 };
 
 static RVec computeLinkAtomPosition(const RVec& embeddedPosition,
                                     const RVec& mmPosition,
+                                    const RVec& mmShift,
                                     real        linkDistance)
 {
-    const double dx   = static_cast<double>(mmPosition[XX] - embeddedPosition[XX]);
-    const double dy   = static_cast<double>(mmPosition[YY] - embeddedPosition[YY]);
-    const double dz   = static_cast<double>(mmPosition[ZZ] - embeddedPosition[ZZ]);
+    const double dx = static_cast<double>(mmPosition[XX] - embeddedPosition[XX] + mmShift[XX]);
+    const double dy = static_cast<double>(mmPosition[YY] - embeddedPosition[YY] + mmShift[YY]);
+    const double dz = static_cast<double>(mmPosition[ZZ] - embeddedPosition[ZZ] + mmShift[ZZ]);
     const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
     if (dist == 0.0)
     {
@@ -162,6 +164,37 @@ static RVec computeLinkAtomPosition(const RVec& embeddedPosition,
     linkPosition[YY] = embeddedPosition[YY] + linkDistance * dy / dist;
     linkPosition[ZZ] = embeddedPosition[ZZ] + linkDistance * dz / dist;
     return linkPosition;
+}
+
+static IVec computeMinimumImageCellShift(const matrix   boxInv,
+                                         PbcType        pbcType,
+                                         const double   rawDx,
+                                         const double   rawDy,
+                                         const double   rawDz)
+{
+    IVec cellShift(0, 0, 0);
+    if (pbcType == PbcType::No)
+    {
+        return cellShift;
+    }
+
+    cellShift[XX] = static_cast<int>(
+            std::round(-(boxInv[XX][XX] * rawDx + boxInv[YY][XX] * rawDy
+                         + boxInv[ZZ][XX] * rawDz)));
+    cellShift[YY] = static_cast<int>(
+            std::round(-(boxInv[YY][YY] * rawDy + boxInv[ZZ][YY] * rawDz)));
+    if (pbcType != PbcType::XY)
+    {
+        cellShift[ZZ] = static_cast<int>(std::round(-(boxInv[ZZ][ZZ] * rawDz)));
+    }
+    return cellShift;
+}
+
+static RVec computeCellShiftVector(const matrix box, const IVec& cellShift)
+{
+    RVec shift;
+    mvmul_ur0(box, cellShift.toRVec(), shift);
+    return shift;
 }
 
 /*! \brief Internal data structure for Metatomic runtime states. */
@@ -1218,6 +1251,13 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         std::unordered_map<int32_t, int32_t> boundaryMmToPrimaryCap;
         boundaryMmToPrimaryCap.reserve(data_->linkFrontier.size());
 
+        const PbcType pbcType = *options_.params_.pbcType_;
+        matrix        boxInv;
+        if (pbcType != PbcType::No)
+        {
+            invertBoxMatrix(inputs.box_, boxInv);
+        }
+
         for (auto& link : data_->linkFrontier)
         {
             const auto embIt = globalAtomToModelIdx.find(link.getEmbeddedIndex());
@@ -1243,9 +1283,19 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                     modelAtomNumbers[mmMtaIdx] = link.linkAtomNumber();
                 }
 
+                const double rawDx = static_cast<double>(positions_[mmMtaIdx][XX]
+                                                         - positions_[embMtaIdx][XX]);
+                const double rawDy = static_cast<double>(positions_[mmMtaIdx][YY]
+                                                         - positions_[embMtaIdx][YY]);
+                const double rawDz = static_cast<double>(positions_[mmMtaIdx][ZZ]
+                                                         - positions_[embMtaIdx][ZZ]);
+                const IVec mmCellShift =
+                        computeMinimumImageCellShift(boxInv, pbcType, rawDx, rawDy, rawDz);
+
                 activeLinkAtoms.push_back({ embMtaIdx,
                                             mmMtaIdx,
                                             linkModelIdx,
+                                            mmCellShift,
                                             link.linkDistance(),
                                             link.linkAtomNumber() });
                 needTypesRebuild = true;
@@ -1273,8 +1323,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         {
             linkModelIndexList.push_back(link.linkModelIndex);
         }
+        const RVec mmShift = computeCellShiftVector(inputs.box_, link.mmCellShift);
         const RVec linkPosition = computeLinkAtomPosition(
-                positions_[link.embeddedModelIndex], positions_[link.mmModelIndex], link.linkDistance);
+                positions_[link.embeddedModelIndex],
+                positions_[link.mmModelIndex],
+                mmShift,
+                link.linkDistance);
         if (link.linkModelIndex < numLocalMta_)
         {
             modelPositionsForNl[link.linkModelIndex] = linkPosition;
@@ -1331,7 +1385,13 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             {
                 auto r_emb = real_strained_positions.index({ link.embeddedModelIndex });
                 auto r_mm  = real_strained_positions.index({ link.mmModelIndex });
-                auto direction = r_mm - r_emb;
+                auto cellShift = torch::tensor({ static_cast<double>(link.mmCellShift[XX]),
+                                                 static_cast<double>(link.mmCellShift[YY]),
+                                                 static_cast<double>(link.mmCellShift[ZZ]) },
+                                               torch::TensorOptions()
+                                                       .dtype(data_->dtype)
+                                                       .device(data_->device));
+                auto direction = r_mm + torch::matmul(cellShift, strained_cell) - r_emb;
                 auto dist = direction.norm();
                 auto r_link = r_emb + link.linkDistance * direction / dist;
 
@@ -1506,8 +1566,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
                 if (!linkModelIndexList.empty())
                 {
+                    const PbcType pbcType = *options_.params_.pbcType_;
                     matrix boxInv;
-                    invertBoxMatrix(inputs.box_, boxInv);
+                    if (pbcType != PbcType::No)
+                    {
+                        invertBoxMatrix(inputs.box_, boxInv);
+                    }
 
                     for (const int32_t ai : linkModelIndexList)
                     {
@@ -1529,17 +1593,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                             const double rawDz = static_cast<double>(
                                     modelPositionsForNl[aj][ZZ] - modelPositionsForNl[ai][ZZ]);
 
-                            IVec cellShift;
-                            cellShift[XX] = static_cast<int>(std::round(
-                                    -(boxInv[XX][XX] * rawDx + boxInv[YY][XX] * rawDy
-                                      + boxInv[ZZ][XX] * rawDz)));
-                            cellShift[YY] = static_cast<int>(std::round(
-                                    -(boxInv[YY][YY] * rawDy + boxInv[ZZ][YY] * rawDz)));
-                            cellShift[ZZ] =
-                                    static_cast<int>(std::round(-(boxInv[ZZ][ZZ] * rawDz)));
+                            const IVec cellShift =
+                                    computeMinimumImageCellShift(boxInv, pbcType, rawDx, rawDy, rawDz);
 
-                            RVec shift;
-                            mvmul_ur0(inputs.box_, cellShift.toRVec(), shift);
+                            const RVec shift = computeCellShiftVector(inputs.box_, cellShift);
 
                             const double dx = rawDx + shift[XX];
                             const double dy = rawDy + shift[YY];
