@@ -44,16 +44,26 @@
 
 #include "gromacs/applied_forces/metatomic/metatomic_options.h"
 
+#include <filesystem>
+#include <map>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "gromacs/applied_forces/nnpot/nnpot.h"
 #include "gromacs/domdec/localatomset.h"
+#include "gromacs/fileio/confio.h"
 #include "gromacs/fileio/warninp.h"
+#include "gromacs/gmxpreprocess/grompp.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/imdpoptionprovider_test_helper.h"
 #include "gromacs/selection/indexutil.h"
 #include "gromacs/topology/index.h"
+#include "gromacs/topology/ifunc.h"
+#include "gromacs/topology/mtop_util.h"
+#include "gromacs/topology/topology.h"
 #include "gromacs/utility/arrayref.h"
+#include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/keyvaluetree.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 #include "gromacs/utility/keyvaluetreemdpwriter.h"
@@ -62,9 +72,12 @@
 #include "gromacs/utility/textwriter.h"
 
 #include "testutils/refdata.h"
+#include "testutils/cmdlinetest.h"
 #include "testutils/testasserts.h"
 #include "testutils/testfilemanager.h"
 #include "testutils/testmatchers.h"
+
+enum class PbcType : int;
 
 namespace gmx
 {
@@ -83,6 +96,18 @@ public:
         // Prepare MDP inputs
         KeyValueTreeBuilder mdpValueBuilder;
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-active", std::string("true"));
+        return mdpValueBuilder.build();
+    }
+
+    static KeyValueTreeObject metatomicBuildMdpValues(
+            const std::map<std::string, std::string>& additionalValues)
+    {
+        KeyValueTreeBuilder mdpValueBuilder;
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-active", std::string("true"));
+        for (const auto& [key, value] : additionalValues)
+        {
+            mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-" + key, value);
+        }
         return mdpValueBuilder.build();
     }
 
@@ -126,6 +151,79 @@ public:
 
         return IndexGroupsAndNames(indexGroups);
     }
+
+    static IndexGroupsAndNames indexGroupsAndNames(const std::vector<int>& metatomicAtomIndices)
+    {
+        std::vector<IndexGroup> indexGroups;
+        indexGroups.push_back({ "System", metatomicAtomIndices });
+        return IndexGroupsAndNames(indexGroups);
+    }
+
+    static std::unique_ptr<gmx_mtop_t> makeMtopFromFile(const std::string& simulationName,
+                                                        const std::string& mdpContent)
+    {
+        const std::filesystem::path simData =
+                gmx::test::TestFileManager::getTestSimulationDatabaseDirectory();
+        TestFileManager fileManager;
+
+        const std::string mdpInputFileName =
+                fileManager.getTemporaryFilePath(simulationName + ".mdp").string();
+        gmx::TextWriter::writeFileFromString(mdpInputFileName, mdpContent);
+
+        const std::string tprName = fileManager.getTemporaryFilePath(simulationName + ".tpr").string();
+        {
+            gmx::test::CommandLine caller;
+            caller.append("grompp");
+            caller.addOption("-f", mdpInputFileName);
+            caller.addOption("-p", (simData / simulationName).replace_extension(".top").string());
+            caller.addOption("-c", (simData / simulationName).replace_extension(".gro").string());
+            caller.addOption("-o", tprName);
+            EXPECT_EQ(0, gmx_grompp(caller.argc(), caller.argv()));
+        }
+
+        bool                        fullTopology;
+        PbcType                     pbcType;
+        matrix                      box;
+        std::unique_ptr<gmx_mtop_t> mtop(std::make_unique<gmx_mtop_t>());
+        readConfAndTopology(tprName.c_str(), &fullTopology, mtop.get(), &pbcType, nullptr, nullptr, box);
+        return mtop;
+    }
+
+    static std::map<InteractionFunction, int> listedInteractionSizes(const gmx_mtop_t& mtop)
+    {
+        std::map<InteractionFunction, int> sizes;
+        for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
+        {
+            int size = 0;
+            for (const auto& molblock : mtop.molblock)
+            {
+                const auto& moltype = mtop.moltype[molblock.type];
+                size += molblock.nmol * moltype.ilist[ftype].size();
+            }
+            sizes.emplace(ftype, size);
+        }
+        return sizes;
+    }
+
+    MetatomicOptions buildOptions(const std::vector<int>&                   metatomicAtomIndices,
+                                  WarningHandler*                           wi,
+                                  const std::map<std::string, std::string>& additionalValues)
+    {
+        MetatomicOptions options;
+        fillOptionsFromMdpValues(metatomicBuildMdpValues(additionalValues), &options);
+        options.setLogger(logHelper_.logger());
+        options.setWarningHandler(wi);
+        options.setInputGroupIndices(indexGroupsAndNames(metatomicAtomIndices));
+        return options;
+    }
+
+    void expectLogMessage(const char* msg)
+    {
+        logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, msg);
+    }
+
+protected:
+    LoggerTestHelper logHelper_;
 };
 
 TEST_F(MetatomicOptionsTest, DefaultParameters)
@@ -141,6 +239,7 @@ TEST_F(MetatomicOptionsTest, DefaultParameters)
     checker.checkString(defaultParams.extensionsDirectory, "extensionsDirectory");
     checker.checkString(defaultParams.device, "device");
     checker.checkBoolean(defaultParams.checkConsistency, "checkConsistency");
+    checker.checkBoolean(defaultParams.oniom, "oniom");
 }
 
 TEST_F(MetatomicOptionsTest, OptionSetsActive)
@@ -244,6 +343,56 @@ TEST_F(MetatomicOptionsTest, ChargesToKvtAndBack)
     EXPECT_NO_THROW(metatomicOptions.readParamsFromKvt(builder.build()));
 
     EXPECT_EQ(charges, metatomicOptions.parameters().mmCharges_);
+}
+
+TEST_F(MetatomicOptionsTest, AdditiveMechanicalEmbeddingLeavesTopologyUnmodified)
+{
+    const std::vector<int> metatomicAtomIndices = { 8, 9, 10, 11, 12, 13 };
+    auto                   mtop                 = makeMtopFromFile("alanine_vacuo", "");
+    const auto             listedBefore         = listedInteractionSizes(*mtop);
+    const auto             exclusionsBefore     = mtop->intermolecularExclusionGroup.atomNumbers().size();
+
+    WarningHandler   wi(true, 0);
+    MetatomicOptions options = buildOptions(metatomicAtomIndices, &wi, {});
+
+    expectLogMessage("Metatomic potential interface is active, topology was not modified.");
+    EXPECT_NO_THROW(options.modifyTopology(mtop.get()));
+
+    EXPECT_EQ(listedBefore, listedInteractionSizes(*mtop));
+    EXPECT_EQ(exclusionsBefore, mtop->intermolecularExclusionGroup.atomNumbers().size());
+    EXPECT_TRUE(options.parameters().linkFrontier_.empty());
+    EXPECT_EQ(options.parameters().mmCharges_.size(), gmx_mtop_global_atoms(*mtop).nr);
+}
+
+TEST_F(MetatomicOptionsTest, OniomEmbeddingAppliesSubtractiveTopologyPreprocessing)
+{
+    const std::vector<int> metatomicAtomIndices = { 8, 9, 10, 11, 12, 13 };
+    auto                   mtop                 = makeMtopFromFile("alanine_vacuo", "");
+
+    WarningHandler   wi(true, 0);
+    MetatomicOptions options =
+            buildOptions(metatomicAtomIndices, &wi, { { "oniom", "true" } });
+
+    expectLogMessage("Metatomic potential interface is active, topology was modified!");
+    expectLogMessage("Number of embedded Metatomic atoms: 6\nNumber of regular atoms: 16\n");
+    expectLogMessage("Number of exclusions made: 6\n");
+    expectLogMessage("Number of bonds removed: 8\n");
+    expectLogMessage("Number of InteractionFunction::ConnectBonds \\(type 5 bonds\\) added: 5\n");
+    expectLogMessage("Number of angles removed: 7\n");
+    expectLogMessage("Number of dihedrals removed: 3\n");
+    EXPECT_NO_THROW(options.modifyTopology(mtop.get()));
+}
+
+TEST_F(MetatomicOptionsTest, LinkAtomsRequireOniomEmbedding)
+{
+    const std::vector<int> metatomicAtomIndices = { 8, 9, 10, 11, 12, 13 };
+    auto                   mtop                 = makeMtopFromFile("alanine_vacuo", "");
+
+    WarningHandler   wi(true, 0);
+    MetatomicOptions options =
+            buildOptions(metatomicAtomIndices, &wi, { { "link-atoms", "true" } });
+
+    EXPECT_THROW_GMX(options.modifyTopology(mtop.get()), InconsistentInputError);
 }
 
 } // namespace test
