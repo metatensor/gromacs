@@ -85,6 +85,7 @@ static const std::string VARIANT_ENERGY_UQ_TAG     = "variant-energy-uq";
 static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
 static const std::string VARIANT_NC_FORCES_TAG     = "variant-nc-forces";
 static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
+static const std::string ONIOM_TAG                  = "oniom";
 static const std::string LINK_ATOMS_TAG            = "link-atoms";
 static const std::string MM_CHARGES_TAG            = "mm-charges";
 
@@ -184,6 +185,8 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG);
     addMdpTransformFromString<bool>(
+            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ONIOM_TAG);
+    addMdpTransformFromString<bool>(
             rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG);
 }
 
@@ -203,6 +206,7 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(BooleanOption(NON_CONSERVATIVE_TAG.c_str()).store(&params_.nonConservative));
     section.addOption(StringOption(VARIANT_NC_FORCES_TAG.c_str()).store(&params_.variantNcForces));
     section.addOption(StringOption(VARIANT_NC_STRESS_TAG.c_str()).store(&params_.variantNcStress));
+    section.addOption(BooleanOption(ONIOM_TAG.c_str()).store(&params_.oniom));
     section.addOption(BooleanOption(LINK_ATOMS_TAG.c_str()).store(&params_.linkAtoms));
 }
 
@@ -239,6 +243,7 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG, params_.variantNcForces);
         addMdpOutputValue<std::string>(
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG, params_.variantNcStress);
+        addMdpOutputValue<bool>(builder, METATOMIC_MODULE_NAME, ONIOM_TAG, params_.oniom);
         addMdpOutputValue<bool>(
                 builder, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG, params_.linkAtoms);
     }
@@ -293,6 +298,19 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
                 params_.mmCharges_.push_back(moltype.atoms.atom[a].q);
             }
         }
+    }
+
+    if (!params_.oniom)
+    {
+        if (params_.linkAtoms)
+        {
+            GMX_THROW(InconsistentInputError(
+                    "metatomic-link-atoms requires metatomic-oniom = yes."));
+        }
+
+        GMX_LOG(logger().info)
+                .appendText("Metatomic potential interface is active, topology was not modified.");
+        return;
     }
 
     if (params_.linkAtoms)
