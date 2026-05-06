@@ -73,6 +73,7 @@
 
 #include "testutils/refdata.h"
 #include "testutils/cmdlinetest.h"
+#include "testutils/loggertest.h"
 #include "testutils/testasserts.h"
 #include "testutils/testfilemanager.h"
 #include "testutils/testmatchers.h"
@@ -350,7 +351,7 @@ TEST_F(MetatomicOptionsTest, AdditiveMechanicalEmbeddingLeavesTopologyUnmodified
     const std::vector<int> metatomicAtomIndices = { 8, 9, 10, 11, 12, 13 };
     auto                   mtop                 = makeMtopFromFile("alanine_vacuo", "");
     const auto             listedBefore         = listedInteractionSizes(*mtop);
-    const auto             exclusionsBefore     = mtop->intermolecularExclusionGroup.atomNumbers().size();
+    const auto             exclusionsBefore     = mtop->intermolecularExclusionGroup.size();
 
     WarningHandler   wi(true, 0);
     MetatomicOptions options = buildOptions(metatomicAtomIndices, &wi, {});
@@ -359,7 +360,7 @@ TEST_F(MetatomicOptionsTest, AdditiveMechanicalEmbeddingLeavesTopologyUnmodified
     EXPECT_NO_THROW(options.modifyTopology(mtop.get()));
 
     EXPECT_EQ(listedBefore, listedInteractionSizes(*mtop));
-    EXPECT_EQ(exclusionsBefore, mtop->intermolecularExclusionGroup.atomNumbers().size());
+    EXPECT_EQ(exclusionsBefore, mtop->intermolecularExclusionGroup.size());
     EXPECT_TRUE(options.parameters().linkFrontier_.empty());
     EXPECT_EQ(options.parameters().mmCharges_.size(), gmx_mtop_global_atoms(*mtop).nr);
 }
