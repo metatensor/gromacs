@@ -1339,6 +1339,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
     }
 
+    std::vector<int32_t> selectedModelIndices;
+
     // Model inference
     torch::Tensor forceTensor;
     torch::Tensor virialTensor;
@@ -1653,7 +1655,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         buildNLTimer.stop();
 
-        if (useNewtonNL)
+        if (useNewtonNL || data_->nonConservative)
         {
             // Restrict output to home atoms and link caps attached to home atoms.
             // Following the LAMMPS pair_metatomic pattern (selected_atoms = nlocal).
@@ -1662,21 +1664,31 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             // models are free to return output samples in arbitrary order when
             // selected_atoms is nullopt, but the order is deterministic when
             // selected_atoms is set.
-            std::vector<int32_t> selectedModelIndices;
-            selectedModelIndices.reserve(numHomeMta_ + activeLinkAtoms.size());
             std::unordered_set<int32_t> selectedSet;
-            selectedSet.reserve(numHomeMta_ + activeLinkAtoms.size());
-            for (int32_t i = 0; i < numHomeMta_; ++i)
+            if (useNewtonNL)
             {
-                selectedModelIndices.push_back(i);
-                selectedSet.insert(i);
-            }
-            for (const auto& link : activeLinkAtoms)
-            {
-                if (link.embeddedModelIndex < numHomeMta_
-                    && selectedSet.insert(link.linkModelIndex).second)
+                selectedModelIndices.reserve(numHomeMta_ + activeLinkAtoms.size());
+                selectedSet.reserve(numHomeMta_ + activeLinkAtoms.size());
+                for (int32_t i = 0; i < numHomeMta_; ++i)
                 {
-                    selectedModelIndices.push_back(link.linkModelIndex);
+                    selectedModelIndices.push_back(i);
+                    selectedSet.insert(i);
+                }
+                for (const auto& link : activeLinkAtoms)
+                {
+                    if (link.embeddedModelIndex < numHomeMta_
+                        && selectedSet.insert(link.linkModelIndex).second)
+                    {
+                        selectedModelIndices.push_back(link.linkModelIndex);
+                    }
+                }
+            }
+            else
+            {
+                selectedModelIndices.reserve(numModelAtoms);
+                for (int32_t i = 0; i < numModelAtoms; ++i)
+                {
+                    selectedModelIndices.push_back(i);
                 }
             }
 
@@ -1827,14 +1839,74 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     if (data_->nonConservative)
     {
-        // NC mode: forces are for home atoms only (or all atoms in serial).
-        // Apply directly, no halo exchange needed.
-        for (int32_t i = 0; i < nForceAtoms; i++)
+        if (selectedModelIndices.empty()
+            || nForceAtoms != static_cast<int32_t>(selectedModelIndices.size()))
         {
-            int32_t gmxIdx = mtaToGmxLocal_[i];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceData[3 * i]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceData[3 * i + 1]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceData[3 * i + 2]);
+            GMX_THROW(APIError("Metatomic non-conservative force output does not match "
+                               "the selected atom list."));
+        }
+
+        std::unordered_map<int32_t, std::size_t> linkByModelIndex;
+        linkByModelIndex.reserve(activeLinkAtoms.size());
+        for (std::size_t i = 0; i < activeLinkAtoms.size(); ++i)
+        {
+            linkByModelIndex.emplace(activeLinkAtoms[i].linkModelIndex, i);
+        }
+
+        std::vector<double> ncForces(static_cast<std::size_t>(3 * numLocalMta_), 0.0);
+        const auto addNcForce = [&ncForces](int32_t modelIndex, const RVec& force)
+        {
+            ncForces[3 * modelIndex] += force[XX];
+            ncForces[3 * modelIndex + 1] += force[YY];
+            ncForces[3 * modelIndex + 2] += force[ZZ];
+        };
+
+        for (int32_t row = 0; row < nForceAtoms; row++)
+        {
+            const int32_t modelIndex = selectedModelIndices[row];
+            RVec          force;
+            force[XX] = static_cast<real>(forceData[3 * row]);
+            force[YY] = static_cast<real>(forceData[3 * row + 1]);
+            force[ZZ] = static_cast<real>(forceData[3 * row + 2]);
+
+            const auto linkIt = linkByModelIndex.find(modelIndex);
+            if (linkIt != linkByModelIndex.end())
+            {
+                const ActiveLinkAtom& link    = activeLinkAtoms[linkIt->second];
+                const RVec            mmShift = computeCellShiftVector(inputs.box_, link.mmCellShift);
+                const auto [embeddedForce, mmForce] =
+                        spreadLinkAtomForce(force,
+                                            positions_[link.embeddedModelIndex],
+                                            positions_[link.mmModelIndex],
+                                            mmShift,
+                                            link.linkDistance);
+                addNcForce(link.embeddedModelIndex, embeddedForce);
+                addNcForce(link.mmModelIndex, mmForce);
+            }
+            else
+            {
+                if (modelIndex < 0 || modelIndex >= numLocalMta_)
+                {
+                    GMX_THROW(APIError("Metatomic non-conservative force output contains "
+                                       "an invalid atom index."));
+                }
+                addNcForce(modelIndex, force);
+            }
+        }
+
+        if (mpiComm_.isParallel())
+        {
+            distributeNonHomeForces(ncForces.data(), outputs);
+        }
+        else
+        {
+            for (int32_t i = 0; i < numLocalMta_; i++)
+            {
+                int32_t gmxIdx = mtaToGmxLocal_[i];
+                outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(ncForces[3 * i]);
+                outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(ncForces[3 * i + 1]);
+                outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(ncForces[3 * i + 2]);
+            }
         }
     }
     else if (mpiComm_.isParallel())
