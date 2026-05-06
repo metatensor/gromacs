@@ -44,6 +44,7 @@
 #define GMX_TOPOLOGY_EMBEDDED_SYSTEM_PREPROCESSING_H
 
 #include <set>
+#include <tuple>
 #include <vector>
 
 #include "gromacs/utility/basedefinitions.h"
@@ -122,6 +123,21 @@ private:
     //! atomic number of link atom type (default hydrogen)
     int linkAtomNumber_ = 1;
 };
+
+/*! \brief Redistributes a force on a link atom to its adjacent embedded and MM atoms.
+ *
+ * \param[in] forceOnLink       Force acting on the link atom.
+ * \param[in] embeddedPosition  Position of the embedded atom.
+ * \param[in] mmPosition        Position of the MM atom.
+ * \param[in] mmShift           Shift vector applied to the MM atom position.
+ * \param[in] linkDistance      Embedded atom to link atom distance.
+ * \returns Forces on the embedded and MM atoms.
+ */
+std::tuple<RVec, RVec> spreadLinkAtomForce(const RVec& forceOnLink,
+                                           const RVec& embeddedPosition,
+                                           const RVec& mmPosition,
+                                           const RVec& mmShift,
+                                           real        linkDistance);
 
 /*! \brief Splits embedded atom containing molecules out of MM blocks in topology
  *
