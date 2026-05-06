@@ -251,8 +251,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // omp_set_num_threads only updates the OpenMP ICV.  Without this
     // call, PyTorch/MKL may retain the init-time default (all cores).
     //
-    // For real MPI, ntomp defaults to all cores for single-rank and to
-    // the per-rank count for multi-rank, so the behavior is unchanged.
+    // For real MPI, ntomp is the GROMACS-selected per-rank thread count.
     {
         int ntomp = gmx_omp_nthreads_get(ModuleMultiThread::Default);
         at::set_num_threads(std::max(1, ntomp));
@@ -621,13 +620,13 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 
         for (int32_t k = 0; k < static_cast<int32_t>(haloGmxLocal.size()); k++)
         {
-            int32_t modelIdx  = numHomeMta_ + k;
-            int32_t gmxLocal  = haloGmxLocal[k];
-            int32_t globalIdx = globalAtomIndices[gmxLocal];
+            int32_t haloModelIdx = numHomeMta_ + k;
+            int32_t gmxLocal     = haloGmxLocal[k];
+            int32_t globalIdx    = globalAtomIndices[gmxLocal];
 
-            mtaToGmxLocal_[modelIdx]  = gmxLocal;
-            mtaToGlobalMta_[modelIdx] = haloGlobalMta[k];
-            atomNumbers_[modelIdx]    = options_.params_.atoms_.atom[globalIdx].atomnumber;
+            mtaToGmxLocal_[haloModelIdx]  = gmxLocal;
+            mtaToGlobalMta_[haloModelIdx] = haloGlobalMta[k];
+            atomNumbers_[haloModelIdx]    = options_.params_.atoms_.atom[globalIdx].atomnumber;
         }
     }
     else
@@ -750,7 +749,7 @@ int32_t MetatomicForceProvider::exchangeBackwardGhosts(
         for (int p = 0; p < backwardGap; p++)
         {
             // Identify ALL currently local MTA atoms near the forward boundary (within cutoff).
-            // We include ghosts from previous dimensions/pulses (staged communication)
+            // We include staged ghosts from dimensions and pulses already processed
             // to correctly cover diagonal and corner backward neighbors.
             std::vector<int>  sendGlobalMta;
             std::vector<RVec> sendPositions;
