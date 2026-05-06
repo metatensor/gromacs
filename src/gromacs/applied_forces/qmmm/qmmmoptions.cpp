@@ -134,10 +134,10 @@ preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> qmIndices, real qmC, 
     // 6) Make F_CONNBOND between atoms within QM region
     modifyEmbeddedTwoCenterInteractions(mtop, qmIndicesSet, isQMBlock, logger);
 
-    // 7) Remove angles and settles containing 2 or more QM atoms
+    // 7) Remove angles containing all QM atoms, and settles containing 2 or more QM atoms
     modifyEmbeddedThreeCenterInteractions(mtop, qmIndicesSet, isQMBlock, logger);
 
-    // 8) Remove dihedrals containing 3 or more QM atoms
+    // 8) Remove dihedrals containing all QM atoms
     modifyEmbeddedFourCenterInteractions(mtop, qmIndicesSet, isQMBlock, logger);
 
     // 9) Build vector containing pairs of bonded QM - MM atoms (Link frontier)

@@ -135,8 +135,8 @@ const std::string c_mmLinkTag_  = "mm-link";
  * - Excludes non-bonded interactions between NNP atoms (LJ and Coulomb)
  * - In case of electrostatic embedding: removes classical charges on NNP atoms
  * - Removes bonds containing 1 or more NNP atoms
- * - Removes angles and settles containing 2 or more NNP atoms
- * - Removes dihedrals containing 3 or more NNP atoms
+ * - Removes angles containing all NNP atoms, and settles containing 2 or more NNP atoms
+ * - Removes dihedrals containing all NNP atoms
  */
 std::vector<LinkFrontierAtom> preprocessNNPotTopology(gmx_mtop_t*           mtop,
                                                       ArrayRef<const Index> nnpIndices,
@@ -173,10 +173,10 @@ std::vector<LinkFrontierAtom> preprocessNNPotTopology(gmx_mtop_t*           mtop
     // 4) Make F_CONNBOND between atoms within QM region
     modifyEmbeddedTwoCenterInteractions(mtop, nnpIndicesSet, isNNPBlock, logger);
 
-    // 5) Remove angles and settles containing 2 or more QM atoms
+    // 5) Remove angles containing all NNP atoms, and settles containing 2 or more NNP atoms
     modifyEmbeddedThreeCenterInteractions(mtop, nnpIndicesSet, isNNPBlock, logger);
 
-    // 6) Remove dihedrals containing 3 or more QM atoms
+    // 6) Remove dihedrals containing all NNP atoms
     modifyEmbeddedFourCenterInteractions(mtop, nnpIndicesSet, isNNPBlock, logger);
 
     // 7) Check for constrained bonds in subsystem

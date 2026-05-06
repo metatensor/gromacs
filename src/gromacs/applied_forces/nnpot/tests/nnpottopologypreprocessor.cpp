@@ -286,8 +286,8 @@ TEST_P(NNPotTopologyPreprocessorTest, AlanineDipeptideWithLinkAtomsNoConstraints
     expectLogMessage("Number of exclusions made: 6\n");
     expectLogMessage("Number of bonds removed: 8\n");
     expectLogMessage("Number of InteractionFunction::ConnectBonds \\(type 5 bonds\\) added: 5\n");
-    expectLogMessage("Number of angles removed: 11\n");
-    expectLogMessage("Number of dihedrals removed: 9\n");
+    expectLogMessage("Number of angles removed: 7\n");
+    expectLogMessage("Number of dihedrals removed: 3\n");
     expectLogMessage("Number of link bonds added: 2\n");
     if (embedding == NNPotEmbedding::ElectrostaticModel)
     {
@@ -323,8 +323,8 @@ TEST_P(NNPotTopologyPreprocessorTest, AlanineDipeptideWithLinkAtomsWithConstrain
     expectLogMessage("Number of embedded NNP atoms: 6\nNumber of regular atoms: 16\n");
     expectLogMessage("Number of exclusions made: 6\n");
     expectLogMessage("Number of bonds removed: 3\n");
-    expectLogMessage("Number of angles removed: 11\n");
-    expectLogMessage("Number of dihedrals removed: 9\n");
+    expectLogMessage("Number of angles removed: 7\n");
+    expectLogMessage("Number of dihedrals removed: 3\n");
     expectLogMessage("Number of link bonds added: 2\n");
     if (GetParam() == NNPotEmbedding::ElectrostaticModel)
     {
