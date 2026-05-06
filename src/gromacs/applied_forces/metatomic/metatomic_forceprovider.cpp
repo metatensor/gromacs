@@ -1333,7 +1333,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 auto r_mm  = real_strained_positions.index({ link.mmModelIndex });
                 auto direction = r_mm - r_emb;
                 auto dist = direction.norm();
-                auto r_link = r_emb + link.linkDistance() * direction / dist;
+                auto r_link = r_emb + link.linkDistance * direction / dist;
 
                 if (link.linkModelIndex < numLocalMta_)
                 {
