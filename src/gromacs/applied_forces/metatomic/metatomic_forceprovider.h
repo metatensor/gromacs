@@ -126,7 +126,7 @@ private:
      * circulating packed (globalI, globalJ) pair buffers in P-1 ring rounds,
      * then adds them to backwardPairsMta_ with shifts recomputed from local
      * positions. Complexity: O(total_pairs) communication, O(max_pairs/rank)
-     * memory — replaces the previous O(N²) pair table allreduce.
+     * memory without an O(N²) global pair table.
      *
      * Must be called after exchangeBackwardGhosts() (so all atom positions
      * are available) and before the NL building loop.
