@@ -52,6 +52,8 @@
 #include "gromacs/options/optionsection.h"
 #include "gromacs/selection/indexutil.h"
 #include "gromacs/topology/embedded_system_preprocessing.h"
+#include "gromacs/topology/idef.h"
+#include "gromacs/topology/ifunc.h"
 #include "gromacs/topology/mtop_util.h"
 #include "gromacs/topology/topology.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
@@ -83,13 +85,30 @@ static const std::string VARIANT_ENERGY_UQ_TAG     = "variant-energy-uq";
 static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
 static const std::string VARIANT_NC_FORCES_TAG     = "variant-nc-forces";
 static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
+static const std::string ONIOM_TAG                  = "oniom";
+static const std::string LINK_ATOMS_TAG            = "link-atoms";
+static const std::string MM_CHARGES_TAG            = "mm-charges";
 
 namespace
 {
 // TODO(rg): this is duplicated from the nnpotoptions
 
+void addLinkFrontierAtom(std::set<int>*                 boundaryMM,
+                         std::vector<LinkFrontierAtom>* linkFrontier,
+                         int                            embeddedIndex,
+                         int                            mmIndex)
+{
+    boundaryMM->insert(mmIndex);
+    linkFrontier->emplace_back(embeddedIndex, mmIndex);
+}
+
 //! \brief Helper function to preprocess topology for MTA
-void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, const MDLogger& logger, WarningHandler* wi)
+void preprocessTopology(gmx_mtop_t*                    mtop,
+                        ArrayRef<const Index>           mtaIndices,
+                        const MDLogger&                 logger,
+                        WarningHandler*                 wi,
+                        bool                            buildLinks,
+                        std::vector<LinkFrontierAtom>*  linkFrontierOut)
 {
     // convert mtaIndices to set for faster lookup
     std::set<int> mtaIndicesSet(mtaIndices.begin(), mtaIndices.end());
@@ -116,14 +135,23 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
     // 4) Make F_CONNBOND between atoms within QM region
     modifyEmbeddedTwoCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
 
-    // 5) Remove angles and settles containing 2 or more QM atoms
+    // 5) Remove angles and settles containing all-ML atoms (ONIOM)
     modifyEmbeddedThreeCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
 
-    // 6) Remove dihedrals containing 3 or more QM atoms
+    // 6) Remove dihedrals containing all-ML atoms (ONIOM)
     modifyEmbeddedFourCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
 
     // 7) Check for constrained bonds in subsystem
     checkConstrainedBonds(mtop, mtaIndicesSet, isMTABlock, wi);
+
+    // 8) Build link frontier atoms at ML/MM boundary bonds
+    if (buildLinks && linkFrontierOut != nullptr)
+    {
+        *linkFrontierOut = buildLinkFrontier(mtop, mtaIndicesSet, isMTABlock, logger);
+        GMX_LOG(logger.info)
+                .appendTextFormatted("Number of link frontier atoms: %zu",
+                                     linkFrontierOut->size());
+    }
 
     // finalize topology
     mtop->finalize();
@@ -156,6 +184,10 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG);
+    addMdpTransformFromString<bool>(
+            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ONIOM_TAG);
+    addMdpTransformFromString<bool>(
+            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG);
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -174,6 +206,8 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(BooleanOption(NON_CONSERVATIVE_TAG.c_str()).store(&params_.nonConservative));
     section.addOption(StringOption(VARIANT_NC_FORCES_TAG.c_str()).store(&params_.variantNcForces));
     section.addOption(StringOption(VARIANT_NC_STRESS_TAG.c_str()).store(&params_.variantNcStress));
+    section.addOption(BooleanOption(ONIOM_TAG.c_str()).store(&params_.oniom));
+    section.addOption(BooleanOption(LINK_ATOMS_TAG.c_str()).store(&params_.linkAtoms));
 }
 
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
@@ -209,6 +243,9 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG, params_.variantNcForces);
         addMdpOutputValue<std::string>(
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG, params_.variantNcStress);
+        addMdpOutputValue<bool>(builder, METATOMIC_MODULE_NAME, ONIOM_TAG, params_.oniom);
+        addMdpOutputValue<bool>(
+                builder, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG, params_.linkAtoms);
     }
 }
 
@@ -245,7 +282,102 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
     {
         return;
     }
-    preprocessTopology(top, params_.mtaIndices_, logger(), wi_);
+
+    params_.mmCharges_.clear();
+    params_.linkFrontier_.clear();
+
+    // Topology charges come from the unmodified topology so model-requested
+    // charge inputs remain independent of embedded-system preprocessing.
+    for (const auto& molblock : top->molblock)
+    {
+        const auto& moltype = top->moltype[molblock.type];
+        for (int m = 0; m < molblock.nmol; m++)
+        {
+            for (int a = 0; a < moltype.atoms.nr; a++)
+            {
+                params_.mmCharges_.push_back(moltype.atoms.atom[a].q);
+            }
+        }
+    }
+
+    if (!params_.oniom)
+    {
+        if (params_.linkAtoms)
+        {
+            GMX_THROW(InconsistentInputError(
+                    "metatomic-link-atoms requires metatomic-oniom = yes."));
+        }
+
+        GMX_LOG(logger().info)
+                .appendText("Metatomic potential interface is active, topology was not modified.");
+        return;
+    }
+
+    if (params_.linkAtoms)
+    {
+        // NNPot-style: identify boundary MM atoms first (by scanning bonds
+        // between ML and non-ML atoms), add them to the embedded set, THEN
+        // run topology surgery on the expanded set.  This ensures:
+        // - NB exclusions include boundary MM atoms (no double-counting)
+        // - Bonded terms between ML and boundary-MM are properly handled
+        // - buildLinkFrontier finds zero cut bonds (all boundary atoms are embedded)
+        //
+        // The link frontier is built from the ORIGINAL ML set (before expansion)
+        // so we know which embedded atoms are "real ML" vs "boundary MM".
+        std::set<int> origMtaSet(params_.mtaIndices_.begin(), params_.mtaIndices_.end());
+
+        // Scan bonds to find direct MM neighbors of ML atoms
+        std::set<int> boundaryMM;
+        for (size_t mb = 0; mb < top->molblock.size(); ++mb)
+        {
+            const auto& moltype = top->moltype[top->molblock[mb].type];
+            int start = top->moleculeBlockIndices[mb].globalAtomStart;
+
+            for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
+            {
+                if (!(interaction_function[ftype].flags & IF_CHEMBOND) || NRAL(ftype) != 2
+                    || moltype.ilist[ftype].empty())
+                {
+                    continue;
+                }
+                for (int j = 0; j < moltype.ilist[ftype].size(); j += 3)
+                {
+                    int a1 = moltype.ilist[ftype].iatoms[j + 1] + start;
+                    int a2 = moltype.ilist[ftype].iatoms[j + 2] + start;
+                    bool a1_ml = origMtaSet.count(a1) > 0;
+                    bool a2_ml = origMtaSet.count(a2) > 0;
+                    if (a1_ml && !a2_ml)
+                    {
+                        addLinkFrontierAtom(&boundaryMM, &params_.linkFrontier_, a1, a2);
+                    }
+                    else if (a2_ml && !a1_ml)
+                    {
+                        addLinkFrontierAtom(&boundaryMM, &params_.linkFrontier_, a2, a1);
+                    }
+                }
+            }
+        }
+
+        // Add boundary MM atoms to the embedded set
+        for (int mmIdx : boundaryMM)
+        {
+            params_.mtaIndices_.push_back(mmIdx);
+        }
+
+        GMX_LOG(logger().info)
+                .appendTextFormatted("Metatomic: expanded embedded set from %zu to %zu atoms "
+                                     "(%zu boundary MM for link atoms)",
+                                     origMtaSet.size(),
+                                     params_.mtaIndices_.size(),
+                                     boundaryMM.size());
+    }
+
+    // Run topology surgery on the (possibly expanded) embedded set
+    preprocessTopology(top, params_.mtaIndices_, logger(), wi_,
+                       /*buildLinks=*/false, nullptr);
+    // Note: buildLinkFrontier is not called inside preprocessTopology because
+    // we already built it above (and with the expanded set, there are no
+    // cut bonds -- all boundary atoms are now embedded).
 }
 
 void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
@@ -260,6 +392,28 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
     for (const auto& indexValue : params_.mtaIndices_)
     {
         GroupIndexAdder.addValue(indexValue);
+    }
+
+    if (!params_.mmCharges_.empty())
+    {
+        auto chargesAdder =
+                treeBuilder.addUniformArray<real>(METATOMIC_MODULE_NAME + "-" + MM_CHARGES_TAG);
+        for (const auto& charge : params_.mmCharges_)
+        {
+            chargesAdder.addValue(charge);
+        }
+    }
+
+    // Serialize link frontier as flat [embIdx, mmIdx, ...] pairs
+    if (!params_.linkFrontier_.empty())
+    {
+        auto linkAdder = treeBuilder.addUniformArray<std::int64_t>(
+                METATOMIC_MODULE_NAME + "-link-frontier");
+        for (const auto& link : params_.linkFrontier_)
+        {
+            linkAdder.addValue(link.getEmbeddedIndex());
+            linkAdder.addValue(link.getMMIndex());
+        }
     }
 }
 
@@ -284,6 +438,31 @@ void MetatomicOptions::readParamsFromKvt(const KeyValueTreeObject& tree)
                    std::end(kvtIndexArray),
                    std::begin(params_.mtaIndices_),
                    [](const KeyValueTreeValue& val) { return val.cast<std::int64_t>(); });
+
+    std::string chargeKey = METATOMIC_MODULE_NAME + "-" + MM_CHARGES_TAG;
+    if (tree.keyExists(chargeKey))
+    {
+        auto chargeArray = tree[chargeKey].asArray().values();
+        params_.mmCharges_.resize(chargeArray.size());
+        std::transform(std::begin(chargeArray),
+                       std::end(chargeArray),
+                       std::begin(params_.mmCharges_),
+                       [](const KeyValueTreeValue& val) { return val.cast<real>(); });
+    }
+
+    // Deserialize link frontier
+    std::string linkKey = METATOMIC_MODULE_NAME + "-link-frontier";
+    if (tree.keyExists(linkKey))
+    {
+        auto linkArray = tree[linkKey].asArray().values();
+        params_.linkFrontier_.clear();
+        for (size_t i = 0; i + 1 < linkArray.size(); i += 2)
+        {
+            int embIdx = static_cast<int>(linkArray[i].cast<std::int64_t>());
+            int mmIdx  = static_cast<int>(linkArray[i + 1].cast<std::int64_t>());
+            params_.linkFrontier_.emplace_back(embIdx, mmIdx);
+        }
+    }
 }
 
 

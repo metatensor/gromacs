@@ -128,6 +128,75 @@ static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
     return torch::tensor({ true, true, true }, options);
 }
 
+/*! \brief Whether a requested model input uses GROMACS atom charges. */
+static bool isChargeInput(const std::string& name)
+{
+    return name == "charges" || name.rfind("charges/", 0) == 0;
+}
+
+struct ActiveLinkAtom
+{
+    int32_t embeddedModelIndex = -1;
+    int32_t mmModelIndex       = -1;
+    int32_t linkModelIndex     = -1;
+    IVec    mmCellShift        = IVec(0, 0, 0);
+    real    linkDistance       = 0;
+    int32_t linkAtomNumber     = 1;
+};
+
+static RVec computeLinkAtomPosition(const RVec& embeddedPosition,
+                                    const RVec& mmPosition,
+                                    const RVec& mmShift,
+                                    real        linkDistance)
+{
+    const double dx = static_cast<double>(mmPosition[XX] - embeddedPosition[XX] + mmShift[XX]);
+    const double dy = static_cast<double>(mmPosition[YY] - embeddedPosition[YY] + mmShift[YY]);
+    const double dz = static_cast<double>(mmPosition[ZZ] - embeddedPosition[ZZ] + mmShift[ZZ]);
+    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist == 0.0)
+    {
+        GMX_THROW(InconsistentInputError(
+                "Metatomic link atom construction found a zero-length boundary bond."));
+    }
+
+    RVec linkPosition;
+    linkPosition[XX] = embeddedPosition[XX] + linkDistance * dx / dist;
+    linkPosition[YY] = embeddedPosition[YY] + linkDistance * dy / dist;
+    linkPosition[ZZ] = embeddedPosition[ZZ] + linkDistance * dz / dist;
+    return linkPosition;
+}
+
+static IVec computeMinimumImageCellShift(const matrix   boxInv,
+                                         PbcType        pbcType,
+                                         const double   rawDx,
+                                         const double   rawDy,
+                                         const double   rawDz)
+{
+    IVec cellShift(0, 0, 0);
+    if (pbcType == PbcType::No)
+    {
+        return cellShift;
+    }
+
+    cellShift[XX] = static_cast<int>(
+            std::round(-(boxInv[XX][XX] * rawDx + boxInv[YY][XX] * rawDy
+                         + boxInv[ZZ][XX] * rawDz)));
+    cellShift[YY] = static_cast<int>(
+            std::round(-(boxInv[YY][YY] * rawDy + boxInv[ZZ][YY] * rawDz)));
+    if (pbcType != PbcType::XY)
+    {
+        cellShift[ZZ] = static_cast<int>(std::round(-(boxInv[ZZ][ZZ] * rawDz)));
+    }
+    return cellShift;
+}
+
+static RVec computeCellShiftVector(const matrix box, const IVec& cellShift)
+{
+    RVec shift;
+    mvmul_ur0(box, cellShift.toRVec(), shift);
+    return shift;
+}
+
 /*! \brief Internal data structure for Metatomic runtime states. */
 struct MetatomicData
 {
@@ -138,6 +207,8 @@ struct MetatomicData
     torch::ScalarType                                 dtype             = torch::kFloat32;
     bool                                              check_consistency = false;
     torch::Device                                     device            = torch::kCPU;
+    //! Requested Metatomic per-atom charge input names.
+    std::vector<std::string> requestedChargeInputs;
 
     //! Cached NL Labels that are identical every step (created once in constructor).
     metatensor_torch::Labels cachedNLComponent;
@@ -160,6 +231,9 @@ struct MetatomicData
     metatomic_torch::ModelOutput uncertainty_output;
     //! Uncertainty threshold in kJ/mol. Atoms above this trigger a warning.
     double uncertaintyThreshold = 0.0;
+
+    //! Link frontier atoms for ONIOM link atom support.
+    std::vector<LinkFrontierAtom> linkFrontier;
 
     //! Non-conservative mode: forces/stress predicted directly, no backward pass.
     bool nonConservative = false;
@@ -233,35 +307,17 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // For GPU devices, CPU overhead is minimal so we keep 1 thread to avoid
     // oversubscription with GROMACS threads.  For CPU devices, model inference
     // (matmuls, convolutions) benefits from multi-threading.
-    if (data_->device.is_cpu())
+    // Synchronize PyTorch's thread count with GROMACS's ntomp.
+    //
+    // at::set_num_threads updates PyTorch's cached thread count AND
+    // MKL's thread pool (via mkl_set_num_threads), while GROMACS's
+    // omp_set_num_threads only updates the OpenMP ICV.  Without this
+    // call, PyTorch/MKL may retain the init-time default (all cores).
+    //
+    // For real MPI, ntomp is the GROMACS-selected per-rank thread count.
     {
-#if GMX_THREAD_MPI
-        // Thread-MPI: ranks share a process.  PyTorch's global thread pool
-        // would be contended by all ranks calling forward() concurrently,
-        // so keep at 1 to avoid oversubscription.
-        if (mpiComm_.isParallel())
-        {
-            at::set_num_threads(1);
-        }
-#else
-        // Real MPI (or no MPI): each rank is a separate process.
-        // Use the GROMACS-assigned OpenMP thread count so that PyTorch
-        // can parallelize matrix operations within each rank's allocation.
-        if (mpiComm_.isParallel())
-        {
-            int ntomp = gmx_omp_nthreads_get(ModuleMultiThread::Default);
-            at::set_num_threads(std::max(1, ntomp));
-        }
-        // Serial: let PyTorch use its default (all cores)
-#endif
-    }
-    else
-    {
-        // GPU/other device: model runs on accelerator, CPU work is minimal.
-        if (mpiComm_.isParallel())
-        {
-            at::set_num_threads(1);
-        }
+        int ntomp = gmx_omp_nthreads_get(ModuleMultiThread::Default);
+        at::set_num_threads(std::max(1, ntomp));
     }
 
     // JIT fusion: dynamic strategy with depth limit of 10 improves CPU
@@ -323,6 +379,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     data_->evaluations_options = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
     data_->evaluations_options->set_length_unit("nm");
+
+    auto requestedInputs = data_->model.run_method("requested_inputs").toGenericDict();
+    for (const auto& entry : requestedInputs)
+    {
+        std::string inputName = entry.key().toStringRef();
+        if (isChargeInput(inputName))
+        {
+            data_->requestedChargeInputs.push_back(inputName);
+        }
+    }
 
     auto outputs    = data_->capabilities->outputs();
     auto v_energy   = normalize_variant(options_.params_.variant);
@@ -472,6 +538,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                         data_->nc_stress_key.c_str());
     }
 
+    // Store link frontier from preprocessing
+    data_->linkFrontier = options_.params_.linkFrontier_;
+    if (!data_->linkFrontier.empty())
+    {
+        GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendTextFormatted("Metatomic: %zu link atoms at ML/MM boundary",
+                                     data_->linkFrontier.size());
+    }
+
     GMX_LOG(logger_.info)
             .asParagraph()
             .appendText("MetatomicForceProvider initialization complete.");
@@ -607,13 +683,13 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 
         for (int32_t k = 0; k < static_cast<int32_t>(haloGmxLocal.size()); k++)
         {
-            int32_t modelIdx  = numHomeMta_ + k;
-            int32_t gmxLocal  = haloGmxLocal[k];
-            int32_t globalIdx = globalAtomIndices[gmxLocal];
+            int32_t haloModelIdx = numHomeMta_ + k;
+            int32_t gmxLocal     = haloGmxLocal[k];
+            int32_t globalIdx    = globalAtomIndices[gmxLocal];
 
-            mtaToGmxLocal_[modelIdx]  = gmxLocal;
-            mtaToGlobalMta_[modelIdx] = haloGlobalMta[k];
-            atomNumbers_[modelIdx]    = options_.params_.atoms_.atom[globalIdx].atomnumber;
+            mtaToGmxLocal_[haloModelIdx]  = gmxLocal;
+            mtaToGlobalMta_[haloModelIdx] = haloGlobalMta[k];
+            atomNumbers_[haloModelIdx]    = options_.params_.atoms_.atom[globalIdx].atomnumber;
         }
     }
     else
@@ -667,12 +743,12 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
     }
 }
 
-/*! \brief Convert GROMACS excluded pairlist to MTA model indices.
+/*! \brief Convert GROMACS pairlists to MTA model indices.
  *
  * Called on every PairlistConstructed signal. Maps GROMACS local buffer
- * indices in excludedPairlist_ to MTA model indices via gmxLocalToMtaIdx_,
- * and negates cell shifts (GROMACS shifts first atom, metatensor shifts
- * second atom).
+ * indices in the plain interacting and excluded pairlists to MTA model
+ * indices via gmxLocalToMtaIdx_, and negates cell shifts (GROMACS shifts
+ * first atom, metatensor shifts second atom).
  */
 void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& signal)
 {
@@ -685,20 +761,26 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
     // Sign convention: GROMACS shifts atom I (first): d = x[I]+shift - x[J].
     // Metatensor shifts atom J (second): r_ij = x[J]+cell·box - x[I].
     // So metatensor cell shift = -GROMACS cell shift.
-    for (const auto& entry : signal.excludedPairlist_)
+    const auto appendPairlistEntries = [this](const auto& pairlistEntries)
     {
-        const auto& [atomPair, shiftIndex] = entry;
-        const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
-        const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
-
-        if (idxA != -1 && idxB != -1)
+        for (const auto& entry : pairlistEntries)
         {
-            pairlistMta_.push_back(idxA);
-            pairlistMta_.push_back(idxB);
-            const IVec gmxShift = shiftIndexToXYZ(shiftIndex);
-            cellShiftsMta_.push_back(IVec(-gmxShift[XX], -gmxShift[YY], -gmxShift[ZZ]));
+            const auto& [atomPair, shiftIndex] = entry;
+            const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
+            const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
+
+            if (idxA != -1 && idxB != -1)
+            {
+                pairlistMta_.push_back(idxA);
+                pairlistMta_.push_back(idxB);
+                const IVec gmxShift = shiftIndexToXYZ(shiftIndex);
+                cellShiftsMta_.push_back(IVec(-gmxShift[XX], -gmxShift[YY], -gmxShift[ZZ]));
+            }
         }
-    }
+    };
+
+    appendPairlistEntries(signal.pairlist_);
+    appendPairlistEntries(signal.excludedPairlist_);
 }
 
 
@@ -736,7 +818,7 @@ int32_t MetatomicForceProvider::exchangeBackwardGhosts(
         for (int p = 0; p < backwardGap; p++)
         {
             // Identify ALL currently local MTA atoms near the forward boundary (within cutoff).
-            // We include ghosts from previous dimensions/pulses (staged communication)
+            // We include staged ghosts from dimensions and pulses already processed
             // to correctly cover diagonal and corner backward neighbors.
             std::vector<int>  sendGlobalMta;
             std::vector<RVec> sendPositions;
@@ -1108,10 +1190,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             exchangeBackwardGhosts(inputs.dd_, inputs.box_, maxCutoff);
         }
 
-        // Rebuild cachedTypes after backward ghost exchange extended atomNumbers_
-        data_->cachedTypes =
-                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
-
         // Step 2: Exchange backward-direction pairs.  Discovers pairs from
         // other ranks' pairlists that involve this rank's home atoms.
         // Limit ring rounds to ceil(cutoff/minCellSize) when DD is available.
@@ -1147,6 +1225,128 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                               backwardShiftsMta_.end());
     }
 
+    std::vector<ActiveLinkAtom> activeLinkAtoms;
+    std::vector<int32_t>        modelAtomNumbers(atomNumbers_.begin(), atomNumbers_.end());
+    std::vector<int32_t>        modelChargeSourceModelIndex(numLocalMta_);
+    for (int32_t i = 0; i < numLocalMta_; ++i)
+    {
+        modelChargeSourceModelIndex[i] = i;
+    }
+
+    bool needTypesRebuild = useNewtonNL;
+    // Boundary MM atoms are represented as hydrogen link atoms in the model
+    // input. The frontier stores GROMACS global atom indices, while runtime
+    // model arrays are indexed by local MTA model index. The conversion goes
+    // through mtaIndices_ so it works for serial execution, DD home atoms,
+    // halo atoms, and backward ghosts.
+    if (!data_->linkFrontier.empty())
+    {
+        std::unordered_map<int32_t, int32_t> globalAtomToModelIdx;
+        globalAtomToModelIdx.reserve(numLocalMta_);
+        for (int32_t i = 0; i < numLocalMta_; ++i)
+        {
+            const int32_t globalMtaIdx = mtaToGlobalMta_[i];
+            if (globalMtaIdx >= 0
+                && globalMtaIdx < static_cast<int32_t>(options_.params_.mtaIndices_.size()))
+            {
+                globalAtomToModelIdx.emplace(
+                        static_cast<int32_t>(options_.params_.mtaIndices_[globalMtaIdx]), i);
+            }
+        }
+
+        std::unordered_map<int32_t, int32_t> boundaryMmToPrimaryCap;
+        boundaryMmToPrimaryCap.reserve(data_->linkFrontier.size());
+
+        const PbcType pbcType = *options_.params_.pbcType_;
+        matrix        boxInv;
+        if (pbcType != PbcType::No)
+        {
+            invertBoxMatrix(inputs.box_, boxInv);
+        }
+
+        for (auto& link : data_->linkFrontier)
+        {
+            const auto embIt = globalAtomToModelIdx.find(link.getEmbeddedIndex());
+            const auto mmIt  = globalAtomToModelIdx.find(link.getMMIndex());
+
+            const int32_t embMtaIdx =
+                    (embIt != globalAtomToModelIdx.end()) ? embIt->second : -1;
+            const int32_t mmMtaIdx = (mmIt != globalAtomToModelIdx.end()) ? mmIt->second : -1;
+
+            link.setInputIndices(embMtaIdx, mmMtaIdx);
+            if (embMtaIdx >= 0 && mmMtaIdx >= 0)
+            {
+                auto [it, inserted] = boundaryMmToPrimaryCap.emplace(mmMtaIdx, mmMtaIdx);
+                int32_t linkModelIdx = it->second;
+                if (!inserted)
+                {
+                    linkModelIdx = static_cast<int32_t>(modelAtomNumbers.size());
+                    modelAtomNumbers.push_back(link.linkAtomNumber());
+                    modelChargeSourceModelIndex.push_back(mmMtaIdx);
+                }
+                else
+                {
+                    modelAtomNumbers[mmMtaIdx] = link.linkAtomNumber();
+                }
+
+                const double rawDx = static_cast<double>(positions_[mmMtaIdx][XX]
+                                                         - positions_[embMtaIdx][XX]);
+                const double rawDy = static_cast<double>(positions_[mmMtaIdx][YY]
+                                                         - positions_[embMtaIdx][YY]);
+                const double rawDz = static_cast<double>(positions_[mmMtaIdx][ZZ]
+                                                         - positions_[embMtaIdx][ZZ]);
+                const IVec mmCellShift =
+                        computeMinimumImageCellShift(boxInv, pbcType, rawDx, rawDy, rawDz);
+
+                activeLinkAtoms.push_back({ embMtaIdx,
+                                            mmMtaIdx,
+                                            linkModelIdx,
+                                            mmCellShift,
+                                            link.linkDistance(),
+                                            link.linkAtomNumber() });
+                needTypesRebuild = true;
+            }
+        }
+    }
+
+    const int32_t numModelAtoms = static_cast<int32_t>(modelAtomNumbers.size());
+    torch::Tensor modelTypes    = data_->cachedTypes;
+    if (needTypesRebuild)
+    {
+        modelTypes = torch::tensor(modelAtomNumbers, torch::TensorOptions().dtype(torch::kInt32))
+                             .to(data_->device);
+    }
+
+    std::vector<RVec> modelPositionsForNl(positions_.begin(), positions_.end());
+    std::unordered_set<int32_t> linkModelIndices;
+    std::vector<int32_t> linkModelIndexList;
+    linkModelIndices.reserve(activeLinkAtoms.size());
+    linkModelIndexList.reserve(activeLinkAtoms.size());
+    for (const auto& link : activeLinkAtoms)
+    {
+        const bool inserted = linkModelIndices.insert(link.linkModelIndex).second;
+        if (inserted)
+        {
+            linkModelIndexList.push_back(link.linkModelIndex);
+        }
+        const RVec mmShift = computeCellShiftVector(inputs.box_, link.mmCellShift);
+        const RVec linkPosition = computeLinkAtomPosition(
+                positions_[link.embeddedModelIndex],
+                positions_[link.mmModelIndex],
+                mmShift,
+                link.linkDistance);
+        if (link.linkModelIndex < numLocalMta_)
+        {
+            modelPositionsForNl[link.linkModelIndex] = linkPosition;
+        }
+        else
+        {
+            modelPositionsForNl.push_back(linkPosition);
+        }
+    }
+
+    std::vector<int32_t> selectedModelIndices;
+
     // Model inference
     torch::Tensor forceTensor;
     torch::Tensor virialTensor;
@@ -1175,11 +1375,114 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 3, torch::TensorOptions().dtype(data_->dtype).device(data_->device)
                            .requires_grad(!data_->nonConservative));
 
-        auto strained_cell      = torch::matmul(torch_cell, strain);
-        auto strained_positions = torch::matmul(torch_positions, strain);
+        auto strained_cell           = torch::matmul(torch_cell, strain);
+        auto real_strained_positions = torch::matmul(torch_positions, strain);
+        auto strained_positions      = real_strained_positions;
+
+        // Link atom position replacement INSIDE the autograd graph.
+        // r_link = r_emb + d_link * (r_MM - r_emb) / |r_MM - r_emb|
+        // By computing this with torch operations, autograd automatically
+        // computes dE/dr_emb and dE/dr_MM via the chain rule through r_link.
+        // No manual spreadForce redistribution needed.
+        if (!activeLinkAtoms.empty())
+        {
+            strained_positions = real_strained_positions.clone();
+            std::vector<torch::Tensor> extraLinkPositions;
+
+            for (const auto& link : activeLinkAtoms)
+            {
+                auto r_emb = real_strained_positions.index({ link.embeddedModelIndex });
+                auto r_mm  = real_strained_positions.index({ link.mmModelIndex });
+                auto cellShift = torch::tensor({ static_cast<double>(link.mmCellShift[XX]),
+                                                 static_cast<double>(link.mmCellShift[YY]),
+                                                 static_cast<double>(link.mmCellShift[ZZ]) },
+                                               torch::TensorOptions()
+                                                       .dtype(data_->dtype)
+                                                       .device(data_->device));
+                auto direction = r_mm + torch::matmul(cellShift, strained_cell) - r_emb;
+                auto dist = direction.norm();
+                auto r_link = r_emb + link.linkDistance * direction / dist;
+
+                if (link.linkModelIndex < numLocalMta_)
+                {
+                    // Replace the boundary MM row with the primary cap.
+                    strained_positions.index_put_({ link.linkModelIndex }, r_link);
+                }
+                else
+                {
+                    extraLinkPositions.push_back(r_link.unsqueeze(0));
+                }
+            }
+
+            if (!extraLinkPositions.empty())
+            {
+                strained_positions = torch::cat(
+                        { strained_positions, torch::cat(extraLinkPositions, 0) }, 0);
+            }
+        }
 
         auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
-                data_->cachedTypes, strained_positions, strained_cell, data_->cachedPbc);
+                modelTypes, strained_positions, strained_cell, data_->cachedPbc);
+
+        if (!data_->requestedChargeInputs.empty())
+        {
+            if (options_.params_.mmCharges_.empty())
+            {
+                GMX_THROW(InconsistentInputError(
+                        "Metatomic model requests charges, but topology charges are not available."));
+            }
+
+            std::vector<real> chargeValues;
+            chargeValues.reserve(numModelAtoms);
+            for (int32_t i = 0; i < numModelAtoms; ++i)
+            {
+                const int32_t sourceModelIndex = modelChargeSourceModelIndex[i];
+                const int32_t mtaIndex = mtaToGlobalMta_[sourceModelIndex];
+                if (mtaIndex < 0
+                    || mtaIndex >= static_cast<int32_t>(options_.params_.mtaIndices_.size()))
+                {
+                    GMX_THROW(InconsistentInputError(
+                            "Metatomic charge input contains an invalid atom index."));
+                }
+                const Index globalAtom = options_.params_.mtaIndices_[mtaIndex];
+                if (globalAtom < 0
+                    || globalAtom >= static_cast<Index>(options_.params_.mmCharges_.size()))
+                {
+                    GMX_THROW(InconsistentInputError(
+                            "Metatomic charge input contains an atom without a stored charge."));
+                }
+                chargeValues.push_back(options_.params_.mmCharges_[globalAtom]);
+            }
+
+            auto charges = torch::tensor(chargeValues, cpu_blob_options)
+                                   .reshape({ static_cast<int64_t>(numModelAtoms), 1 })
+                                   .to(data_->device, data_->dtype);
+            auto intOptions = torch::TensorOptions().dtype(torch::kInt32).device(data_->device);
+            auto samplesTensor = torch::zeros({ numModelAtoms, 2 }, intOptions);
+            samplesTensor.index_put_({ torch::indexing::Slice(), 1 },
+                                     torch::arange(numModelAtoms, intOptions));
+
+            auto samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                    std::vector<std::string>{ "system", "atom" }, samplesTensor);
+            auto properties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                    std::vector<std::string>{ "charge" },
+                    torch::zeros({ 1, 1 }, intOptions));
+            auto keys = torch::make_intrusive<metatensor_torch::LabelsHolder>(
+                    std::vector<std::string>{ "_" },
+                    torch::zeros({ 1, 1 }, intOptions));
+
+            auto block = torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
+                    charges, samples, std::vector<metatensor_torch::Labels>{}, properties);
+            auto chargeMap = torch::make_intrusive<metatensor_torch::TensorMapHolder>(
+                    keys, std::vector<metatensor_torch::TensorBlock>{ block });
+            chargeMap->set_info("quantity", "charge");
+            chargeMap->set_info("unit", "e");
+
+            for (const auto& inputName : data_->requestedChargeInputs)
+            {
+                system->add_data(inputName, chargeMap);
+            }
+        }
 
         tensorPrepTimer.stop();
 
@@ -1204,17 +1507,58 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 const double  cutoff = request->engine_cutoff("nm");
                 const double  cutoff2 = cutoff * cutoff;
 
-                // Pre-allocate for worst case (all pairs within cutoff)
-                const int64_t maxPairs = full ? 2 * nHalf : nHalf;
-                nlSamplesBuffer_.resize(maxPairs * 5);
-                nlVectorsBuffer_.resize(maxPairs * 3);
+                const int64_t maxSyntheticPairs =
+                        static_cast<int64_t>(linkModelIndexList.size()) * numModelAtoms;
+                const int64_t reservePairs =
+                        (full ? 2 : 1) * (nHalf + maxSyntheticPairs);
+                nlSamplesBuffer_.clear();
+                nlVectorsBuffer_.clear();
+                nlSamplesBuffer_.reserve(reservePairs * 5);
+                nlVectorsBuffer_.reserve(reservePairs * 3);
 
-                int64_t outIdx = 0; // running output index for filtered pairs
+                auto appendPair = [&](int32_t ai,
+                                      int32_t aj,
+                                      const IVec& cellShift,
+                                      double dx,
+                                      double dy,
+                                      double dz)
+                {
+                    const double dist2 = dx * dx + dy * dy + dz * dz;
+                    if (dist2 > cutoff2)
+                    {
+                        return;
+                    }
+
+                    nlSamplesBuffer_.push_back(ai);
+                    nlSamplesBuffer_.push_back(aj);
+                    nlSamplesBuffer_.push_back(cellShift[XX]);
+                    nlSamplesBuffer_.push_back(cellShift[YY]);
+                    nlSamplesBuffer_.push_back(cellShift[ZZ]);
+                    nlVectorsBuffer_.push_back(dx);
+                    nlVectorsBuffer_.push_back(dy);
+                    nlVectorsBuffer_.push_back(dz);
+
+                    if (full)
+                    {
+                        nlSamplesBuffer_.push_back(aj);
+                        nlSamplesBuffer_.push_back(ai);
+                        nlSamplesBuffer_.push_back(-cellShift[XX]);
+                        nlSamplesBuffer_.push_back(-cellShift[YY]);
+                        nlSamplesBuffer_.push_back(-cellShift[ZZ]);
+                        nlVectorsBuffer_.push_back(-dx);
+                        nlVectorsBuffer_.push_back(-dy);
+                        nlVectorsBuffer_.push_back(-dz);
+                    }
+                };
 
                 for (int64_t k = 0; k < nHalf; k++)
                 {
                     const int32_t ai = pairlistMta_[2 * k];
                     const int32_t aj = pairlistMta_[2 * k + 1];
+                    if (linkModelIndices.count(ai) > 0 || linkModelIndices.count(aj) > 0)
+                    {
+                        continue;
+                    }
 
                     // Compute shift vector from cell shift and current box
                     RVec shift;
@@ -1225,40 +1569,52 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                     const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
                     const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
 
-                    const double dist2 = dx * dx + dy * dy + dz * dz;
-                    if (dist2 > cutoff2)
+                    appendPair(ai, aj, cellShiftsMta_[k], dx, dy, dz);
+                }
+
+                if (!linkModelIndexList.empty())
+                {
+                    const PbcType pbcType = *options_.params_.pbcType_;
+                    matrix boxInv;
+                    if (pbcType != PbcType::No)
                     {
-                        continue;
+                        invertBoxMatrix(inputs.box_, boxInv);
                     }
 
-                    nlSamplesBuffer_[5 * outIdx + 0] = ai;
-                    nlSamplesBuffer_[5 * outIdx + 1] = aj;
-                    nlSamplesBuffer_[5 * outIdx + 2] = cellShiftsMta_[k][0];
-                    nlSamplesBuffer_[5 * outIdx + 3] = cellShiftsMta_[k][1];
-                    nlSamplesBuffer_[5 * outIdx + 4] = cellShiftsMta_[k][2];
-                    nlVectorsBuffer_[3 * outIdx + 0] = dx;
-                    nlVectorsBuffer_[3 * outIdx + 1] = dy;
-                    nlVectorsBuffer_[3 * outIdx + 2] = dz;
-                    outIdx++;
-
-                    if (full)
+                    for (const int32_t ai : linkModelIndexList)
                     {
-                        // Reverse pair (j,i) with negated shifts and displacement
-                        nlSamplesBuffer_[5 * outIdx + 0] = aj;
-                        nlSamplesBuffer_[5 * outIdx + 1] = ai;
-                        nlSamplesBuffer_[5 * outIdx + 2] = -cellShiftsMta_[k][0];
-                        nlSamplesBuffer_[5 * outIdx + 3] = -cellShiftsMta_[k][1];
-                        nlSamplesBuffer_[5 * outIdx + 4] = -cellShiftsMta_[k][2];
-                        nlVectorsBuffer_[3 * outIdx + 0] = -dx;
-                        nlVectorsBuffer_[3 * outIdx + 1] = -dy;
-                        nlVectorsBuffer_[3 * outIdx + 2] = -dz;
-                        outIdx++;
+                        for (int32_t aj = 0; aj < numModelAtoms; ++aj)
+                        {
+                            if (ai == aj)
+                            {
+                                continue;
+                            }
+                            if (linkModelIndices.count(aj) > 0 && ai > aj)
+                            {
+                                continue;
+                            }
+
+                            const double rawDx = static_cast<double>(
+                                    modelPositionsForNl[aj][XX] - modelPositionsForNl[ai][XX]);
+                            const double rawDy = static_cast<double>(
+                                    modelPositionsForNl[aj][YY] - modelPositionsForNl[ai][YY]);
+                            const double rawDz = static_cast<double>(
+                                    modelPositionsForNl[aj][ZZ] - modelPositionsForNl[ai][ZZ]);
+
+                            const IVec cellShift =
+                                    computeMinimumImageCellShift(boxInv, pbcType, rawDx, rawDy, rawDz);
+
+                            const RVec shift = computeCellShiftVector(inputs.box_, cellShift);
+
+                            const double dx = rawDx + shift[XX];
+                            const double dy = rawDy + shift[YY];
+                            const double dz = rawDz + shift[ZZ];
+                            appendPair(ai, aj, cellShift, dx, dy, dz);
+                        }
                     }
                 }
 
-                nPairs = outIdx;
-                nlSamplesBuffer_.resize(nPairs * 5);
-                nlVectorsBuffer_.resize(nPairs * 3);
+                nPairs = static_cast<int64_t>(nlSamplesBuffer_.size() / 5);
             }
 
             // Wrap raw buffers as tensors (zero-copy on CPU, then move to device)
@@ -1305,19 +1661,67 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         buildNLTimer.stop();
 
-        if (useNewtonNL)
+        if (useNewtonNL || data_->nonConservative)
         {
-            // Restrict output to home atoms only [0, numHomeMta_).
+            // Restrict output to home atoms and link caps attached to home atoms.
             // Following the LAMMPS pair_metatomic pattern (selected_atoms = nlocal).
             // The model computes per-atom energies for ALL local atoms internally,
             // but only returns results for home atoms.  This is important because
             // models are free to return output samples in arbitrary order when
             // selected_atoms is nullopt, but the order is deterministic when
             // selected_atoms is set.
-            auto sa_values = torch::zeros({ numHomeMta_, 2 },
+            std::unordered_set<int32_t> selectedSet;
+            if (useNewtonNL)
+            {
+                selectedModelIndices.reserve(numHomeMta_ + activeLinkAtoms.size());
+                selectedSet.reserve(numHomeMta_ + activeLinkAtoms.size());
+                std::unordered_map<int32_t, bool> linkModelIndexOwnedByHomeEmbedded;
+                linkModelIndexOwnedByHomeEmbedded.reserve(activeLinkAtoms.size());
+                for (const auto& link : activeLinkAtoms)
+                {
+                    const bool ownedByHomeEmbedded = link.embeddedModelIndex < numHomeMta_;
+                    auto [it, inserted] =
+                            linkModelIndexOwnedByHomeEmbedded.emplace(link.linkModelIndex,
+                                                                      ownedByHomeEmbedded);
+                    if (!inserted)
+                    {
+                        it->second = it->second || ownedByHomeEmbedded;
+                    }
+                }
+                for (int32_t i = 0; i < numHomeMta_; ++i)
+                {
+                    const auto linkOwnership = linkModelIndexOwnedByHomeEmbedded.find(i);
+                    if (linkOwnership != linkModelIndexOwnedByHomeEmbedded.end()
+                        && !linkOwnership->second)
+                    {
+                        continue;
+                    }
+                    selectedModelIndices.push_back(i);
+                    selectedSet.insert(i);
+                }
+                for (const auto& link : activeLinkAtoms)
+                {
+                    if (link.embeddedModelIndex < numHomeMta_
+                        && selectedSet.insert(link.linkModelIndex).second)
+                    {
+                        selectedModelIndices.push_back(link.linkModelIndex);
+                    }
+                }
+            }
+            else
+            {
+                selectedModelIndices.reserve(numModelAtoms);
+                for (int32_t i = 0; i < numModelAtoms; ++i)
+                {
+                    selectedModelIndices.push_back(i);
+                }
+            }
+
+            auto sa_values = torch::zeros({ static_cast<int64_t>(selectedModelIndices.size()), 2 },
                                           torch::TensorOptions().dtype(torch::kInt32));
             sa_values.index_put_({ torch::indexing::Slice(), 1 },
-                                 torch::arange(numHomeMta_, torch::kInt32));
+                                 torch::tensor(selectedModelIndices,
+                                               torch::TensorOptions().dtype(torch::kInt32)));
             sa_values = sa_values.to(data_->device);
             auto selected = torch::make_intrusive<metatensor_torch::LabelsHolder>(
                     std::vector<std::string>{ "system", "atom" }, sa_values);
@@ -1460,14 +1864,74 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     if (data_->nonConservative)
     {
-        // NC mode: forces are for home atoms only (or all atoms in serial).
-        // Apply directly, no halo exchange needed.
-        for (int32_t i = 0; i < nForceAtoms; i++)
+        if (selectedModelIndices.empty()
+            || nForceAtoms != static_cast<int32_t>(selectedModelIndices.size()))
         {
-            int32_t gmxIdx = mtaToGmxLocal_[i];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceData[3 * i]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceData[3 * i + 1]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceData[3 * i + 2]);
+            GMX_THROW(APIError("Metatomic non-conservative force output does not match "
+                               "the selected atom list."));
+        }
+
+        std::unordered_map<int32_t, std::size_t> linkByModelIndex;
+        linkByModelIndex.reserve(activeLinkAtoms.size());
+        for (std::size_t i = 0; i < activeLinkAtoms.size(); ++i)
+        {
+            linkByModelIndex.emplace(activeLinkAtoms[i].linkModelIndex, i);
+        }
+
+        std::vector<double> ncForces(static_cast<std::size_t>(3 * numLocalMta_), 0.0);
+        const auto addNcForce = [&ncForces](int32_t modelIndex, const RVec& force)
+        {
+            ncForces[3 * modelIndex] += force[XX];
+            ncForces[3 * modelIndex + 1] += force[YY];
+            ncForces[3 * modelIndex + 2] += force[ZZ];
+        };
+
+        for (int32_t row = 0; row < nForceAtoms; row++)
+        {
+            const int32_t modelIndex = selectedModelIndices[row];
+            RVec          force;
+            force[XX] = static_cast<real>(forceData[3 * row]);
+            force[YY] = static_cast<real>(forceData[3 * row + 1]);
+            force[ZZ] = static_cast<real>(forceData[3 * row + 2]);
+
+            const auto linkIt = linkByModelIndex.find(modelIndex);
+            if (linkIt != linkByModelIndex.end())
+            {
+                const ActiveLinkAtom& link    = activeLinkAtoms[linkIt->second];
+                const RVec            mmShift = computeCellShiftVector(inputs.box_, link.mmCellShift);
+                const auto [embeddedForce, mmForce] =
+                        spreadLinkAtomForce(force,
+                                            positions_[link.embeddedModelIndex],
+                                            positions_[link.mmModelIndex],
+                                            mmShift,
+                                            link.linkDistance);
+                addNcForce(link.embeddedModelIndex, embeddedForce);
+                addNcForce(link.mmModelIndex, mmForce);
+            }
+            else
+            {
+                if (modelIndex < 0 || modelIndex >= numLocalMta_)
+                {
+                    GMX_THROW(APIError("Metatomic non-conservative force output contains "
+                                       "an invalid atom index."));
+                }
+                addNcForce(modelIndex, force);
+            }
+        }
+
+        if (mpiComm_.isParallel())
+        {
+            distributeNonHomeForces(ncForces.data(), outputs);
+        }
+        else
+        {
+            for (int32_t i = 0; i < numLocalMta_; i++)
+            {
+                int32_t gmxIdx = mtaToGmxLocal_[i];
+                outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(ncForces[3 * i]);
+                outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(ncForces[3 * i + 1]);
+                outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(ncForces[3 * i + 2]);
+            }
         }
     }
     else if (mpiComm_.isParallel())
@@ -1476,7 +1940,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     else
     {
-        // Serial: apply forces directly
+        // Apply forces directly. When link atoms are used, autograd has
+        // already computed the correct forces on r_emb and r_MM via the
+        // chain rule through r_link (because the link position computation
+        // is in the autograd graph). No manual spreadForce needed.
         for (int32_t i = 0; i < numLocalMta_; i++)
         {
             int32_t gmxIdx = mtaToGmxLocal_[i];

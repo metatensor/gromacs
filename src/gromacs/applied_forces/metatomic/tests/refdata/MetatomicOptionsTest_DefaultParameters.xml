@@ -7,4 +7,5 @@
   <String Name="extensionsDirectory"></String>
   <String Name="device"></String>
   <Bool Name="checkConsistency">false</Bool>
+  <Bool Name="oniom">false</Bool>
 </ReferenceData>

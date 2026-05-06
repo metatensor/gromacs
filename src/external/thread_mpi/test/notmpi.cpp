@@ -167,19 +167,25 @@ int main(int argc, char *argv[])
 #elif defined(THREAD_WINDOWS)
     /* Windows threads here */
     {
-        DWORD *th;
-
-        th = (DWORD*)malloc(sizeof(DWORD)*n);
+        std::vector<HANDLE> threads(n);
+        std::vector<DWORD>  threadIds(n);
 
         for (i = 1; i < n; i++)
         {
-            CreateThread(NULL, 0, thread_starter, (void*)(id_array+i), 0, th+i);
+            threads[i] =
+                    CreateThread(NULL, 0, thread_starter, (void*)(id_array+i), 0, &threadIds[i]);
+            if (threads[i] == NULL)
+            {
+                fprintf(stderr, "CreateThread failed with error %lu\n", GetLastError());
+                exit(1);
+            }
         }
         thread_fn(id_array+0);
 
         for (i = 1; i < n; i++)
         {
-            WaitForSingleObject(th+i, INFINITE);
+            WaitForSingleObject(threads[i], INFINITE);
+            CloseHandle(threads[i]);
         }
     }
 #endif
