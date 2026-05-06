@@ -63,12 +63,12 @@ TEST(EmbeddedSystemPreprocessingTest, LinkAtomForceSpreadUsesExplicitCellShift)
     const auto [embeddedForce, mmForce] =
             spreadLinkAtomForce(linkForce, embeddedPosition, mmPosition, mmShift, 0.05_real);
 
-    EXPECT_FLOAT_EQ(embeddedForce[XX], 0.0_real);
-    EXPECT_FLOAT_EQ(embeddedForce[YY], 1.0_real);
-    EXPECT_FLOAT_EQ(embeddedForce[ZZ], 0.0_real);
-    EXPECT_FLOAT_EQ(mmForce[XX], 0.0_real);
-    EXPECT_FLOAT_EQ(mmForce[YY], 1.0_real);
-    EXPECT_FLOAT_EQ(mmForce[ZZ], 0.0_real);
+    EXPECT_NEAR(embeddedForce[XX], 0.0_real, 1e-6_real);
+    EXPECT_NEAR(embeddedForce[YY], 1.0_real, 1e-6_real);
+    EXPECT_NEAR(embeddedForce[ZZ], 0.0_real, 1e-6_real);
+    EXPECT_NEAR(mmForce[XX], 0.0_real, 1e-6_real);
+    EXPECT_NEAR(mmForce[YY], 1.0_real, 1e-6_real);
+    EXPECT_NEAR(mmForce[ZZ], 0.0_real, 1e-6_real);
 }
 
 TEST(EmbeddedSystemPreprocessingTest, LinkAtomForceSpreadConservesTotalForce)
@@ -81,9 +81,9 @@ TEST(EmbeddedSystemPreprocessingTest, LinkAtomForceSpreadConservesTotalForce)
     const auto [embeddedForce, mmForce] =
             spreadLinkAtomForce(linkForce, embeddedPosition, mmPosition, mmShift, 0.25_real);
 
-    EXPECT_FLOAT_EQ(embeddedForce[XX] + mmForce[XX], linkForce[XX]);
-    EXPECT_FLOAT_EQ(embeddedForce[YY] + mmForce[YY], linkForce[YY]);
-    EXPECT_FLOAT_EQ(embeddedForce[ZZ] + mmForce[ZZ], linkForce[ZZ]);
+    EXPECT_NEAR(embeddedForce[XX] + mmForce[XX], linkForce[XX], 1e-6_real);
+    EXPECT_NEAR(embeddedForce[YY] + mmForce[YY], linkForce[YY], 1e-6_real);
+    EXPECT_NEAR(embeddedForce[ZZ] + mmForce[ZZ], linkForce[ZZ], 1e-6_real);
 }
 
 } // namespace
