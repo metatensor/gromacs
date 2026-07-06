@@ -56,7 +56,32 @@
 #define CL_USE_DEPRECATED_OPENCL_2_0_APIS
 ///@}
 #ifdef __APPLE__
+/* Newer Apple SDKs pull mach/message.h via OpenCL with xnu_static_assert_*
+ * layout checks. Apple Clang supplies those macros; plain GCC treats them as
+ * unknown identifiers and fails at file scope. Neutralize every arity before
+ * including OpenCL (SDK layout checks only — not a test skip). */
+#    if defined(__GNUC__) && !defined(__clang__)
+#        pragma push_macro("xnu_static_assert")
+#        pragma push_macro("xnu_static_assert_struct_size")
+#        pragma push_macro("xnu_static_assert_struct_size_kernel_user")
+#        pragma push_macro("xnu_static_assert_struct_size_kernel_user64_user32")
+#        undef xnu_static_assert
+#        undef xnu_static_assert_struct_size
+#        undef xnu_static_assert_struct_size_kernel_user
+#        undef xnu_static_assert_struct_size_kernel_user64_user32
+#        define xnu_static_assert(...) static_assert(true, "")
+#        define xnu_static_assert_struct_size(...) static_assert(true, "")
+#        define xnu_static_assert_struct_size_kernel_user(...) static_assert(true, "")
+#        define xnu_static_assert_struct_size_kernel_user64_user32(...) \
+            static_assert(true, "")
+#    endif
 #    include <OpenCL/opencl.h>
+#    if defined(__GNUC__) && !defined(__clang__)
+#        pragma pop_macro("xnu_static_assert_struct_size_kernel_user64_user32")
+#        pragma pop_macro("xnu_static_assert_struct_size_kernel_user")
+#        pragma pop_macro("xnu_static_assert_struct_size")
+#        pragma pop_macro("xnu_static_assert")
+#    endif
 #else
 #    include <CL/opencl.h>
 #endif
