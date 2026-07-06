@@ -130,14 +130,17 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
         # These are torch-dependent: only declare when Torch was found, so
         # AUTO mode on platforms without torch leaves the build clean.
 
+        # Minimum versions for find_package when using an installed stack
+        # (pixi/metatomic-cpu). FetchContent tarballs below are only used when
+        # DOWNLOAD_METATENSOR / DOWNLOAD_METATOMIC are ON.
         set(METATENSOR_CORE_VERSION "0.1.17")
         set(METATENSOR_CORE_SHA256 "42119e11908239915ccc187d7ca65449b461f1d4b5af4d6df1fb613d687da76a")
 
-        set(METATENSOR_TORCH_VERSION "0.8.0")
-        set(METATENSOR_TORCH_SHA256 "61d383ce958deafe0e3916088185527680c9118588722b17ec5c39cfbaa6da55")
+        set(METATENSOR_TORCH_VERSION "0.10.0")
+        set(METATENSOR_TORCH_SHA256 "ea0b7e110098b91a08ceae562d9f1a77b212228305e7a148ce4ddaa7958b4ec8")
 
-        set(METATOMIC_TORCH_VERSION "0.1.7")
-        set(METATOMIC_TORCH_SHA256 "726f5711b70c4b8cc80d9bc6c3ce6f3449f31d20acc644ab68dab083aa4ea572")
+        set(METATOMIC_TORCH_VERSION "0.1.15")
+        set(METATOMIC_TORCH_SHA256 "2fa4c94144164168834a90ff195ed7d788959c9d9ffd3ea4a85e2f470925c708")
 
         set(DOWNLOAD_METATENSOR_DEFAULT ON)
         find_package(metatensor_torch ${METATENSOR_TORCH_VERSION} QUIET)
