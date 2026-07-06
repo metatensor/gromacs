@@ -99,6 +99,14 @@
 namespace gmx
 {
 
+// ModelOutput sample granularity: per-atom when sample_kind == "atom"
+// (get_per_atom/set_per_atom are being removed from metatomic-torch).
+template<typename OutputPtr>
+bool modelOutputIsAtomSample(const OutputPtr& out)
+{
+    return out->sample_kind() == "atom";
+}
+
 /*! \brief Normalizes the variant string for Metatomic output selection. */
 static torch::optional<std::string> normalize_variant(std::string variant_string)
 {
@@ -339,16 +347,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     auto model_output     = outputs.at(energy_key);
     auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-    // Use the model's declared per_atom capability (needed for correct energy
-    // decomposition when using the GROMACS pairlist in domain decomposition)
-    requested_output->per_atom           = model_output->per_atom;
-    if (!model_output->per_atom)
+    // Request the same sample granularity the model declares (atom vs system).
+    requested_output->set_sample_kind(model_output->sample_kind());
+    if (!modelOutputIsAtomSample(model_output))
     {
         GMX_LOG(logger_.warning)
                 .asParagraph()
                 .appendText(
-                        "Metatomic model does not support per_atom energy output. "
-                        "Energy decomposition in domain decomposition may be less accurate.");
+                        "Metatomic model does not support per-atom energy output "
+                        "(sample_kind != \"atom\"). Energy decomposition in domain "
+                        "decomposition may be less accurate.");
     }
     requested_output->explicit_gradients = {};
     requested_output->set_quantity("energy");
@@ -376,13 +384,13 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             data_->energy_uq_key = pick_output("energy_uncertainty", outputs, v_energy_uq);
             auto uq_cap = outputs.at(data_->energy_uq_key);
 
-            if (uq_cap->per_atom)
+            if (modelOutputIsAtomSample(uq_cap))
             {
                 data_->uncertainty_output =
                         torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
                 data_->uncertainty_output->set_quantity("energy");
                 data_->uncertainty_output->set_unit("kJ/mol");
-                data_->uncertainty_output->per_atom = true;
+                data_->uncertainty_output->set_sample_kind("atom");
 
                 if (options_.params_.uncertaintyThreshold == "auto")
                 {
@@ -435,18 +443,19 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                     data_->nc_forces_key.c_str())));
         }
         auto nc_forces_cap = outputs.at(data_->nc_forces_key);
-        if (!nc_forces_cap->per_atom)
+        if (!modelOutputIsAtomSample(nc_forces_cap))
         {
             GMX_THROW(APIError(formatString(
-                    "The model's '%s' output can not produce per-atom output, "
-                    "we can not enable non-conservative simulations",
+                    "The model's '%s' output can not produce per-atom output "
+                    "(sample_kind != \"atom\"), we can not enable non-conservative "
+                    "simulations",
                     data_->nc_forces_key.c_str())));
         }
 
         data_->nc_forces_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
         data_->nc_forces_output->set_quantity("force");
         data_->nc_forces_output->set_unit("kJ/mol/nm");
-        data_->nc_forces_output->per_atom = true;
+        data_->nc_forces_output->set_sample_kind("atom");
 
         data_->evaluations_options->outputs.insert(
                 data_->nc_forces_key, data_->nc_forces_output);
@@ -457,7 +466,8 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             data_->nc_stress_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
             data_->nc_stress_output->set_quantity("stress");
             data_->nc_stress_output->set_unit("kJ/mol/nm^3");
-            data_->nc_stress_output->per_atom = false;
+            // System-level stress samples (not per-atom).
+            data_->nc_stress_output->set_sample_kind("system");
 
             data_->evaluations_options->outputs.insert(
                     data_->nc_stress_key, data_->nc_stress_output);
