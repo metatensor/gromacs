@@ -356,7 +356,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                         "decomposition may be less accurate.");
     }
     requested_output->explicit_gradients = {};
-    requested_output->set_quantity("energy");
     requested_output->set_unit("kJ/mol");
 
     data_->evaluations_options->outputs.insert(energy_key, requested_output);
@@ -384,7 +383,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             if (modelOutputIsAtomSample(uq_cap))
             {
                 data_->uncertainty_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-                data_->uncertainty_output->set_quantity("energy");
                 data_->uncertainty_output->set_unit("kJ/mol");
                 data_->uncertainty_output->set_sample_kind("atom");
 
@@ -392,7 +390,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 {
                     // Default: 100 meV/atom converted to kJ/mol
                     data_->uncertaintyThreshold =
-                            0.1 * metatomic_torch::unit_conversion_factor("energy", "eV", "kJ/mol");
+                            0.1 * metatomic_torch::unit_conversion_factor("eV", "kJ/mol");
                 }
                 else
                 {
@@ -447,7 +445,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         }
 
         data_->nc_forces_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-        data_->nc_forces_output->set_quantity("force");
         data_->nc_forces_output->set_unit("kJ/mol/nm");
         data_->nc_forces_output->set_sample_kind("atom");
 
@@ -457,7 +454,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         if (outputs.contains(data_->nc_stress_key))
         {
             data_->nc_stress_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-            data_->nc_stress_output->set_quantity("stress");
             data_->nc_stress_output->set_unit("kJ/mol/nm^3");
             // System-level stress samples (not per-atom).
             data_->nc_stress_output->set_sample_kind("system");
@@ -531,7 +527,6 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 
         // First pass: assign model indices to unique MTA atoms
         std::unordered_map<int32_t, int32_t> mtaIdxToModelIdx;
-        int32_t                              numDuplicatesSkipped = 0;
 
         for (int32_t i = 0; i < numLocalPlusHalo; i++)
         {
@@ -541,12 +536,10 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             {
                 int32_t mtaIdx = it->second;
 
-                if (mtaIdxToModelIdx.count(mtaIdx))
-                {
-                    // Periodic ghost: record mapping but don't create new model atom
-                    numDuplicatesSkipped++;
-                }
-                else
+                // A repeated mtaIdx is a periodic image of an atom that already
+                // holds a model index, so it adds no new model atom. The second
+                // pass below maps every image, including these.
+                if (!mtaIdxToModelIdx.count(mtaIdx))
                 {
                     if (i < numLocal)
                     {
@@ -609,13 +602,13 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 
         for (int32_t k = 0; k < static_cast<int32_t>(haloGmxLocal.size()); k++)
         {
-            int32_t modelIdx  = numHomeMta_ + k;
-            int32_t gmxLocal  = haloGmxLocal[k];
-            int32_t globalIdx = globalAtomIndices[gmxLocal];
+            int32_t haloModelIdx = numHomeMta_ + k;
+            int32_t gmxLocal     = haloGmxLocal[k];
+            int32_t globalIdx    = globalAtomIndices[gmxLocal];
 
-            mtaToGmxLocal_[modelIdx]  = gmxLocal;
-            mtaToGlobalMta_[modelIdx] = haloGlobalMta[k];
-            atomNumbers_[modelIdx]    = options_.params_.atoms_.atom[globalIdx].atomnumber;
+            mtaToGmxLocal_[haloModelIdx]  = gmxLocal;
+            mtaToGlobalMta_[haloModelIdx] = haloGlobalMta[k];
+            atomNumbers_[haloModelIdx]    = options_.params_.atoms_.atom[globalIdx].atomnumber;
         }
     }
     else
