@@ -3825,6 +3825,90 @@ interface implementation follow :ref:`nnpot`.
    (0.1) [nm] Distance between link atom and the bonded MM atom.
 
 
+.. _mdp-metatomic:
+
+Machine learning potentials in the metatomic interface
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+These options enable and control the calculation of forces from machine
+learning interatomic potentials that implement the metatomic model interface,
+if |Gromacs| is built with ``GMX_METATOMIC=ON``. For further details about the
+interface implementation follow :ref:`metatomic`.
+
+.. mdp:: metatomic-active
+
+   (false) Activate the metatomic force provider. Requires |Gromacs| to be
+   built with LibTorch and ``metatomic-torch`` support.
+
+.. mdp:: metatomic-model
+
+   Path to an exported TorchScript metatomic model, either absolute or
+   relative to the simulation directory. Must be set when
+   :mdp:`metatomic-active` is ``true``.
+
+.. mdp:: metatomic-input-group
+
+   (System) Index group whose atoms are described by the model. With the
+   default ``System``, the model replaces the classical force field for the
+   whole system. A smaller group leaves the remaining atoms on the classical
+   force field, with the interactions between the two regions treated
+   classically.
+
+.. mdp:: metatomic-extensions
+
+   Directory containing the TorchScript extensions the model needs. Only
+   required for models that ship custom operators; leave empty otherwise.
+
+.. mdp:: metatomic-device
+
+   Torch device used for inference, for example ``cpu`` or ``cuda``. When
+   empty, the device declared by the model is used. The environment variable
+   ``GMX_METATOMIC_DEVICE`` overrides this option at run time.
+
+.. mdp:: metatomic-variant
+
+   Selects which variant of the model's energy output is evaluated. Only
+   meaningful for models that export more than one variant; leave empty to
+   use the default output.
+
+.. mdp:: metatomic-check-consistency
+
+   (false) Run the model interface's own consistency checks on the system and
+   on the model outputs at every step. The checks validate the neighbor list
+   pair by pair and dominate the run time, so they are intended for debugging
+   a model or an input rather than for production runs.
+
+.. mdp:: metatomic-uncertainty-threshold
+
+   (auto) Per-atom energy uncertainty above which |Gromacs| reports that the
+   model is extrapolating. Only applies to models that declare an
+   ``energy_uncertainty`` output. ``auto`` resolves to 100 meV per atom,
+   ``off`` disables the check, and a number is read as kJ/mol per atom.
+
+.. mdp:: metatomic-variant-energy-uq
+
+   Variant of the model's ``energy_uncertainty`` output to evaluate. Leave
+   empty to use the default output.
+
+.. mdp:: metatomic-non-conservative
+
+   (false) Read forces, and the stress when the model provides it, directly
+   from the model's ``non_conservative_forces`` and
+   ``non_conservative_stress`` outputs instead of differentiating the energy.
+   This skips the backward pass and is cheaper, but the resulting forces are
+   not the gradient of a potential, so energy is not conserved and the
+   dynamics do not sample a well defined ensemble.
+
+.. mdp:: metatomic-variant-nc-forces
+
+   Variant of the model's ``non_conservative_forces`` output to evaluate.
+   Leave empty to use the default output.
+
+.. mdp:: metatomic-variant-nc-stress
+
+   Variant of the model's ``non_conservative_stress`` output to evaluate.
+   Leave empty to use the default output.
+
+
 .. _mdp-fmm:
 
 Fast Multipole Method (FMM) Interface

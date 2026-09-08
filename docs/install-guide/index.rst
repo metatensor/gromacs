@@ -1453,6 +1453,36 @@ be used by the NNP model. The path to the extension library may be specified via
 ``TORCH_EXTENSION_PATH`` variable. Note that CMake will search for a file called
 ``libtorch_extension.so`` in the specified directory.
 
+.. _installing with metatomic support:
+
+Building with metatomic support
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The metatomic interface runs machine learning models that implement the
+`metatomic <https://docs.metatensor.org/metatomic/latest/>`_ model interface.
+It needs Libtorch, as the NNP interface above does, and in addition the
+``metatensor-torch`` and ``metatomic-torch`` C++ libraries. The same CXX11 ABI
+constraint applies, for the same reason.
+
+``GMX_METATOMIC`` takes three values. ``AUTO``, the default, enables the
+interface when Libtorch is found and disables it without an error when it is
+not. ``TORCH`` fails configuration when Libtorch is missing. ``OFF`` skips the
+search entirely. Point CMake at Libtorch through ``CMAKE_PREFIX_PATH``, or set
+``Torch_DIR``. The minimum versions are Libtorch 2.0.0, metatensor-core
+0.1.17, metatensor-torch 0.10.0 and metatomic-torch 0.1.15.
+
+The metatensor and metatomic libraries themselves need no separate install
+step. ``DOWNLOAD_METATENSOR`` and ``DOWNLOAD_METATOMIC`` each default to ``ON``
+when the corresponding package is not already found, in which case
+configuration fetches a pinned release tarball and builds it. A bare Libtorch
+installation is therefore enough. Set either to ``OFF`` to require an installed
+copy instead, which then has to be discoverable through ``CMAKE_PREFIX_PATH``
+or ``metatensor_torch_DIR`` and ``metatomic_torch_DIR``.
+
+Building |Gromacs| for CUDA propagates ``GMX_CUDA_ARCHITECTURES`` into
+``TORCH_CUDA_ARCH_LIST``, so any fetched library is built for the same
+architectures as the rest of the build.
+
 .. _suffixes:
 
 Changing the names of |Gromacs| binaries and libraries

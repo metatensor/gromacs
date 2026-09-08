@@ -71,6 +71,7 @@ The current features with status validation pending are:
 * The Colvars interface, activated by the ``colvars-active`` ``mdp`` option
 * The PLUMED interface, activated by the ``-plumed`` option of :ref:`gmx mdrun`
 * The neural network potential interface, activated by the ``nnpot-active`` ``mdp`` option and configuring with LibTorch
+* The metatomic machine learning potential interface, activated by the ``metatomic-active`` ``mdp`` option and selected at build time by the ``GMX_METATOMIC`` CMake variable
 * The SYCL GPU backend for non-AMD and non-Intel GPU platforms, activated by choosing the ``SYCL`` option for ``GMX_GPU`` in ``cmake``
 * HIP GPU backend targeting AMD GPUs, activated by choosing the ``HIP`` option for ``GMX_GPU`` in ``cmake``
 * The Fast Multipole Method interface, enabled at build time by the ``-DGMX_USE_EXT_FMM`` CMake variable
