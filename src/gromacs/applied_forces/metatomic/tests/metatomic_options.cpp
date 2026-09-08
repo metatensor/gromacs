@@ -46,7 +46,6 @@
 
 #include <gtest/gtest.h>
 
-#include "gromacs/applied_forces/nnpot/nnpot.h"
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/fileio/warninp.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
