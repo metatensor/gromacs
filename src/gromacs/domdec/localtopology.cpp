@@ -846,6 +846,14 @@ static int make_local_bondeds_excls(const gmx_domdec_t&     dd,
     /* We only use exclusions from i-zones to i- and j-zones */
     const int numIZonesForExclusions = (dd.haveExclusions ? zones.numIZones() : 0);
 
+    /* When intermolecular exclusions are present (e.g. from embedded/ML potentials)
+     * but there are no inter-atomic bonded interactions spanning zones, the outer loop
+     * must still cover all i-zones so that exclusion lists are built for all i-zone atoms.
+     * Without this, the exclusion list would only cover zone 0 atoms while the nbnxm
+     * pairlist construction expects exclusions for all i-zone atoms.
+     */
+    nzone_bondeds = std::max(nzone_bondeds, numIZonesForExclusions);
+
     const gmx_reverse_top_t& rt = *dd.reverse_top;
 
     const real cutoffSquared = gmx::square(cutoff);

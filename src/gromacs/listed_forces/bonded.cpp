@@ -4069,6 +4069,7 @@ constexpr gmx::EnumerationArray<InteractionFunction, BondedInteractions> c_bonde
     BondedInteractions{ unimplemented, -1 }, // InteractionFunction::DensityFitting
     BondedInteractions{ unimplemented, -1 }, // InteractionFunction::QuantumMechanicalRegionEnergy
     BondedInteractions{ unimplemented, -1 }, // InteractionFunction::NeuralNetworkPotentialEnergy
+    BondedInteractions{ unimplemented, -1 }, // InteractionFunction::MetatomicPotentialEnergy
     BondedInteractions{ unimplemented, -1 }, // InteractionFunction::PotentialEnergy
     BondedInteractions{ unimplemented, -1 }, // InteractionFunction::KineticEnergy
     BondedInteractions{ unimplemented, -1 }, // InteractionFunction::TotalEnergy

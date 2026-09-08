@@ -202,6 +202,7 @@ enum tpxv
     tpxv_NNPotIFuncType,       /**< Add interaction function type for neural network potential */
     tpxv_AwhHistogramTolerance,       /**< Add AWH histogram tolerance */
     tpxv_OutputControlInKeyValueTree, /**< Move output control parameters to key-value tree */
+    tpxv_MetatomicPotIFuncType,       /**< Add interaction function type for metatomic potentials */
     tpxv_Count                        /**< the total number of tpxv versions */
 };
 
@@ -299,6 +300,7 @@ static const t_ftupd ftupd[] = {
     { tpxv_VSite2FD, InteractionFunction::VirtualSite2FlexibleDistance },
     { tpxv_GenericInternalParameters, InteractionFunction::DensityFitting },
     { tpxv_NNPotIFuncType, InteractionFunction::NeuralNetworkPotentialEnergy },
+    { tpxv_MetatomicPotIFuncType, InteractionFunction::MetatomicPotentialEnergy },
     { tpxv_Pre96Version69, InteractionFunction::VirialTemperatureUnused },
     { tpxv_Pre96Version66, InteractionFunction::PressureDispersionCorrection },
     { tpxv_Pre96Version79, InteractionFunction::dVCoulombdLambda },
