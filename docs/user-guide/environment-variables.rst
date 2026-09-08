@@ -614,3 +614,22 @@ MDModules
         skips the compatibility check between the neural network potential model and
         its inputs. This can be useful if errors are encountered due to the dummy input,
         or to prepare :ref:`tpr` files without a Libtorch-compatible installation.
+
+``GMX_METATOMIC_DEVICE``
+        overrides the Torch device used for metatomic model inference, taking
+        precedence over the ``metatomic-device`` ``mdp`` option. Accepts the
+        device strings understood by Torch, such as ``cpu`` or ``cuda``.
+
+``GMX_METATOMIC_TIMER``
+        set to any non-zero value to write per-rank timings of the metatomic
+        inference stages to ``metatomic_timer_rank_N.log`` and to stdout.
+
+``GMX_METATOMIC_SPARSE_THRESHOLD``
+        number of atoms described by a metatomic model above which halo forces
+        are returned to their owning rank with an indexed gather rather than a
+        dense reduction. Defaults to 1000.
+
+``GMX_METATOMIC_DISABLE_TORCH_JIT_OPTIMIZATION``
+        set to any non-zero value to disable Torch JIT graph optimization for
+        the metatomic model. Useful when debugging a model whose behavior
+        changes under fusion.
