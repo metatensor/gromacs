@@ -42,9 +42,9 @@
 
 #include "gmxpre.h"
 
-#include "config.h"
-
 #include "metatomic_mdmodule.h"
+
+#include "config.h"
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/domdec/localatomsetmanager.h"

@@ -115,9 +115,9 @@ class MetatomicOptions final : public IMdpOptionProvider
 {
 public:
     MetatomicParameters params_;
-    void initMdpTransform(IKeyValueTreeTransformRules* rules) override;
-    void initMdpOptions(IOptionsContainerWithSections* options) override;
-    void buildMdpOutput(KeyValueTreeObjectBuilder* builder) const override;
+    void                initMdpTransform(IKeyValueTreeTransformRules* rules) override;
+    void                initMdpOptions(IOptionsContainerWithSections* options) override;
+    void                buildMdpOutput(KeyValueTreeObjectBuilder* builder) const override;
 
     bool isActive() const;
     void setInputGroupIndices(const IndexGroupsAndNames&);

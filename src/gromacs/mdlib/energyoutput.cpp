@@ -294,7 +294,8 @@ EnergyOutput::EnergyOutput(ener_file*                fp_ene,
     MDModulesEnergyOutputToMetatomicPotRequestChecker mdModulesAddOutputToMetatomicPotFieldRequest;
     mdModulesNotifiers.simulationSetupNotifier_.notify(&mdModulesAddOutputToMetatomicPotFieldRequest);
 
-    bEner_[InteractionFunction::MetatomicPotentialEnergy] = mdModulesAddOutputToMetatomicPotFieldRequest.energyOutputToMetatomicPot_;
+    bEner_[InteractionFunction::MetatomicPotentialEnergy] =
+            mdModulesAddOutputToMetatomicPotFieldRequest.energyOutputToMetatomicPot_;
 
     // Counting the energy terms that will be printed and saving their names
     std::vector<std::string> ener_nm;

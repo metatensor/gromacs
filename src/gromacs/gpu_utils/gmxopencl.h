@@ -72,8 +72,7 @@
 #        define xnu_static_assert(...) static_assert(true, "")
 #        define xnu_static_assert_struct_size(...) static_assert(true, "")
 #        define xnu_static_assert_struct_size_kernel_user(...) static_assert(true, "")
-#        define xnu_static_assert_struct_size_kernel_user64_user32(...) \
-            static_assert(true, "")
+#        define xnu_static_assert_struct_size_kernel_user64_user32(...) static_assert(true, "")
 #    endif
 #    include <OpenCL/opencl.h>
 #    if defined(__GNUC__) && !defined(__clang__)

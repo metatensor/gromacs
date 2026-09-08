@@ -101,8 +101,7 @@ public:
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-check-consistency",
                                               std::string("false"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-device", std::string("cpu"));
-        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant",
-                                              std::string(""));
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant", std::string(""));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-uncertainty-threshold",
                                               std::string("auto"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant-energy-uq",

@@ -44,9 +44,10 @@
 
 #pragma once
 
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
+
+#include <chrono>
 #include <mutex>
 #include <string>
 
@@ -76,7 +77,7 @@ public:
     //! Enable or disable all timers globally.
     static void enable(bool toggle)
     {
-        auto guard_ = std::lock_guard(METATOMIC_TIMER_MUTEX);
+        auto guard_             = std::lock_guard(METATOMIC_TIMER_MUTEX);
         METATOMIC_TIMER_ENABLED = toggle;
     }
 
@@ -118,9 +119,9 @@ private:
     {
         if (METATOMIC_TIMER_ENABLED && this->enabled_)
         {
-            auto stop    = std::chrono::high_resolution_clock::now();
+            auto stop = std::chrono::high_resolution_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(stop - start_).count();
-            auto indent  = std::string(METATOMIC_TIMER_DEPTH * 2, ' ');
+            auto indent = std::string(METATOMIC_TIMER_DEPTH * 2, ' ');
 
             std::string fname = "metatomic_timer_rank_" + std::to_string(mpiComm_.rank()) + ".log";
             FILE*       fp    = std::fopen(fname.c_str(), "a");
@@ -130,8 +131,12 @@ private:
                 std::fclose(fp);
             }
             // Also print to stdout for immediate visibility
-            std::fprintf(stdout, "[MetatomicTimer rank %d] %s%s: %.3f ms\n",
-                         mpiComm_.rank(), indent.c_str(), name_.c_str(), elapsed / 1e3);
+            std::fprintf(stdout,
+                         "[MetatomicTimer rank %d] %s%s: %.3f ms\n",
+                         mpiComm_.rank(),
+                         indent.c_str(),
+                         name_.c_str(),
+                         elapsed / 1e3);
 
             this->enabled_ = false;
             METATOMIC_TIMER_DEPTH -= 1;

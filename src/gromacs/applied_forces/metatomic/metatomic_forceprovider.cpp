@@ -151,9 +151,11 @@ struct MetatomicData
     metatensor_torch::Labels cachedNLComponent;
     metatensor_torch::Labels cachedNLProperties;
     //! Cached sample column names (avoids heap-allocating string vector every step).
-    std::vector<std::string> nlSampleNames = {
-            "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c"
-    };
+    std::vector<std::string> nlSampleNames = { "first_atom",
+                                               "second_atom",
+                                               "cell_shift_a",
+                                               "cell_shift_b",
+                                               "cell_shift_c" };
 
     //! Cached types and PBC tensors (re-created on AtomsRedistributed).
     torch::Tensor cachedTypes;
@@ -200,8 +202,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         data_->sparseThreshold = std::stoi(env);
         GMX_LOG(logger_.info)
                 .asParagraph()
-                .appendTextFormatted("Metatomic sparse force threshold: %d",
-                                     data_->sparseThreshold);
+                .appendTextFormatted("Metatomic sparse force threshold: %d", data_->sparseThreshold);
     }
 
     try
@@ -289,19 +290,15 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         }
     }
 
-    GMX_LOG(logger_.info)
-            .asParagraph()
-            .appendTextFormatted("Metatomic PyTorch threads: %d", at::get_num_threads());
+    GMX_LOG(logger_.info).asParagraph().appendTextFormatted("Metatomic PyTorch threads: %d", at::get_num_threads());
 
     // Cache NL Labels that are constant across steps (avoids per-step
     // string vector + tensor allocation for component and properties).
-    auto devIntOpts = torch::TensorOptions().dtype(torch::kInt32).device(data_->device);
+    auto devIntOpts          = torch::TensorOptions().dtype(torch::kInt32).device(data_->device);
     data_->cachedNLComponent = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{ "xyz" },
-            torch::tensor({ 0, 1, 2 }, devIntOpts).reshape({ 3, 1 }));
+            std::vector<std::string>{ "xyz" }, torch::tensor({ 0, 1, 2 }, devIntOpts).reshape({ 3, 1 }));
     data_->cachedNLProperties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{ "distance" },
-            torch::zeros({ 1, 1 }, devIntOpts));
+            std::vector<std::string>{ "distance" }, torch::zeros({ 1, 1 }, devIntOpts));
 
     GMX_LOG(logger_.info)
             .asParagraph()
@@ -368,7 +365,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     // Uncertainty checking: auto-detect energy_uncertainty output from model
     if (options_.params_.uncertaintyThreshold != "off")
     {
-        auto v_energy_uq = normalize_variant(options_.params_.variantEnergyUq);
+        auto v_energy_uq     = normalize_variant(options_.params_.variantEnergyUq);
         bool has_uncertainty = false;
         for (const auto& entry : outputs)
         {
@@ -382,12 +379,11 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         if (has_uncertainty)
         {
             data_->energy_uq_key = pick_output("energy_uncertainty", outputs, v_energy_uq);
-            auto uq_cap = outputs.at(data_->energy_uq_key);
+            auto uq_cap          = outputs.at(data_->energy_uq_key);
 
             if (modelOutputIsAtomSample(uq_cap))
             {
-                data_->uncertainty_output =
-                        torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
+                data_->uncertainty_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
                 data_->uncertainty_output->set_quantity("energy");
                 data_->uncertainty_output->set_unit("kJ/mol");
                 data_->uncertainty_output->set_sample_kind("atom");
@@ -400,12 +396,10 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 }
                 else
                 {
-                    data_->uncertaintyThreshold =
-                            std::stod(options_.params_.uncertaintyThreshold);
+                    data_->uncertaintyThreshold = std::stod(options_.params_.uncertaintyThreshold);
                 }
 
-                data_->evaluations_options->outputs.insert(
-                        data_->energy_uq_key, data_->uncertainty_output);
+                data_->evaluations_options->outputs.insert(data_->energy_uq_key, data_->uncertainty_output);
 
                 GMX_LOG(logger_.info)
                         .asParagraph()
@@ -429,27 +423,27 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         if (v_nc_forces.has_value() && v_nc_stress.has_value()
             && v_nc_forces.value() != v_nc_stress.value())
         {
-            GMX_THROW(APIError(
-                    "if both 'variant-nc-forces' and 'variant-nc-stress' are present, "
-                    "they must have the same value"));
+            GMX_THROW(
+                    APIError("if both 'variant-nc-forces' and 'variant-nc-stress' are present, "
+                             "they must have the same value"));
         }
 
         data_->nc_forces_key = pick_output("non_conservative_forces", outputs, v_nc_forces);
         if (!outputs.contains(data_->nc_forces_key))
         {
-            GMX_THROW(APIError(formatString(
-                    "The model does not provide '%s' output, "
-                    "we can not enable non-conservative simulations",
-                    data_->nc_forces_key.c_str())));
+            GMX_THROW(
+                    APIError(formatString("The model does not provide '%s' output, "
+                                          "we can not enable non-conservative simulations",
+                                          data_->nc_forces_key.c_str())));
         }
         auto nc_forces_cap = outputs.at(data_->nc_forces_key);
         if (!modelOutputIsAtomSample(nc_forces_cap))
         {
-            GMX_THROW(APIError(formatString(
-                    "The model's '%s' output can not produce per-atom output "
-                    "(sample_kind != \"atom\"), we can not enable non-conservative "
-                    "simulations",
-                    data_->nc_forces_key.c_str())));
+            GMX_THROW(APIError(
+                    formatString("The model's '%s' output can not produce per-atom output "
+                                 "(sample_kind != \"atom\"), we can not enable non-conservative "
+                                 "simulations",
+                                 data_->nc_forces_key.c_str())));
         }
 
         data_->nc_forces_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
@@ -457,8 +451,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         data_->nc_forces_output->set_unit("kJ/mol/nm");
         data_->nc_forces_output->set_sample_kind("atom");
 
-        data_->evaluations_options->outputs.insert(
-                data_->nc_forces_key, data_->nc_forces_output);
+        data_->evaluations_options->outputs.insert(data_->nc_forces_key, data_->nc_forces_output);
 
         data_->nc_stress_key = pick_output("non_conservative_stress", outputs, v_nc_stress);
         if (outputs.contains(data_->nc_stress_key))
@@ -469,8 +462,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             // System-level stress samples (not per-atom).
             data_->nc_stress_output->set_sample_kind("system");
 
-            data_->evaluations_options->outputs.insert(
-                    data_->nc_stress_key, data_->nc_stress_output);
+            data_->evaluations_options->outputs.insert(data_->nc_stress_key, data_->nc_stress_output);
         }
 
         GMX_LOG(logger_.info)
@@ -630,8 +622,8 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     {
         // Serial / thread-MPI: all MTA atoms are home, no halos
         const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
-        numHomeMta_  = numTotalMta;
-        numLocalMta_ = numTotalMta;
+        numHomeMta_          = numTotalMta;
+        numLocalMta_         = numTotalMta;
 
         mtaToGmxLocal_.resize(numTotalMta);
         mtaToGlobalMta_.resize(numTotalMta);
@@ -643,9 +635,9 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             int32_t localIndex = mtaAtoms->localIndex()[i];
             int32_t globalIdx  = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
 
-            mtaToGmxLocal_[i]       = localIndex;
-            mtaToGlobalMta_[i]      = i;
-            atomNumbers_[i]         = options_.params_.atoms_.atom[globalIdx].atomnumber;
+            mtaToGmxLocal_[i]             = localIndex;
+            mtaToGlobalMta_[i]            = i;
+            atomNumbers_[i]               = options_.params_.atoms_.atom[globalIdx].atomnumber;
             gmxLocalToMtaIdx_[localIndex] = i;
         }
     }
@@ -665,7 +657,6 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     data_->cachedTypes =
             torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
     data_->cachedPbc = preparePbcType(options_.params_.pbcType_.get(), data_->device);
-
 }
 
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
@@ -698,8 +689,8 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
     for (const auto& entry : signal.excludedPairlist_)
     {
         const auto& [atomPair, shiftIndex] = entry;
-        const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
-        const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
+        const int32_t idxA                 = gmxLocalToMtaIdx_[atomPair.first];
+        const int32_t idxB                 = gmxLocalToMtaIdx_[atomPair.second];
 
         if (idxA != -1 && idxB != -1)
         {
@@ -712,17 +703,15 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
 }
 
 
-int32_t MetatomicForceProvider::exchangeBackwardGhosts(
-        const gmx_domdec_t* dd, const matrix box, double cutoff)
+int32_t MetatomicForceProvider::exchangeBackwardGhosts(const gmx_domdec_t* dd, const matrix box, double cutoff)
 {
     if (dd == nullptr || dd->ndim == 0)
     {
         return 0;
     }
 
-    int32_t totalAdded = 0;
-    std::unordered_set<int32_t> existingGlobalMta(
-            mtaToGlobalMta_.begin(), mtaToGlobalMta_.end());
+    int32_t                     totalAdded = 0;
+    std::unordered_set<int32_t> existingGlobalMta(mtaToGlobalMta_.begin(), mtaToGlobalMta_.end());
 
     for (int d = 0; d < dd->ndim; d++)
     {
@@ -766,7 +755,9 @@ int32_t MetatomicForceProvider::exchangeBackwardGhosts(
             // --- Step 1: exchange counts ---
             int sendCount = static_cast<int>(sendGlobalMta.size());
             int recvCount = 0;
-            ddSendrecv(dd, d, dddirForward,
+            ddSendrecv(dd,
+                       d,
+                       dddirForward,
                        gmx::ArrayRef<int>(&sendCount, &sendCount + 1),
                        gmx::ArrayRef<int>(&recvCount, &recvCount + 1));
 
@@ -780,15 +771,9 @@ int32_t MetatomicForceProvider::exchangeBackwardGhosts(
             std::vector<RVec> recvPositions(recvCount);
             std::vector<int>  recvAtomNumbers(recvCount);
 
-            ddSendrecv(dd, d, dddirForward,
-                       gmx::ArrayRef<int>(sendGlobalMta),
-                       gmx::ArrayRef<int>(recvGlobalMta));
-            ddSendrecv(dd, d, dddirForward,
-                       gmx::ArrayRef<RVec>(sendPositions),
-                       gmx::ArrayRef<RVec>(recvPositions));
-            ddSendrecv(dd, d, dddirForward,
-                       gmx::ArrayRef<int>(sendAtomNumbers),
-                       gmx::ArrayRef<int>(recvAtomNumbers));
+            ddSendrecv(dd, d, dddirForward, gmx::ArrayRef<int>(sendGlobalMta), gmx::ArrayRef<int>(recvGlobalMta));
+            ddSendrecv(dd, d, dddirForward, gmx::ArrayRef<RVec>(sendPositions), gmx::ArrayRef<RVec>(recvPositions));
+            ddSendrecv(dd, d, dddirForward, gmx::ArrayRef<int>(sendAtomNumbers), gmx::ArrayRef<int>(recvAtomNumbers));
 
             // PBC shift: when receiving from a rank that wrapped around the Periodic
             // Boundary (target index > our index while moving backward), shift the
@@ -901,14 +886,22 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
         // Exchange counts first so receiver knows buffer size.
         int sendCount = static_cast<int>(sendBuf.size());
         int recvCount = 0;
-        MPI_Sendrecv(&sendCount, 1, MPI_INT, sendTo, 0,
-                     &recvCount, 1, MPI_INT, recvFrom, 0,
-                     mpiComm_.comm(), MPI_STATUS_IGNORE);
+        MPI_Sendrecv(
+                &sendCount, 1, MPI_INT, sendTo, 0, &recvCount, 1, MPI_INT, recvFrom, 0, mpiComm_.comm(), MPI_STATUS_IGNORE);
 
         recvBuf.resize(recvCount);
-        MPI_Sendrecv(sendBuf.data(), sendCount, MPI_INT, sendTo, 1,
-                     recvBuf.data(), recvCount, MPI_INT, recvFrom, 1,
-                     mpiComm_.comm(), MPI_STATUS_IGNORE);
+        MPI_Sendrecv(sendBuf.data(),
+                     sendCount,
+                     MPI_INT,
+                     sendTo,
+                     1,
+                     recvBuf.data(),
+                     recvCount,
+                     MPI_INT,
+                     recvFrom,
+                     1,
+                     mpiComm_.comm(),
+                     MPI_STATUS_IGNORE);
 
         // Scan received pairs for those involving our home atoms.
         const int nRecvPairs = recvCount / 2;
@@ -943,18 +936,14 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
 
             // Triclinic-safe minimum-image shift (matches LAMMPS cell_shifts).
             // invertBoxMatrix returns lower-triangular inverse, so upper triangle is 0.
-            const double rawDx =
-                    static_cast<double>(positions_[localJ][XX] - positions_[localI][XX]);
-            const double rawDy =
-                    static_cast<double>(positions_[localJ][YY] - positions_[localI][YY]);
-            const double rawDz =
-                    static_cast<double>(positions_[localJ][ZZ] - positions_[localI][ZZ]);
+            const double rawDx = static_cast<double>(positions_[localJ][XX] - positions_[localI][XX]);
+            const double rawDy = static_cast<double>(positions_[localJ][YY] - positions_[localI][YY]);
+            const double rawDz = static_cast<double>(positions_[localJ][ZZ] - positions_[localI][ZZ]);
 
             IVec shift;
             shift[XX] = static_cast<int>(std::round(
                     -(boxInv[XX][XX] * rawDx + boxInv[YY][XX] * rawDy + boxInv[ZZ][XX] * rawDz)));
-            shift[YY] = static_cast<int>(std::round(
-                    -(boxInv[YY][YY] * rawDy + boxInv[ZZ][YY] * rawDz)));
+            shift[YY] = static_cast<int>(std::round(-(boxInv[YY][YY] * rawDy + boxInv[ZZ][YY] * rawDz)));
             shift[ZZ] = static_cast<int>(std::round(-(boxInv[ZZ][ZZ] * rawDz)));
 
             backwardPairsMta_.push_back(localI);
@@ -966,12 +955,10 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
         // Forward received buffer for the next round.
         sendBuf.swap(recvBuf);
     }
-
 }
 
 
-void MetatomicForceProvider::distributeNonHomeForces(const double*        forces,
-                                                     ForceProviderOutput* outputs)
+void MetatomicForceProvider::distributeNonHomeForces(const double* forces, ForceProviderOutput* outputs)
 {
     const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
 
@@ -985,7 +972,7 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
         std::vector<double> denseForces(3 * numTotalMta, 0.0);
         for (int32_t i = 0; i < numLocalMta_; i++)
         {
-            int32_t g = mtaToGlobalMta_[i];
+            int32_t g              = mtaToGlobalMta_[i];
             denseForces[3 * g]     = forces[3 * i];
             denseForces[3 * g + 1] = forces[3 * i + 1];
             denseForces[3 * g + 2] = forces[3 * i + 2];
@@ -1016,11 +1003,11 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
 
     // Step 2: Pack non-home forces as sparse tuples (globalMtaIdx, fx, fy, fz).
     // Each tuple is 4 doubles: [globalMtaIdx_as_double, fx, fy, fz].
-    const int32_t numNonHome = numLocalMta_ - numHomeMta_;
+    const int32_t       numNonHome = numLocalMta_ - numHomeMta_;
     std::vector<double> sendBuf(4 * numNonHome);
     for (int32_t i = numHomeMta_; i < numLocalMta_; i++)
     {
-        int32_t k = i - numHomeMta_;
+        int32_t k          = i - numHomeMta_;
         sendBuf[4 * k]     = static_cast<double>(mtaToGlobalMta_[i]);
         sendBuf[4 * k + 1] = forces[3 * i];
         sendBuf[4 * k + 2] = forces[3 * i + 1];
@@ -1028,13 +1015,13 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
     }
 
     // Step 3: Exchange counts via allreduce on a P-element array.
-    const int numRanks = mpiComm_.size();
+    const int        numRanks = mpiComm_.size();
     std::vector<int> counts(numRanks, 0);
     counts[mpiComm_.rank()] = numNonHome;
     mpiComm_.sumReduce(ArrayRef<int>(counts));
 
     // Step 4: Allgatherv via Gatherv + Bcast (thread-MPI compatible).
-    int totalNonHome = 0;
+    int              totalNonHome = 0;
     std::vector<int> displs(numRanks);
     for (int r = 0; r < numRanks; r++)
     {
@@ -1051,11 +1038,16 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
     }
 
     std::vector<double> recvBuf(4 * totalNonHome);
-    MPI_Gatherv(sendBuf.data(), 4 * numNonHome, MPI_DOUBLE,
-                recvBuf.data(), dcounts.data(), ddispls.data(), MPI_DOUBLE,
-                mpiComm_.mainRank(), mpiComm_.comm());
-    MPI_Bcast(recvBuf.data(), 4 * totalNonHome, MPI_DOUBLE,
-              mpiComm_.mainRank(), mpiComm_.comm());
+    MPI_Gatherv(sendBuf.data(),
+                4 * numNonHome,
+                MPI_DOUBLE,
+                recvBuf.data(),
+                dcounts.data(),
+                ddispls.data(),
+                MPI_DOUBLE,
+                mpiComm_.mainRank(),
+                mpiComm_.comm());
+    MPI_Bcast(recvBuf.data(), 4 * totalNonHome, MPI_DOUBLE, mpiComm_.mainRank(), mpiComm_.comm());
 
     // Step 5: Scan received tuples for forces destined for our home atoms.
     for (int t = 0; t < totalNonHome; t++)
@@ -1127,21 +1119,20 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         // Limit ring rounds to ceil(cutoff/minCellSize) when DD is available.
         {
             MetatomicTimer timer("exchangeBackwardPairs", mpiComm_);
-            int maxRounds = mpiComm_.size() - 1;
+            int            maxRounds = mpiComm_.size() - 1;
             if (inputs.dd_ != nullptr && inputs.dd_->ndim > 0)
             {
                 double minCellSize = 1e30;
                 for (int d = 0; d < inputs.dd_->ndim; d++)
                 {
                     const int    dim = inputs.dd_->dim[d];
-                    const double cs  = static_cast<double>(inputs.box_[dim][dim])
-                                      / inputs.dd_->numCells[dim];
+                    const double cs =
+                            static_cast<double>(inputs.box_[dim][dim]) / inputs.dd_->numCells[dim];
                     minCellSize = std::min(minCellSize, cs);
                 }
                 if (minCellSize > 0.0)
                 {
-                    maxRounds = std::min(maxRounds,
-                                         static_cast<int>(std::ceil(maxCutoff / minCellSize)));
+                    maxRounds = std::min(maxRounds, static_cast<int>(std::ceil(maxCutoff / minCellSize)));
                 }
             }
             exchangeBackwardPairs(inputs.box_, maxRounds);
@@ -1149,12 +1140,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         // Step 3: Temporarily extend pairlistMta_ with backward pairs
         // so the NL building loop processes all pairs in one pass.
-        pairlistMta_.insert(pairlistMta_.end(),
-                            backwardPairsMta_.begin(),
-                            backwardPairsMta_.end());
-        cellShiftsMta_.insert(cellShiftsMta_.end(),
-                              backwardShiftsMta_.begin(),
-                              backwardShiftsMta_.end());
+        pairlistMta_.insert(pairlistMta_.end(), backwardPairsMta_.begin(), backwardPairsMta_.end());
+        cellShiftsMta_.insert(cellShiftsMta_.end(), backwardShiftsMta_.begin(), backwardShiftsMta_.end());
     }
 
     // Model inference
@@ -1174,7 +1161,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
         auto cpu_blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
 
-        auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { static_cast<int64_t>(numLocalMta_), 3 }, cpu_blob_options)
+        auto torch_positions = torch::from_blob(positions_.data()->as_vec(),
+                                                { static_cast<int64_t>(numLocalMta_), 3 },
+                                                cpu_blob_options)
                                        .to(data_->device, data_->dtype)
                                        .set_requires_grad(!data_->nonConservative);
 
@@ -1182,8 +1171,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 torch::from_blob(&box_, { 3, 3 }, cpu_blob_options).to(data_->device, data_->dtype);
 
         auto strain = torch::eye(
-                3, torch::TensorOptions().dtype(data_->dtype).device(data_->device)
-                           .requires_grad(!data_->nonConservative));
+                3, torch::TensorOptions().dtype(data_->dtype).device(data_->device).requires_grad(!data_->nonConservative));
 
         auto strained_cell      = torch::matmul(torch_cell, strain);
         auto strained_positions = torch::matmul(torch_positions, strain);
@@ -1209,9 +1197,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 // GROMACS pairlist uses rlist (verlet buffer) which is typically
                 // larger than the model's cutoff. Filter pairs by the model's
                 // cutoff to avoid sending excess pairs that waste GPU memory.
-                const int64_t nHalf  = static_cast<int64_t>(pairlistMta_.size() / 2);
-                const bool    full   = request->full_list();
-                const double  cutoff = request->engine_cutoff("nm");
+                const int64_t nHalf   = static_cast<int64_t>(pairlistMta_.size() / 2);
+                const bool    full    = request->full_list();
+                const double  cutoff  = request->engine_cutoff("nm");
                 const double  cutoff2 = cutoff * cutoff;
 
                 // Pre-allocate for worst case (all pairs within cutoff)
@@ -1231,9 +1219,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                     mvmul_ur0(inputs.box_, cellShiftsMta_[k].toRVec(), shift);
 
                     // Displacement: r_ij = pos[j] - pos[i] + shift  (metatensor convention)
-                    const double dx = static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
-                    const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
-                    const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
+                    const double dx =
+                            static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
+                    const double dy =
+                            static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
+                    const double dz =
+                            static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
 
                     const double dist2 = dx * dx + dy * dy + dz * dz;
                     if (dist2 > cutoff2)
@@ -1273,15 +1264,17 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
             // Wrap raw buffers as tensors (zero-copy on CPU, then move to device)
             MetatomicTimer fromBlobTimer("fromBlob", mpiComm_);
-            auto samples_tensor = torch::from_blob(
-                    nlSamplesBuffer_.data(), { nPairs, 5 },
-                    torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
-            auto vectors_tensor = torch::from_blob(
-                    nlVectorsBuffer_.data(), { nPairs, 3, 1 },
-                    torch::TensorOptions().dtype(torch::kFloat64)).to(data_->device, data_->dtype);
+            auto           samples_tensor = torch::from_blob(nlSamplesBuffer_.data(),
+                                                             { nPairs, 5 },
+                                                   torch::TensorOptions().dtype(torch::kInt32))
+                                          .to(data_->device);
+            auto vectors_tensor = torch::from_blob(nlVectorsBuffer_.data(),
+                                                   { nPairs, 3, 1 },
+                                                   torch::TensorOptions().dtype(torch::kFloat64))
+                                          .to(data_->device, data_->dtype);
             fromBlobTimer.stop();
 
-            MetatomicTimer labelsTimer("makeSampleLabels", mpiComm_);
+            MetatomicTimer           labelsTimer("makeSampleLabels", mpiComm_);
             metatensor_torch::Labels neighbor_samples;
             if (data_->check_consistency)
             {
@@ -1291,13 +1284,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             else
             {
                 neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-                        data_->nlSampleNames, samples_tensor,
-                        metatensor::assume_unique{});
+                        data_->nlSampleNames, samples_tensor, metatensor::assume_unique{});
             }
             labelsTimer.stop();
 
             MetatomicTimer blockTimer("makeTensorBlock", mpiComm_);
-            auto neighbors = torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
+            auto           neighbors = torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
                     vectors_tensor,
                     neighbor_samples,
                     std::vector<metatensor_torch::Labels>{ data_->cachedNLComponent },
@@ -1324,11 +1316,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             // models are free to return output samples in arbitrary order when
             // selected_atoms is nullopt, but the order is deterministic when
             // selected_atoms is set.
-            auto sa_values = torch::zeros({ numHomeMta_, 2 },
-                                          torch::TensorOptions().dtype(torch::kInt32));
+            auto sa_values =
+                    torch::zeros({ numHomeMta_, 2 }, torch::TensorOptions().dtype(torch::kInt32));
             sa_values.index_put_({ torch::indexing::Slice(), 1 },
                                  torch::arange(numHomeMta_, torch::kInt32));
-            sa_values = sa_values.to(data_->device);
+            sa_values     = sa_values.to(data_->device);
             auto selected = torch::make_intrusive<metatensor_torch::LabelsHolder>(
                     std::vector<std::string>{ "system", "atom" }, sa_values);
             data_->evaluations_options->set_selected_atoms(selected);
@@ -1358,19 +1350,18 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         forwardTimer.stop();
 
         // Check uncertainty if the model provides it
-        if (data_->uncertainty_output != nullptr
-            && dict_output.contains(data_->energy_uq_key))
+        if (data_->uncertainty_output != nullptr && dict_output.contains(data_->energy_uq_key))
         {
-            auto uq_map = dict_output.at(data_->energy_uq_key)
-                                  .toCustomClass<metatensor_torch::TensorMapHolder>();
-            auto uq_block = metatensor_torch::TensorMapHolder::block_by_id(uq_map, 0);
-            auto uq_values = uq_block->values().reshape({ -1 });
+            auto uq_map =
+                    dict_output.at(data_->energy_uq_key).toCustomClass<metatensor_torch::TensorMapHolder>();
+            auto uq_block    = metatensor_torch::TensorMapHolder::block_by_id(uq_map, 0);
+            auto uq_values   = uq_block->values().reshape({ -1 });
             auto atoms_above = uq_values > data_->uncertaintyThreshold;
 
             if (torch::any(atoms_above).to(torch::kCPU).item<bool>())
             {
-                int64_t nAbove = torch::sum(atoms_above.to(torch::kInt64))
-                                         .to(torch::kCPU).item<int64_t>();
+                int64_t nAbove =
+                        torch::sum(atoms_above.to(torch::kInt64)).to(torch::kCPU).item<int64_t>();
                 GMX_LOG(logger_.warning)
                         .asParagraph()
                         .appendTextFormatted(
@@ -1396,27 +1387,22 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             MetatomicTimer ncTimer("ncExtract", mpiComm_);
 
             auto forces_map =
-                    dict_output.at(data_->nc_forces_key)
-                            .toCustomClass<metatensor_torch::TensorMapHolder>();
-            auto forces_block =
-                    metatensor_torch::TensorMapHolder::block_by_id(forces_map, 0);
-            forceTensor = forces_block->values().squeeze(-1)
-                                  .to(torch::kCPU).to(torch::kFloat64);
+                    dict_output.at(data_->nc_forces_key).toCustomClass<metatensor_torch::TensorMapHolder>();
+            auto forces_block = metatensor_torch::TensorMapHolder::block_by_id(forces_map, 0);
+            forceTensor = forces_block->values().squeeze(-1).to(torch::kCPU).to(torch::kFloat64);
 
             // Virial from stress if available
             if (data_->nc_stress_output != nullptr)
             {
                 auto stress_map =
-                        dict_output.at(data_->nc_stress_key)
-                                .toCustomClass<metatensor_torch::TensorMapHolder>();
-                auto stress_block =
-                        metatensor_torch::TensorMapHolder::block_by_id(stress_map, 0);
+                        dict_output.at(data_->nc_stress_key).toCustomClass<metatensor_torch::TensorMapHolder>();
+                auto stress_block  = metatensor_torch::TensorMapHolder::block_by_id(stress_map, 0);
                 auto stress_tensor = stress_block->values().squeeze(0).squeeze(-1);
 
                 // Compute volume from box
                 double volume = inputs.box_[XX][XX]
-                                * (inputs.box_[YY][YY] * inputs.box_[ZZ][ZZ]
-                                   - inputs.box_[YY][ZZ] * inputs.box_[ZZ][YY])
+                                        * (inputs.box_[YY][YY] * inputs.box_[ZZ][ZZ]
+                                           - inputs.box_[YY][ZZ] * inputs.box_[ZZ][YY])
                                 - inputs.box_[XX][YY]
                                           * (inputs.box_[YY][XX] * inputs.box_[ZZ][ZZ]
                                              - inputs.box_[YY][ZZ] * inputs.box_[ZZ][XX])
@@ -1424,8 +1410,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                                           * (inputs.box_[YY][XX] * inputs.box_[ZZ][YY]
                                              - inputs.box_[YY][YY] * inputs.box_[ZZ][XX]);
 
-                virialTensor = (-stress_tensor * volume)
-                                       .to(torch::kCPU).to(torch::kFloat64);
+                virialTensor = (-stress_tensor * volume).to(torch::kCPU).to(torch::kFloat64);
             }
             else
             {
@@ -1465,7 +1450,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     // only (via selected_atoms), so we skip halo force exchange.
     MetatomicTimer forceScatterTimer("forceScatter", mpiComm_);
 
-    const double* forceData = forceTensor.data_ptr<double>();
+    const double* forceData   = forceTensor.data_ptr<double>();
     const int32_t nForceAtoms = static_cast<int32_t>(forceTensor.size(0));
 
     if (data_->nonConservative)

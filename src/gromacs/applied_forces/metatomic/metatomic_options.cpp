@@ -73,11 +73,11 @@ static const std::string METATOMIC_MODULE_NAME = "metatomic";
 static const std::string ACTIVE_TAG      = "active";
 static const std::string INPUT_GROUP_TAG = "input-group";
 
-static const std::string MODEL_PATH_TAG           = "model";
-static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
-static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
-static const std::string DEVICE_TAG               = "device";
-static const std::string VARIANT_TAG              = "variant";
+static const std::string MODEL_PATH_TAG            = "model";
+static const std::string EXTENSIONS_DIRECTORY_TAG  = "extensions";
+static const std::string CHECK_CONSISTENCY_TAG     = "check-consistency";
+static const std::string DEVICE_TAG                = "device";
+static const std::string VARIANT_TAG               = "variant";
 static const std::string UNCERTAINTY_THRESHOLD_TAG = "uncertainty-threshold";
 static const std::string VARIANT_ENERGY_UQ_TAG     = "variant-energy-uq";
 static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
@@ -150,8 +150,7 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, UNCERTAINTY_THRESHOLD_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_ENERGY_UQ_TAG);
-    addMdpTransformFromString<bool>(
-            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, NON_CONSERVATIVE_TAG);
+    addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, NON_CONSERVATIVE_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG);
     addMdpTransformFromString<std::string>(
