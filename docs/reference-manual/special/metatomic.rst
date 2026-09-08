@@ -50,7 +50,7 @@ communicates these forces itself. Large systems use an indexed gather, small
 ones a dense reduction.
 
 Uncertainty and non-conservative forces
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 A model that declares an ``energy_uncertainty`` output is queried for it at
 every step. |Gromacs| reports when the per-atom uncertainty exceeds a

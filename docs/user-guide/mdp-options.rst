@@ -3801,7 +3801,7 @@ interface implementation follow :ref:`nnpot`.
 .. _mdp-metatomic:
 
 Machine learning potentials in the metatomic interface
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 These options enable and control the calculation of forces from machine
 learning interatomic potentials that implement the metatomic model interface,
 if |Gromacs| is built with ``GMX_METATOMIC=ON``. For further details about the
