@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="referencedata.xsl"?>
+<ReferenceData>
+  <String Name="Mdp output">
+; Machine learning potential using metatomic
+metatomic-active         = true
+metatomic-input-group    = System
+metatomic-model          = 
+metatomic-extensions     = 
+metatomic-device         = 
+metatomic-check-consistency = false
+metatomic-variant        = 
+metatomic-uncertainty-threshold = auto
+metatomic-variant-energy-uq = 
+metatomic-non-conservative = false
+metatomic-variant-nc-forces = 
+metatomic-variant-nc-stress = 
+</String>
+</ReferenceData>

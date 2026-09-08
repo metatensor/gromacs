@@ -64,6 +64,13 @@ if(NOT GMX_NNPOT STREQUAL "OFF")
     set(_cmake_cuda_architectures_bak "${CMAKE_CUDA_ARCHITECTURES}")
     unset(CMAKE_CUDA_ARCHITECTURES CACHE) # yikes!
     # When we require at least CMake 4.1, finding Torch with OPTIONAL might be a good approach
+    if (NOT GMX_USE_NVTX)
+      # This toggle exists anyway
+      # Prevents build failures
+      if(NOT TARGET CUDA::nvToolsExt)
+        add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
+      endif()
+    endif()
     find_package(Torch 2.0.0 QUIET)
     set(CMAKE_CUDA_ARCHITECTURES "${_cmake_cuda_architectures_bak}" CACHE STRING "")
     set(TORCH_ALREADY_SEARCHED TRUE CACHE BOOL "True if a search for libtorch has already been done")
@@ -71,7 +78,7 @@ if(NOT GMX_NNPOT STREQUAL "OFF")
 
     if(Torch_FOUND)
         # TORCH_LIBRARIES contain imported target "torch" that will set all flags and include paths etc
-        list(APPEND GMX_COMMON_LIBRARIES ${TORCH_LIBRARIES})
+        list(APPEND GMX_COMMON_LIBRARIES ${_filtered_torch_libs})
         if(NOT FIND_TORCH_QUIETLY)
             message(STATUS "Found Torch: Neural network potential support enabled.")
         endif()
@@ -83,6 +90,22 @@ if(NOT GMX_NNPOT STREQUAL "OFF")
         endif()
 
         set(GMX_TORCH ON)
+
+        # Ensure the torch library directory is in RPATH so that libtorch.so,
+        # libc10.so, etc. can be found at runtime.
+        if(TORCH_INSTALL_PREFIX AND NOT _torch_rpath_added)
+            list(APPEND CMAKE_INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib")
+            set(_torch_rpath_added TRUE)
+
+            # Use RPATH instead of RUNPATH. RUNPATH doesn't propagate to
+            # transitive dependencies (gmx -> libgromacs -> libtorch -> libc10).
+            include(CheckLinkerFlag)
+            check_linker_flag(CXX "-Wl,--disable-new-dtags" _linker_supports_disable_new_dtags)
+            if(_linker_supports_disable_new_dtags)
+                add_link_options("-Wl,--disable-new-dtags")
+            endif()
+        endif()
+
     elseif(GMX_NNPOT STREQUAL "TORCH")
         message(FATAL_ERROR "Torch not found. Please install libtorch and add its installation prefix"
                             " to CMAKE_PREFIX_PATH or set Torch_DIR to a directory containing "
