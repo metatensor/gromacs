@@ -80,17 +80,18 @@ inline bool is_sufficiently_aligned(const void* ptr)
 }
 } // namespace detail
 
-FusedGpuHaloExchange::FusedGpuHaloExchange(const DeviceContext& deviceContext,
-                                           gmx_wallcycle*       wcycle,
-                                           MPI_Comm             mpi_comm_mysim,
+FusedGpuHaloExchange::FusedGpuHaloExchange(const DeviceStream&  haloStream,
+                                           const DeviceContext& deviceContext,
+                                           MPI_Comm             mpiCommPpGroup,
                                            MPI_Comm             mpi_comm_mysim_world) :
-    haloStream_(new DeviceStream(deviceContext, DeviceStreamPriority::High, false)),
+    haloStream_(haloStream),
     deviceContext_(deviceContext),
-    wcycle_(wcycle),
+    wcycle_(nullptr),
     signalReceiverRankXCounter_(0),
     signalReceiverRankFCounter_(0),
     enableFusedForceKernelSync_(false),
-    mpi_comm_mysim_(mpi_comm_mysim),
+    haloExchangeData_{ HostAllocationPolicy{ deviceContext_, PinningPolicy::PinnedIfSupported } },
+    mpiCommPpGroup_(mpiCommPpGroup),
     mpi_comm_mysim_world_(mpi_comm_mysim_world)
 {
     enableFusedForceKernelSync_ = (getenv("GMX_ENABLE_NVSHMEM_FORCE_HALO_SYNC") != nullptr);
@@ -114,14 +115,14 @@ GpuEventSynchronizer* FusedGpuHaloExchange::launchAllCoordinateExchanges(const m
 {
     wallcycle_start(wcycle_, WallCycleCounter::LaunchGpuPp);
 
-    dependencyEvent->enqueueWaitEvent(*haloStream_);
+    dependencyEvent->enqueueWaitEvent(haloStream_);
 
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::LaunchGpuMoveX);
     // relies on device-side kernels from existing GPU halo exchange
     // to be wrapped by private helpers in this class; not shown here
     // as only the provided interface is required
     launchPackXKernel(box);
-    coordinateHaloLaunched_.markEvent(*haloStream_);
+    coordinateHaloLaunched_.markEvent(haloStream_);
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuMoveX);
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
@@ -136,7 +137,7 @@ GpuEventSynchronizer* FusedGpuHaloExchange::launchAllForceExchanges(
     while (!dependencyEvents->empty())
     {
         auto* dependency = dependencyEvents->back();
-        dependency->enqueueWaitEvent(*haloStream_);
+        dependency->enqueueWaitEvent(haloStream_);
         dependencyEvents->pop_back();
     }
 
@@ -144,7 +145,7 @@ GpuEventSynchronizer* FusedGpuHaloExchange::launchAllForceExchanges(
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::LaunchGpuMoveF);
 
     launchUnpackFKernel(accumulateForces);
-    forceHaloLaunched_.markEvent(*haloStream_);
+    forceHaloLaunched_.markEvent(haloStream_);
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuMoveF);
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
@@ -171,7 +172,7 @@ void FusedGpuHaloExchange::allocateAndCopyHaloExchangeData()
                        haloExchangeData_.data(),
                        0,
                        haloExchangeData_.size(),
-                       *haloStream_,
+                       haloStream_,
                        GpuApiCallBehavior::Async,
                        nullptr);
 }
@@ -250,7 +251,12 @@ GpuEventSynchronizer* FusedGpuHaloExchange::getForcesReadyOnDeviceEvent()
     return &forceHaloLaunched_;
 }
 
-void FusedGpuHaloExchange::reinitAllHaloExchanges(const gmx_domdec_t&    dd,
+void FusedGpuHaloExchange::addWallcycleCounters(gmx_wallcycle* wcycle)
+{
+    wcycle_ = wcycle;
+}
+
+void FusedGpuHaloExchange::reinitAllHaloExchanges(gmx_domdec_t*          dd,
                                                   DeviceBuffer<RVec>     d_coordinatesBuffer,
                                                   DeviceBuffer<RVec>     d_forcesBuffer,
                                                   DeviceBuffer<uint64_t> d_syncBase,
@@ -270,19 +276,18 @@ void FusedGpuHaloExchange::reinitAllHaloExchanges(const gmx_domdec_t&    dd,
     maxGridXSize_ = 0;
     maxGridFSize_ = 0;
     // Build per-dimension/pulse entries mirroring Impl::reinitHalo
-    changePinningPolicy(&haloExchangeData_, PinningPolicy::PinnedIfSupported);
     haloExchangeData_.resize(totalNumPulses_);
 
-    const gmx_domdec_comm_t& comm     = *dd.comm;
+    const gmx_domdec_comm_t& comm     = *dd->comm;
     int                      idxEntry = 0;
-    for (int d = 0; d < dd.ndim; d++)
+    for (int d = 0; d < dd->ndim; d++)
     {
         const int  dimIndex  = d;
-        const int  sendRankX = dd.neighbor[dimIndex][1];
-        const int  recvRankX = dd.neighbor[dimIndex][0];
-        const bool usePBC    = (dd.ci[dd.dim[dimIndex]] == 0);
+        const int  sendRankX = dd->neighbor[dimIndex][1];
+        const int  recvRankX = dd->neighbor[dimIndex][0];
+        const bool usePBC    = (dd->ci[dd->dim[dimIndex]] == 0);
 
-        if (usePBC && dd.unitCellInfo.haveScrewPBC)
+        if (usePBC && dd->unitCellInfo.haveScrewPBC)
         {
             gmx_fatal(FARGS, "Error: screw is not yet supported in GPU halo exchange\n");
         }
@@ -291,14 +296,12 @@ void FusedGpuHaloExchange::reinitAllHaloExchanges(const gmx_domdec_t&    dd,
 
         for (int pulse = 0; pulse < cd.numPulses(); pulse++)
         {
-            const auto plan =
-                    computeHaloPlan(comm, dimIndex, pulse, mpi_comm_mysim_, sendRankX, recvRankX);
+            const auto plan = computeHaloPlan(comm, dimIndex, pulse, dd->mpiComm(), sendRankX, recvRankX);
             const int               atomOffset = plan.atomOffset;
             const int               xSendSize  = plan.xSendSize;
             const int               xRecvSize  = plan.xRecvSize;
             const gmx_domdec_ind_t* ind        = plan.ind;
-            GMX_RELEASE_ASSERT(ind->index.get_allocator().pinningPolicy() == PinningPolicy::PinnedIfSupported,
-                               "Array of communication indices must have been pinned");
+            // Preparations for async H2D transfers were done when ind was resized.
 
             auto& data             = haloExchangeData_[idxEntry];
             data.xSendSize         = xSendSize;
@@ -306,9 +309,9 @@ void FusedGpuHaloExchange::reinitAllHaloExchanges(const gmx_domdec_t&    dd,
             data.atomOffset        = atomOffset;
             data.sendRankX         = sendRankX;
             data.recvRankX         = recvRankX;
-            data.boxDimensionIndex = dd.dim[dimIndex];
+            data.boxDimensionIndex = dd->dim[dimIndex];
             data.usePBC            = usePBC;
-            data.accumulateForces  = (pulse > 0 || dd.ndim > 1);
+            data.accumulateForces  = (pulse > 0 || dd->ndim > 1);
 
             // Copy index map to device; set pinning policy on the original allocation
             const int mapSize = xSendSize;
@@ -316,13 +319,8 @@ void FusedGpuHaloExchange::reinitAllHaloExchanges(const gmx_domdec_t&    dd,
                     &data.d_indexMap, mapSize, &data.indexMapSize, &data.indexMapCapacity, deviceContext_);
             if (mapSize > 0)
             {
-                copyToDeviceBuffer(&data.d_indexMap,
-                                   ind->index.data(),
-                                   0,
-                                   mapSize,
-                                   *haloStream_,
-                                   GpuApiCallBehavior::Async,
-                                   nullptr);
+                copyToDeviceBuffer(
+                        &data.d_indexMap, ind->index.data(), 0, mapSize, haloStream_, GpuApiCallBehavior::Async, nullptr);
             }
 
             // Remote pointers and offsets for NVSHMEM
@@ -345,7 +343,7 @@ void FusedGpuHaloExchange::reinitAllHaloExchanges(const gmx_domdec_t&    dd,
                          MPI_BYTE,
                          sendRankX,
                          0,
-                         mpi_comm_mysim_,
+                         mpiCommPpGroup_,
                          MPI_STATUS_IGNORE);
 
 #endif
@@ -394,8 +392,8 @@ void FusedGpuHaloExchange::reinitAllHaloExchanges(const gmx_domdec_t&    dd,
             &d_xGridSync_, totalNumPulses_, &d_xGridSyncSize_, &d_xGridSyncSizeAlloc_, deviceContext_);
 
     // Initialize grid sync per-pulse array for X and F
-    clearDeviceBufferAsync(&d_xGridSync_, 0, totalNumPulses_, *haloStream_);
-    clearDeviceBufferAsync(&d_fGridSync_, 0, totalNumPulses_, *haloStream_);
+    clearDeviceBufferAsync(&d_xGridSync_, 0, totalNumPulses_, haloStream_);
+    clearDeviceBufferAsync(&d_fGridSync_, 0, totalNumPulses_, haloStream_);
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::DDGpu);
     wallcycle_stop(wcycle_, WallCycleCounter::Domdec);

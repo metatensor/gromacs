@@ -104,7 +104,16 @@ elseif (BUILD_IS_INSOURCE)
     set(MANUAL_BUILD_IS_POSSIBLE OFF)
     set(MANUAL_BUILD_NOT_POSSIBLE_REASON "the build is in-source")
 else()
-    include(manual/UseLATEX.cmake)
+    if (LATEX_FIND_QUIETLY_AFTER_FIRST_RUN)
+        set (LATEX_FIND_QUIETLY TRUE)
+    else()
+        set (LATEX_FIND_QUIETLY FALSE)
+    endif()
+    find_package(LATEX)
+    set(LATEX_FIND_QUIETLY_AFTER_FIRST_RUN TRUE CACHE INTERNAL "Be quiet during future attempts to find LaTeX")
+    if(LATEX_FOUND)
+        include(manual/UseLATEX.cmake)
+    endif()
     if(NOT SPHINX_FOUND)
         set(MANUAL_BUILD_IS_POSSIBLE OFF)
         set(MANUAL_BUILD_NOT_POSSIBLE_REASON "Sphinx has not been found and is needed to create the LaTex input files")
@@ -380,6 +389,8 @@ if (SPHINX_FOUND)
         release-notes/2027/major/api.rst
         release-notes/2026/2026.1.rst
         release-notes/2026/2026.2.rst
+	release-notes/2026/2026.3.rst
+        release-notes/2026/2026.4.rst
         release-notes/2026/major/highlights.rst
         release-notes/2026/major/features.rst
         release-notes/2026/major/performance.rst

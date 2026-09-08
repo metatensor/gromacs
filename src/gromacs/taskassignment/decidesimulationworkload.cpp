@@ -72,7 +72,10 @@
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/logger.h"
 
-struct gmx_edsam;
+namespace gmx
+{
+struct edsam;
+}
 struct pull_t;
 
 namespace gmx
@@ -105,12 +108,10 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
     simulationWorkload.haveDynamicBox    = haveDynamicBox;
     simulationWorkload.useCpuNonbonded   = !useGpuForNonbonded;
     simulationWorkload.useGpuNonbonded   = useGpuForNonbonded;
-    simulationWorkload.useCpuNonbondedFE = !useGpuForNonbondedFE;
     simulationWorkload.useGpuNonbondedFE = useGpuForNonbondedFE;
+    simulationWorkload.useCpuNonbondedFE = !useGpuForNonbondedFE;
     simulationWorkload.useGpuForeignNonbondedFE =
-            useGpuForNonbondedFE && inputrec.fepvals->n_lambda > 0
-            && inputrec.fepvals->softcoreFunction == SoftcoreType::Beutler
-            && inputrec.fepvals->sc_alpha != 0;
+            useGpuForNonbondedFE && inputrec.fepvals->n_lambda > 0 && inputrec.fepvals->sc_alpha != 0;
     simulationWorkload.useCpuPme = (pmeRunMode == PmeRunMode::CPU);
     simulationWorkload.useGpuPme = (pmeRunMode == PmeRunMode::GPU || pmeRunMode == PmeRunMode::Mixed);
     simulationWorkload.useGpuPmeFft                    = (pmeRunMode == PmeRunMode::GPU);
@@ -173,7 +174,22 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
             && (havePpDomainDecomposition ? (GMX_THREAD_MPI > 0) : true)
             && !(haveSyclWithGraphIncompatibleGpuFftLibrary && simulationWorkload.useGpuPmeFft);
 
-    simulationWorkload.useNvshmem = devFlags.enableNvshmem && simulationWorkload.useGpuDirectCommunication;
+    // When PME on a seperate rank is on a CPU, the
+    // DeviceStreamManager does not have a PME stream and thus none of
+    // the infrastructure needed to work alongside GPU-halo-exchange
+    // symmetric allocation can be constructed without changes that
+    // are not worthwhile for supporting this run configuration.
+    const bool separatePmeRankWithCpuPme =
+            simulationWorkload.haveSeparatePmeRank && simulationWorkload.useCpuPme;
+    if (devFlags.enableNvshmem && separatePmeRankWithCpuPme)
+    {
+        GMX_LOG(mdlog.warning)
+                .asParagraph()
+                .appendTextFormatted(
+                        "Separate PME rank with PME on CPU is not supported with NVSHMEM runs");
+    }
+    simulationWorkload.useNvshmem = devFlags.enableNvshmem && simulationWorkload.useGpuDirectCommunication
+                                    && !separatePmeRankWithCpuPme;
 
     return simulationWorkload;
 }
@@ -186,7 +202,7 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
 static bool haveSpecialForces(const t_inputrec&          inputrec,
                               const gmx::ForceProviders& forceProviders,
                               const pull_t*              pull_work,
-                              const gmx_edsam*           ed)
+                              const edsam*               ed)
 {
 
     return ((forceProviders.hasForceProvider()) ||                 // forceProviders
@@ -200,7 +216,7 @@ static bool haveSpecialForces(const t_inputrec&          inputrec,
 DomainLifetimeWorkload setupDomainLifetimeWorkload(const t_inputrec&         inputrec,
                                                    const t_forcerec&         fr,
                                                    const pull_t*             pull_work,
-                                                   const gmx_edsam*          ed,
+                                                   const edsam*              ed,
                                                    const t_mdatoms&          mdatoms,
                                                    const SimulationWorkload& simulationWork)
 {
@@ -225,14 +241,10 @@ DomainLifetimeWorkload setupDomainLifetimeWorkload(const t_inputrec&         inp
     domainWork.haveNonbondedFreeEnergyWork =
             (fr.efep != FreeEnergyPerturbationType::No && mdatoms.nPerturbed != 0);
     domainWork.haveCpuNonbondedFreeEnergyWork =
-            domainWork.haveNonbondedFreeEnergyWork
-            && (simulationWork.useCpuNonbondedFE || fr.efep == FreeEnergyPerturbationType::Expanded
-                || inputrec.fepvals->softcoreFunction == SoftcoreType::Gapsys);
+            domainWork.haveNonbondedFreeEnergyWork && simulationWork.useCpuNonbondedFE;
     // Currently no GPU support for gapsys softcore type and expanded ensemble free energy calculations
     domainWork.haveGpuNonbondedFreeEnergyWork =
-            domainWork.haveNonbondedFreeEnergyWork
-            && (simulationWork.useGpuNonbondedFE && fr.efep != FreeEnergyPerturbationType::Expanded
-                && inputrec.fepvals->softcoreFunction != SoftcoreType::Gapsys);
+            domainWork.haveNonbondedFreeEnergyWork && simulationWork.useGpuNonbondedFE;
     // We assume we have local force work if there are CPU
     // force tasks including PME or nonbondeds.
     domainWork.haveCpuLocalForceWork = domainWork.haveSpecialForces || domainWork.haveCpuListedForceWork

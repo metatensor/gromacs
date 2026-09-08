@@ -49,6 +49,7 @@
 
 #include <cstdio>
 
+#include "gromacs/ewald/pme_pp_communication.h"
 #include "gromacs/gpu_utils/device_stream_manager.h"
 #include "gromacs/mdlib/gmx_omp_nthreads.h"
 #include "gromacs/mdtypes/forceoutput.h"
@@ -85,8 +86,7 @@ PmePpComm::PmePpComm(const MpiComm&               comm,
     thisRankReceivesVirialAndEnergy_(thisRankReceivesVirialAndEnergy),
     useGpuPmePpCommunication_(useGpuPmePpCommunication),
     cnb_{ thisRankReceivesVirialAndEnergy_ ? std::make_optional<gmx_pme_comm_n_box_t>() : std::nullopt },
-    cpuPmeForceReceiveBuffer_{ HostAllocationPolicy{
-            useGpuPmePpCommunication ? PinningPolicy::PinnedIfSupported : PinningPolicy::CannotBePinned } }
+    cpuPmeForceReceiveBuffer_{ makeHostAllocationPolicy(useGpuPmePpCommunication, deviceStreamManager) }
 {
     if (useGpuPmePpCommunication_)
     {
@@ -488,16 +488,65 @@ void PmePpComm::sendResetCounters(const int64_t step) const
     }
 }
 
+void PmePpComm::sendCycleCountersAndStopConditionRequest()
+{
+    // Only let one PP rank request these counters from each PME rank.
+    if (thisRankReceivesVirialAndEnergy_)
+    {
+        GMX_ASSERT(cycleCountersRequest_ == MPI_REQUEST_NULL,
+                   "PME cycle counter request is already pending");
+
+        gmx_pme_comm_n_box_t cnb;
+        cnb.flags = PP_PME_SENDCOUNTERS;
+
+#if GMX_MPI
+        MPI_Irecv(&cycleCounters_,
+                  sizeof(cycleCounters_),
+                  MPI_BYTE,
+                  rankOfPartnerPmeRank_,
+                  eCommType_CYCLECOUNTERS,
+                  comm_.comm(),
+                  &cycleCountersRequest_);
+        MPI_Send(&cnb, sizeof(cnb), MPI_BYTE, rankOfPartnerPmeRank_, eCommType_CNB, comm_.comm());
+#else
+        GMX_UNUSED_VALUE(cnb);
+#endif
+    }
+}
+
+gmx_pme_comm_cyclecounters_t PmePpComm::receiveCycleCountersAndStopCondition()
+{
+    // Only one PP rank requested these counters from each PME rank.
+    if (thisRankReceivesVirialAndEnergy_)
+    {
+        GMX_ASSERT(cycleCountersRequest_ != MPI_REQUEST_NULL,
+                   "No pending PME cycle counter request to receive");
+
+#if GMX_MPI
+        MPI_Wait(&cycleCountersRequest_, MPI_STATUS_IGNORE);
+#endif
+        cycleCountersRequest_ = MPI_REQUEST_NULL;
+
+        // Capture the stop condition to return, before resetting it
+        if (cycleCounters_.stop_cond != StopCondition::None)
+        {
+            gmx_set_stop_condition(cycleCounters_.stop_cond);
+        }
+    }
+
+    return cycleCounters_;
+}
+
 void PmePpComm::receiveVirialAndEnergy(ForceWithVirial* forceWithVirial,
                                        real*            energy_q,
                                        real*            energy_lj,
                                        real*            dvdlambda_q,
                                        real*            dvdlambda_lj,
-                                       float*           pme_cycles)
+                                       bool             isVirialOrEnergyStep)
 {
     gmx_pme_comm_vir_ene_t cve;
 
-    if (thisRankReceivesVirialAndEnergy_)
+    if (thisRankReceivesVirialAndEnergy_ && isVirialOrEnergyStep)
     {
         if (debug)
         {
@@ -524,18 +573,11 @@ void PmePpComm::receiveVirialAndEnergy(ForceWithVirial* forceWithVirial,
         *energy_lj = cve.energy_lj;
         *dvdlambda_q += cve.dvdlambda_q;
         *dvdlambda_lj += cve.dvdlambda_lj;
-        *pme_cycles = cve.cycles;
-
-        if (cve.stop_cond != StopCondition::None)
-        {
-            gmx_set_stop_condition(cve.stop_cond);
-        }
     }
     else
     {
-        *energy_q   = 0;
-        *energy_lj  = 0;
-        *pme_cycles = 0;
+        *energy_q  = 0;
+        *energy_lj = 0;
     }
 }
 
@@ -574,7 +616,7 @@ void PmePpComm::receiveResults(ForceWithVirial* forceWithVirial,
                                real*            dvdlambda_q,
                                real*            dvdlambda_lj,
                                const bool       receivePmeForceToGpu,
-                               float*           pme_cycles)
+                               const bool       isVirialOrEnergyStep)
 {
     if (c_useDelayedWait)
     {
@@ -615,7 +657,8 @@ void PmePpComm::receiveResults(ForceWithVirial* forceWithVirial,
         }
     }
 
-    receiveVirialAndEnergy(forceWithVirial, energy_q, energy_lj, dvdlambda_q, dvdlambda_lj, pme_cycles);
+    receiveVirialAndEnergy(
+            forceWithVirial, energy_q, energy_lj, dvdlambda_q, dvdlambda_lj, isVirialOrEnergyStep);
 }
 
 std::optional<int> PmePpComm::rankOfControlledPmeRank() const

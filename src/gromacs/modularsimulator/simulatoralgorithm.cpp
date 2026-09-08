@@ -380,7 +380,7 @@ void ModularSimulatorAlgorithm::populateTaskQueue()
     do
     {
         // local variable for lambda capturing
-        const int step = step_;
+        const Step step = step_;
 
         // register pre-step (task queue is local, so no problem with `this`)
         registerRunFunction([this, step, time]() { preStep(step, time); });
@@ -421,6 +421,7 @@ void ModularSimulatorAlgorithm::populateTaskQueue()
 }
 
 ModularSimulatorAlgorithmBuilder::ModularSimulatorAlgorithmBuilder(
+        const DeviceStreamManager*                deviceStreamManager,
         compat::not_null<LegacySimulatorData*>    legacySimulatorData,
         std::unique_ptr<ReadCheckpointDataHolder> checkpointDataHolder) :
     legacySimulatorData_(legacySimulatorData),
@@ -431,6 +432,7 @@ ModularSimulatorAlgorithmBuilder::ModularSimulatorAlgorithmBuilder(
                                                                 legacySimulatorData->cr_->commMyGroup),
                                signals_.get()),
     observablesReducer_(legacySimulatorData->observablesReducerBuilder_->build()),
+    deviceStreamManager_(deviceStreamManager),
     checkpointHelperBuilder_(std::move(checkpointDataHolder),
                              legacySimulatorData->startingBehavior_,
                              legacySimulatorData->cr_)
@@ -451,6 +453,7 @@ ModularSimulatorAlgorithmBuilder::ModularSimulatorAlgorithmBuilder(
             legacySimulatorData->cr_,
             legacySimulatorData->stateGlobal_,
             legacySimulatorData->state_,
+            deviceStreamManager_,
             legacySimulatorData->fr_->nbv->useGpu(),
             legacySimulatorData->fr_->bMolPBC,
             legacySimulatorData->mdrunOptions_.writeConfout,

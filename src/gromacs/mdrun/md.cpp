@@ -179,12 +179,12 @@
 #include "shellfc.h"
 
 struct gmx_mdoutf;
-struct gmx_shellfc_t;
 struct pme_load_balancing_t;
 
-using gmx::SimulationSignaller;
+namespace gmx
+{
 
-void gmx::LegacySimulator::do_md()
+void LegacySimulator::do_md()
 {
     // TODO Historically, the EM and MD "integrators" used different
     // names for the t_inputrec *parameter, but these must have the
@@ -275,8 +275,8 @@ void gmx::LegacySimulator::do_md()
 
     const bool isMainRank = cr_->commMySim.isMainRank();
 
-    int*                fep_state = isMainRank ? &stateGlobal_->fep_state : nullptr;
-    gmx::ArrayRef<real> lambda    = isMainRank ? stateGlobal_->lambda : gmx::ArrayRef<real>{};
+    int*           fep_state = isMainRank ? &stateGlobal_->fep_state : nullptr;
+    ArrayRef<real> lambda    = isMainRank ? stateGlobal_->lambda : ArrayRef<real>{};
     initialize_lambdas(
             fpLog_, ir->efep, ir->bSimTemp, *ir->fepvals, ir->simtempvals->temperatures, ekind_, isMainRank, fep_state, lambda);
     Update upd(*ir, *ekind_, deform_);
@@ -318,7 +318,7 @@ void gmx::LegacySimulator::do_md()
             // Inter-simulation signal communication does not need to happen
             // often, so we use a minimum of 200 steps to reduce overhead.
             const int c_minimumInterSimulationSignallingInterval = 200;
-            nstSignalComm = gmx::divideRoundUp(c_minimumInterSimulationSignallingInterval, nstglobalcomm)
+            nstSignalComm = divideRoundUp(c_minimumInterSimulationSignallingInterval, nstglobalcomm)
                             * nstglobalcomm;
         }
     }
@@ -327,7 +327,7 @@ void gmx::LegacySimulator::do_md()
     {
         pleaseCiteCouplingAlgorithms(fpLog_, *ir);
     }
-    gmx_mdoutf*       outf = init_mdoutf(fpLog_,
+    gmx_mdoutf*  outf = init_mdoutf(fpLog_,
                                    nFile_,
                                    fnm_,
                                    mdrunOptions_,
@@ -341,15 +341,15 @@ void gmx::LegacySimulator::do_md()
                                    startingBehavior_,
                                    simulationsShareState,
                                    ms_);
-    gmx::EnergyOutput energyOutput(mdoutf_get_fp_ene(outf),
-                                   topGlobal_,
-                                   *ir,
-                                   pullWork_,
-                                   mdoutf_get_fp_dhdl(outf),
-                                   false,
-                                   startingBehavior_,
-                                   simulationsShareHamiltonian,
-                                   mdModulesNotifiers_);
+    EnergyOutput energyOutput(mdoutf_get_fp_ene(outf),
+                              topGlobal_,
+                              *ir,
+                              pullWork_,
+                              mdoutf_get_fp_dhdl(outf),
+                              false,
+                              startingBehavior_,
+                              simulationsShareHamiltonian,
+                              mdModulesNotifiers_);
 
     gmx_global_stat_t gstat = global_stat_init(ir);
 
@@ -358,20 +358,20 @@ void gmx::LegacySimulator::do_md()
     const bool  useGpuForNonbonded = simulationWork.useGpuNonbonded;
     const bool  useGpuForUpdate    = simulationWork.useGpuUpdate;
 
-    /* Check for polarizable models and flexible constraints */
-    gmx_shellfc_t* shellfc = init_shell_flexcon(fpLog_,
-                                                topGlobal_,
-                                                constr_ ? constr_->numFlexibleConstraints() : 0,
-                                                ir->outputControl.nstcalcenergy,
-                                                haveDDAtomOrdering(*cr_),
-                                                simulationWork);
+    // Set up polarizable models and flexible constraints if appropriate
+    shellfc_t* shellfc = init_shell_flexcon(fpLog_,
+                                            topGlobal_,
+                                            constr_ ? constr_->numFlexibleConstraints() : 0,
+                                            ir->outputControl.nstcalcenergy,
+                                            haveDDAtomOrdering(*cr_),
+                                            fr_->deviceStreamManager,
+                                            simulationWork);
 
     ObservablesReducer observablesReducer = observablesReducerBuilder_->build();
 
     ForceBuffers            f(simulationWork.useMts,
-                   (simulationWork.useGpuFBufferOpsWhenAllowed || useGpuForUpdate)
-                                      ? PinningPolicy::PinnedIfSupported
-                                      : PinningPolicy::CannotBePinned);
+                   makeHostAllocationPolicy(simulationWork.useGpuFBufferOpsWhenAllowed || useGpuForUpdate,
+                                            fr_->deviceStreamManager));
     const t_mdatoms*        md       = mdAtoms_->mdatoms();
     StatePropagatorDataGpu* stateGpu = fr_->stateGpu;
     if (haveDDAtomOrdering(*cr_))
@@ -405,12 +405,18 @@ void gmx::LegacySimulator::do_md()
                             FALSE);
         upd.updateAfterPartition(state_->numAtoms(), md->cFREEZE, md->cTC, md->cACC);
         fr_->longRangeNonbondeds->updateAfterPartition(*md);
+        if (simulationWork.useGpuHaloExchange)
+        {
+            // Fix up GPU halo exchange, which was constructed with
+            // nullptr for wcycle during the above dd_partition_system.
+            addWallcycleCountersToGpuHaloExchange(cr_->dd, wallCycleCounters_);
+        }
     }
     else
     {
         /* Generate and initialize new topology */
         mdAlgorithmsSetupAtomData(
-                simulationWork, cr_->dd, *ir, topGlobal_, top_, fr_, &f, mdAtoms_, constr_, virtualSites_, shellfc, stateGpu);
+                simulationWork, cr_->dd, *ir, topGlobal_, top_, fr_, &f, mdAtoms_, constr_, virtualSites_, shellfc, stateGpu, wallCycleCounters_);
 
         upd.updateAfterPartition(state_->numAtoms(), md->cFREEZE, md->cTC, md->cACC);
         fr_->longRangeNonbondeds->updateAfterPartition(*md);
@@ -480,30 +486,20 @@ void gmx::LegacySimulator::do_md()
         GMX_RELEASE_ASSERT(fr_->deviceStreamManager != nullptr,
                            "Device stream manager should be initialized in order to use GPU "
                            "update-constraints.");
-        GMX_RELEASE_ASSERT(
-                fr_->deviceStreamManager->streamIsValid(gmx::DeviceStreamType::UpdateAndConstraints),
-                "Update stream should be initialized in order to use GPU "
-                "update-constraints.");
+        GMX_RELEASE_ASSERT(fr_->deviceStreamManager->streamIsValid(DeviceStreamType::UpdateAndConstraints),
+                           "Update stream should be initialized in order to use GPU "
+                           "update-constraints.");
         integrator = std::make_unique<UpdateConstrainGpu>(
                 *ir,
                 topGlobal_,
                 ekind_->numTemperatureCouplingGroups(),
                 fr_->deviceStreamManager->context(),
-                fr_->deviceStreamManager->stream(gmx::DeviceStreamType::UpdateAndConstraints),
+                fr_->deviceStreamManager->stream(DeviceStreamType::UpdateAndConstraints),
                 wallCycleCounters_);
 
         stateGpu->setXUpdatedOnDeviceEvent(integrator->xUpdatedOnDeviceEvent());
 
         integrator->setPbc(PbcType::Xyz, state_->box);
-    }
-
-    if (useGpuForPme || simulationWork.useGpuXBufferOpsWhenAllowed || useGpuForUpdate)
-    {
-        changePinningPolicy(&state_->x, PinningPolicy::PinnedIfSupported);
-    }
-    if (useGpuForUpdate)
-    {
-        changePinningPolicy(&state_->v, PinningPolicy::PinnedIfSupported);
     }
 
     // NOTE: The global state is no longer used at this point.
@@ -632,7 +628,7 @@ void gmx::LegacySimulator::do_md()
                 cr_->commMyGroup, ekind_, isMainRank ? &stateGlobal_->ekinstate : nullptr);
     }
 
-    unsigned int cglo_flags =
+    const unsigned int cglo_flags =
             (CGLO_TEMPERATURE | CGLO_GSTAT | (EI_VV(ir->eI) ? CGLO_PRESSURE : 0)
              | (EI_VV(ir->eI) ? CGLO_CONSTRAINT : 0) | (hasReadEkinState ? CGLO_READEKIN : 0));
 
@@ -1028,33 +1024,9 @@ void gmx::LegacySimulator::do_md()
             }
         }
 
-        // Allocate or re-size GPU halo exchange object, if necessary
-        if (bNS && simulationWork.havePpDomainDecomposition && simulationWork.useGpuHaloExchange)
-        {
-            GMX_RELEASE_ASSERT(fr_->deviceStreamManager != nullptr,
-                               "GPU device manager has to be initialized to use GPU "
-                               "version of halo exchange.");
-            // When using NVSHMEM, we use the PP rank which receives
-            // virial and energy from PME rank to send the data about
-            // the number of halo-exchange pulses to the PME rank.
-            std::optional<int> rankOfControlledPmeRank;
-            if (simulationWork.haveSeparatePmeRank)
-            {
-                // When there is a separate PME rank, only one PP rank
-                // controls it, and that PP rank returns a valid value
-                // here.
-                rankOfControlledPmeRank = fr_->pmePpComm->rankOfControlledPmeRank();
-            }
-            constructGpuHaloExchange(*cr_,
-                                     *fr_->deviceStreamManager,
-                                     wallCycleCounters_,
-                                     simulationWork.useNvshmem,
-                                     rankOfControlledPmeRank);
-        }
-
         if (isMainRank && do_log)
         {
-            gmx::EnergyOutput::printHeader(fpLog_, step, t); /* can we improve the information printed here? */
+            EnergyOutput::printHeader(fpLog_, step, t); /* can we improve the information printed here? */
         }
 
         if (ir->efep != FreeEnergyPerturbationType::No)
@@ -1803,6 +1775,17 @@ void gmx::LegacySimulator::do_md()
                 bool doIntraSimSignal = true;
                 SimulationSignaller signaller(&signals, cr_, ms_, doInterSimSignal, doIntraSimSignal);
 
+                int flags = (bGStat ? CGLO_GSTAT : 0);
+                if (!EI_VV(ir->eI))
+                {
+                    flags |= (bCalcEner ? CGLO_ENERGY : 0) | (bStopCM ? CGLO_STOPCM : 0)
+                             | CGLO_TEMPERATURE | (bCalcVir ? (CGLO_PRESSURE | CGLO_CONSTRAINT) : 0);
+                }
+                else
+                {
+                    flags |= CGLO_CONSTRAINT;
+                }
+
                 compute_globals(gstat,
                                 cr_->commMyGroup,
                                 ir,
@@ -1822,10 +1805,7 @@ void gmx::LegacySimulator::do_md()
                                 pres,
                                 &signaller,
                                 lastbox,
-                                (bGStat ? CGLO_GSTAT : 0) | (!EI_VV(ir->eI) && bCalcEner ? CGLO_ENERGY : 0)
-                                        | (!EI_VV(ir->eI) && bStopCM ? CGLO_STOPCM : 0)
-                                        | (!EI_VV(ir->eI) ? CGLO_TEMPERATURE : 0)
-                                        | (!EI_VV(ir->eI) ? CGLO_PRESSURE : 0) | CGLO_CONSTRAINT,
+                                flags,
                                 step,
                                 &observablesReducer);
                 if (!EI_VV(ir->eI) && bStopCM)
@@ -1938,7 +1918,7 @@ void gmx::LegacySimulator::do_md()
                             enerd_->term[InteractionFunction::TotalEnergy]
                             + NPT_energy(ir->pressureCouplingOptions,
                                          ir->etc,
-                                         gmx::constArrayRefFromArray(ir->opts.nrdf, ir->opts.ngtc),
+                                         constArrayRefFromArray(ir->opts.nrdf, ir->opts.ngtc),
                                          *ekind_,
                                          inputrecNvtTrotter(ir) || inputrecNptTrotter(ir),
                                          state_,
@@ -1996,7 +1976,7 @@ void gmx::LegacySimulator::do_md()
 
             if (doSimulatedAnnealing)
             {
-                gmx::EnergyOutput::printAnnealingTemperatures(
+                EnergyOutput::printAnnealingTemperatures(
                         do_log ? fpLog_ : nullptr, *groups, ir->opts, *ekind_);
             }
             if (do_log || do_ene || do_dr || do_or)
@@ -2115,7 +2095,7 @@ void gmx::LegacySimulator::do_md()
                 pme_gpu_prepare_computation(fr_->pmedata.get(),
                                             state_->box,
                                             simulationWork.haveDynamicBox,
-                                            runScheduleWork_->stepWork);
+                                            PmeStepWorkload{ runScheduleWork_->stepWork });
             }
         }
 
@@ -2215,7 +2195,7 @@ void gmx::LegacySimulator::do_md()
         {
             energyOutput.printEnergyConservation(fpLog_, ir->simulation_part, EI_MD(ir->eI));
 
-            gmx::EnergyOutput::printAnnealingTemperatures(fpLog_, *groups, ir->opts, *ekind_);
+            EnergyOutput::printAnnealingTemperatures(fpLog_, *groups, ir->opts, *ekind_);
             energyOutput.printAverages(fpLog_, groups);
         }
     }
@@ -2238,3 +2218,5 @@ void gmx::LegacySimulator::do_md()
 
     global_stat_destroy(gstat);
 }
+
+} // namespace gmx

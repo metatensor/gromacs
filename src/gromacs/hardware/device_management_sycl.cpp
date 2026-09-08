@@ -286,7 +286,11 @@ static DeviceStatus isDeviceCompatible(const sycl::device&           syclDevice,
 
 // Ensure any changes are in sync with nbnxm_sycl_kernel.h
 #if GMX_GPU_NB_CLUSTER_SIZE == 4
+#    if GMX_GPU_NB_DISABLE_CLUSTER_PAIR_SPLIT
+        const std::vector<int> compiledNbnxmSubGroupSizes{ 16 };
+#    else
         const std::vector<int> compiledNbnxmSubGroupSizes{ 8 };
+#    endif
 #elif GMX_GPU_NB_CLUSTER_SIZE == 8
 #    if GMX_SYCL_ACPP && !(GMX_ACPP_HAVE_HIP_TARGET) && !GMX_ACPP_HAVE_GENERIC_TARGET
         const std::vector<int> compiledNbnxmSubGroupSizes{ 32 }; // Only NVIDIA
@@ -746,7 +750,7 @@ void doubleCheckGpuAwareMpiWillWork(const DeviceInformation& deviceInfo)
         {
             // Trying to use a device from e.g. an OpenCL backend
             // leads to weird crashes when addresses are used out of
-            // context. That should only happen when the the LevelZero
+            // context. That should only happen when the LevelZero
             // backend was unavailable *and* the user forced GROMACS to
             // treat Intel MPI as GPU aware.
             GMX_THROW(

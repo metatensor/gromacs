@@ -167,9 +167,6 @@ int main(int argc, char *argv[])
 #elif defined(THREAD_WINDOWS)
     /* Windows threads here */
     {
-        /* CreateThread returns a HANDLE; the optional last argument is a
-         * thread-id out-parameter, not the handle. WaitForSingleObject must
-         * receive the HANDLE (wrong code segfaults on Windows ARM64). */
         HANDLE *th;
 
         th = (HANDLE*)malloc(sizeof(HANDLE)*n);

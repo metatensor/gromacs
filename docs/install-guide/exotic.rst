@@ -124,8 +124,8 @@ Building on Solaris
 The built-in |Gromacs| processor detection does not work on Solaris,
 so it is strongly recommended that you build |Gromacs| with
 ``-DGMX_HWLOC=on`` and ensure that the ``CMAKE_PREFIX_PATH`` includes
-the path where the hwloc headers and libraries can be found. At least
-version 1.11.8 of hwloc is recommended.
+the path where the hwloc headers and libraries can be found. Version
+2.0 or later of hwloc is required.
 
 RISC-V with VEC unit
 ~~~~~~~~~~~~~~~~~~~~
@@ -137,9 +137,6 @@ the CMake flags. A clang compiler is required with version >=19.
 If you want to check which loops have been vectorized, add
 ``-Rpass=loop-vectorize -Rpass-missed=loop-vectorize -Rpass-analysis=loop-vectorize``
 to the ``CMAKE_CXX_FLAGS``.
-
-When calling ``gmx mdrun``, set the
-``GMX_NBNXN_PLAINC_1X1`` environment variable to choose the correct kernel.
 
 Please note the early state and instability of the compilers at the time of writing.
 If you experience errors, try adding ``-fno-vectorize``, after ``-O3`` when present,

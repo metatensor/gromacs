@@ -48,13 +48,14 @@ struct bonded_threading_t;
 struct gmx_domdec_t;
 struct gmx_localtop_t;
 struct gmx_mtop_t;
-struct gmx_shellfc_t;
+struct gmx_wallcycle;
 struct t_forcerec;
 struct t_inputrec;
 struct t_mdatoms;
 
 namespace gmx
 {
+struct shellfc_t;
 class Constraints;
 class ForceBuffers;
 class MDAtoms;
@@ -68,7 +69,7 @@ class VirtualSitesHandler;
  * \param[in]     md        The MD atom data
  * \param[in,out] shfc      The shell/flexible-constraint data
  */
-void make_local_shells(const gmx_domdec_t* dd, const t_mdatoms& md, gmx_shellfc_t* shfc);
+void make_local_shells(const gmx_domdec_t* dd, const t_mdatoms& md, shellfc_t* shfc);
 
 /*! \brief Sets atom data for several MD algorithms
  *
@@ -78,7 +79,7 @@ void make_local_shells(const gmx_domdec_t* dd, const t_mdatoms& md, gmx_shellfc_
  * This is called at the start of serial runs and during domain decomposition.
  *
  * \param[in]     simulationWork The simulation workload
- * \param[in]     dd         Domain decomposition struct, can be nullptr
+ * \param[in,out] dd         Domain decomposition struct, can be nullptr
  * \param[in]     inputrec   Input parameter record
  * \param[in]     top_global The global topology
  * \param[in,out] top        The local topology
@@ -89,9 +90,10 @@ void make_local_shells(const gmx_domdec_t* dd, const t_mdatoms& md, gmx_shellfc_
  * \param[in,out] vsite      The virtual site data, can be NULL
  * \param[in,out] shellfc    The shell/flexible-constraint data, can be NULL
  * \param[in]     stateGpu   The state-on-GPU manager, can be NULL
+ * \param[in]     wcycle     The wallcycle counter manager, can be NULL
  */
 void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
-                               const gmx_domdec_t*       dd,
+                               gmx_domdec_t*             dd,
                                const t_inputrec&         inputrec,
                                const gmx_mtop_t&         top_global,
                                gmx_localtop_t*           top,
@@ -100,8 +102,9 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
                                MDAtoms*                  mdAtoms,
                                Constraints*              constr,
                                VirtualSitesHandler*      vsite,
-                               gmx_shellfc_t*            shellfc,
-                               StatePropagatorDataGpu*   stateGpu);
+                               shellfc_t*                shellfc,
+                               StatePropagatorDataGpu*   stateGpu,
+                               gmx_wallcycle*            wcycle);
 
 } // namespace gmx
 

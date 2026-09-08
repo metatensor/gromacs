@@ -582,7 +582,6 @@ void compute_globals(gmx_global_stat*               gstat,
     }
 
     /* ########## Now pressure ############## */
-    // TODO: For the VV integrator bConstrain is needed in the conditional. This is confusing, so get rid of this.
     if (bPres || bConstrain)
     {
         m_add(force_vir, shake_vir, total_vir);
@@ -762,7 +761,7 @@ void set_state_entries(t_state* state, const t_inputrec* ir, bool useModularSimu
     }
 
     init_gtc_state(state, state->ngtc, state->nnhpres, ir->opts.nhchainlength); /* allocate the space for nose-hoover chains */
-    init_ekinstate(&state->ekinstate, ir);
+    gmx::init_ekinstate(&state->ekinstate, ir);
 
     if (ir->bExpanded && !useModularSimulator)
     {

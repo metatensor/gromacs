@@ -423,13 +423,14 @@ GPU_FUNC_QUALIFIER void pme_gpu_solve(PmeGpu*      GPU_FUNC_ARGUMENT(pmeGpu),
  * \param[in] lambda   The lambda value to use.
  * \param[in] wcycle   The wallclock counter.
  * \param[in] computeVirial  Whether this is a virial step.
+ * \param[in] markFReadyEvent  Whether to mark the force-ready event after the kernel.
  */
 GPU_FUNC_QUALIFIER void pme_gpu_gather(PmeGpu*                       GPU_FUNC_ARGUMENT(pmeGpu),
                                        gmx::ArrayRef<PmeAndFftGrids> GPU_FUNC_ARGUMENT(h_grids),
                                        float                         GPU_FUNC_ARGUMENT(lambda),
                                        gmx_wallcycle*                GPU_FUNC_ARGUMENT(wcycle),
-                                       bool GPU_FUNC_ARGUMENT(computeVirial)) GPU_FUNC_TERM;
-
+                                       bool GPU_FUNC_ARGUMENT(computeVirial),
+                                       bool GPU_FUNC_ARGUMENT(markFReadyEvent)) GPU_FUNC_TERM;
 
 /*! \brief Sets the device pointer to coordinate data
  * \param[in] pmeGpu         The PME GPU structure.
@@ -522,17 +523,16 @@ GPU_FUNC_QUALIFIER PmeOutput pme_gpu_getOutput(gmx_pme_t* GPU_FUNC_ARGUMENT(pme)
         GPU_FUNC_TERM_WITH_RETURN(PmeOutput{});
 
 /*! \libinternal \brief
- * Updates the unit cell parameters. Does not check if update is necessary - that is done in pme_gpu_prepare_computation().
+ * Updates the GPU unit-cell parameters from box volume and reciprocal box. Does not
+ * check if update is necessary - that is done in pme_gpu_prepare_computation().
  *
  * \param[in] pmeGpu         The PME GPU structure.
- * \param[in] box            The unit cell box.
- * \param[out] recipBox      The reciprocal box.
- * \param[out] boxVolume     The volume of the box.
+ * \param[in] boxVolume      The volume of the (scaled) simulation box.
+ * \param[in] recipbox       The reciprocal box matrix.
  */
-GPU_FUNC_QUALIFIER void pme_gpu_update_input_box(PmeGpu*      GPU_FUNC_ARGUMENT(pmeGpu),
-                                                 const matrix GPU_FUNC_ARGUMENT(box),
-                                                 matrix       GPU_FUNC_ARGUMENT(recipBox),
-                                                 real* GPU_FUNC_ARGUMENT(boxVolume)) GPU_FUNC_TERM;
+GPU_FUNC_QUALIFIER void pme_gpu_update_input_box(PmeGpu* GPU_FUNC_ARGUMENT(pmeGpu),
+                                                 real    GPU_FUNC_ARGUMENT(boxVolume),
+                                                 const matrix GPU_FUNC_ARGUMENT(recipbox)) GPU_FUNC_TERM;
 
 /*! \libinternal \brief
  * Get the normal/padded grid dimensions of the real-space PME grid on GPU. Only used in tests.
@@ -596,5 +596,14 @@ GPU_FUNC_QUALIFIER PmeOutput pme_gpu_wait_finish_task(gmx_pme_t* GPU_FUNC_ARGUME
                                                       real           GPU_FUNC_ARGUMENT(lambdaQ),
                                                       gmx_wallcycle* GPU_FUNC_ARGUMENT(wcycle))
         GPU_FUNC_TERM_WITH_RETURN(PmeOutput{});
+
+/*! \libinternal
+ * \brief Returns the current host allocation policy, so other parts
+ * of the code can pin buffers appropriately.
+ *
+ * \param[in] pmeGpu            The PME GPU structure.
+ */
+GPU_FUNC_QUALIFIER const gmx::HostAllocationPolicy* pme_gpu_host_allocation_policy(
+        const PmeGpu* GPU_FUNC_ARGUMENT(pmeGpu)) GPU_FUNC_TERM_WITH_RETURN(nullptr);
 
 #endif

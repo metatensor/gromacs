@@ -88,14 +88,14 @@ class FusedGpuHaloExchange
 public:
     /*! \brief Creates NVSHMEM-based fused GPU halo exchange object.
      *
+     * \param [in] haloStream           GPU device stream for halo exchange
      * \param [in] deviceContext        GPU device context
-     * \param [in] wcycle               Wallclock cycle accounting
-     * \param [in] mpi_comm_mysim       MPI communicator used for simulation
+     * \param [in] mpiCommPpGroup       MPI communicator used for PP group (null on PME ranks)
      * \param [in] mpi_comm_mysim_world MPI communicator involving PP + PME
      */
-    FusedGpuHaloExchange(const DeviceContext& deviceContext,
-                         gmx_wallcycle*       wcycle,
-                         MPI_Comm             mpi_comm_mysim,
+    FusedGpuHaloExchange(const DeviceStream&  haloStream,
+                         const DeviceContext& deviceContext,
+                         MPI_Comm             mpiCommPpGroup,
                          MPI_Comm             mpi_comm_mysim_world);
     /*! \brief Destructor. */
     ~FusedGpuHaloExchange();
@@ -115,15 +115,18 @@ public:
     GpuEventSynchronizer* launchAllForceExchanges(bool accumulateForces,
                                                   FixedCapacityVector<GpuEventSynchronizer*, 2>* dependencyEvents);
 
+    //! Finish the construction once \c wcycle is available
+    void addWallcycleCounters(gmx_wallcycle* wcycle);
+
     /*! \brief (Re-)initialize fused halo exchanges for all dimensions and pulses.
      * Builds per-pulse entries, sets shared buffers, NVSHMEM signals, and prepares metadata.
-     * \param [in] dd                  Domain-decomposition structure
+     * \param [in,out] dd              Domain-decomposition structure
      * \param [in] d_coordinatesBuffer Pointer to coordinates buffer in GPU memory
      * \param [in] d_forcesBuffer      Pointer to forces buffer in GPU memory
      * \param [in] d_syncBase          Base device pointer for NVSHMEM signal buffer
      * \param [in] totalNumPulses      Total number of pulses across all dimensions
      */
-    void reinitAllHaloExchanges(const gmx_domdec_t&    dd,
+    void reinitAllHaloExchanges(gmx_domdec_t*          dd,
                                 DeviceBuffer<RVec>     d_coordinatesBuffer,
                                 DeviceBuffer<RVec>     d_forcesBuffer,
                                 DeviceBuffer<uint64_t> d_syncBase,
@@ -223,7 +226,7 @@ private:
      */
     static constexpr int c_haloEntryAlignBytes = 256;
     //! Device stream for this halo exchange
-    std::unique_ptr<DeviceStream> haloStream_;
+    const DeviceStream& haloStream_;
     //! GPU context object
     const DeviceContext& deviceContext_;
     //! Wallclock cycle accounting
@@ -275,8 +278,8 @@ private:
     //! Event triggered when force halo has been launched
     GpuEventSynchronizer forceHaloLaunched_;
     // MPI communicator used for symmetric allocations sizing (NVSHMEM path)
-    //! MPI communicator used for simulation
-    MPI_Comm mpi_comm_mysim_ = MPI_COMM_NULL;
+    //! MPI communicator used for PP ranks
+    MPI_Comm mpiCommPpGroup_ = MPI_COMM_NULL;
     //! MPI communicator involving PP + PME.
     MPI_Comm mpi_comm_mysim_world_ = MPI_COMM_NULL;
 
@@ -294,7 +297,6 @@ private:
     //! capacity for all pulses extent in unified recv buffer
     int unifiedRecvCapacity_ = -1;
 
-private:
     /*! \brief Backend-specific function for launching coordinate packing and send kernel. */
     void launchPackXKernel(const matrix box);
     /*! \brief Backend-specific function for launching force unpacking and recv kernel. */

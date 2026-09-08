@@ -74,6 +74,10 @@ enum class PbcType : int;
 
 namespace gmx
 {
+namespace test
+{
+namespace
+{
 
 class QMMMForceProviderTest : public ::testing::Test
 {
@@ -126,8 +130,8 @@ public:
 &END FORCE_EVAL
 )";
         parameters_.qmPdb_                = R"(HEADER    H2 MOLECULE
-ATOM      1  H   H2     1       5.000   5.000   4.630  1.00  0.00           H
-ATOM      2  H   H2     1       5.000   5.000   5.370  1.00  0.00           H
+ATOM      1  H   H2     1       5.000   5.000   4.630  1.00  0.00           H   0.000000
+ATOM      2  H   H2     1       5.000   5.000   5.370  1.00  0.00           H   0.000000
 END
 )";
         std::vector<gmx::Index> qmIndices = { 0, 1, 2 };
@@ -168,4 +172,6 @@ TEST_F(QMMMForceProviderTest, CanConstructOrNot)
     }
 }
 
+} // namespace
+} // namespace test
 } // namespace gmx

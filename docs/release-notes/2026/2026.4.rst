@@ -1,0 +1,90 @@
+
+GROMACS 2026.4 release notes
+----------------------------
+
+This version was released on TODO, 2026. These release notes
+document the changes that have taken place in |Gromacs| since the
+previous 2026.3 version, to fix known issues. It also incorporates all
+fixes made in version 2025.4 and earlier, which you can find described
+in the :ref:`release-notes`.
+
+.. Note to developers!
+   Please use """"""" to underline the individual entries for fixed issues in the subfolders,
+   otherwise the formatting on the webpage is messed up.
+   Also, please use the syntax :issue:`number` to reference issues on GitLab, without
+   a space between the colon and number!
+
+Fixes where mdrun could behave incorrectly
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Fix PME heap buffer overflow with multiple PME ranks
+""""""""""""""""""""""""""""""""""""""""""""""""""""
+When the local PME grid required SIMD padding in the z dimension,
+major-dimension overlap communication could write beyond its communication
+buffer. This could corrupt memory or crash ``mdrun`` when PME used multiple
+PME ranks, most readily with ``pme-order = 5``.
+
+:issue:`5669`
+
+Fixed MPI-parallel ``mdrun -plumed`` aborting at startup
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+Any MPI-parallel run using PLUMED aborted at startup with ``MPI_ERR_COMM``:
+PLUMED reads the ``setMPIComm`` argument as a pointer, but the communicator
+was passed by value. Only 2026 was affected.
+
+:issue:`5671`
+
+Worked around SYCL miscompilation in PME by oneAPI 2026.x
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+With all oneAPI versions 2026.x (and until a fix arrives), the SYCL
+PME GPU gather kernel on sufficiently large systems is affected by a
+miscompilation that causes a crash. Earlier oneAPI versions are not
+affected. Results are correct if mdrun does not crash.
+
+The issue is now worked around by always allocating some per-workgroup
+shared local memory, which can be more than is strictly required, but
+which is unlikely to affect performance noticeably.
+
+:issue:`5688`
+
+
+Fixes for ``gmx`` tools
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Fix stack overflow in ``grompp`` with large ifdef blocks
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+A recursion was replaced with a plain loop to avoid ``gmx grompp``
+crashing with large ifdef blocks.
+
+:issue:`5683`
+
+Increased precision of time processing in ``gmx eneconv``
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+All internal time processing in ``gmx eneconv`` now preserves the full double
+precision of the time stamps. This avoids picking of incorrect frames when
+times are large and intervals are small.
+
+:issue:`5219`
+
+Fixes that affect portability
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Fixed SYCL build with HeFFTe
+""""""""""""""""""""""""""""
+
+Miscellaneous
+^^^^^^^^^^^^^
+
+Updated DOI to the preprint describing AMBER14SB and AMBER19SB conversion and validation
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+AMBER14SB and AMBER19SB force field :ref:`itp` files contained a placeholder
+link the preprint describing the conversion and validation steps. Now that the
+preprint is uploaded on ChemRxiv, the placeholder was replaced with the DOI of
+the preprint, `doi:10.26434/chemrxiv.15006112/v1 <https://doi.org/10.26434/chemrxiv.15006112/v1>`_.
+
+:issue:`5690`

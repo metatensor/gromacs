@@ -149,12 +149,11 @@
 #include "replicaexchange.h"
 #include "shellfc.h"
 
-struct gmx_edsam;
 struct gmx_mdoutf;
-struct gmx_shellfc_t;
 
-using gmx::SimulationSignaller;
-using gmx::VirtualSitesHandler;
+namespace gmx
+{
+struct edsam;
 
 /*! \brief Copy the state from \p rerunFrame to \p globalState and, if requested, construct vsites
  *
@@ -168,8 +167,8 @@ static void prepareRerunState(const t_trxframe&          rerunFrame,
                               bool                       constructVsites,
                               const VirtualSitesHandler* vsite)
 {
-    auto x = makeArrayRef(globalState->x);
-    auto rerunX = arrayRefFromArray(reinterpret_cast<gmx::RVec*>(rerunFrame.x), globalState->numAtoms());
+    auto x      = makeArrayRef(globalState->x);
+    auto rerunX = arrayRefFromArray(reinterpret_cast<RVec*>(rerunFrame.x), globalState->numAtoms());
     std::copy(rerunX.begin(), rerunX.end(), x.begin());
     copy_mat(rerunFrame.box, globalState->box);
 
@@ -177,11 +176,11 @@ static void prepareRerunState(const t_trxframe&          rerunFrame,
     {
         GMX_ASSERT(vsite, "Need valid vsite for constructing vsites");
 
-        vsite->construct(globalState->x, globalState->v, globalState->box, gmx::VSiteOperation::PositionsAndVelocities);
+        vsite->construct(globalState->x, globalState->v, globalState->box, VSiteOperation::PositionsAndVelocities);
     }
 }
 
-void gmx::LegacySimulator::do_rerun()
+void LegacySimulator::do_rerun()
 {
     const bool isMainRank = cr_->commMyGroup.isMainRank();
 
@@ -205,7 +204,7 @@ void gmx::LegacySimulator::do_rerun()
     t_trxframe        rerun_fr;
     ForceBuffers      f;
     gmx_global_stat_t gstat;
-    gmx_shellfc_t*    shellfc;
+    shellfc_t*        shellfc;
 
     double cycles;
 
@@ -300,12 +299,12 @@ void gmx::LegacySimulator::do_rerun()
         auto* nonConstGlobalTopology                         = const_cast<gmx_mtop_t*>(&topGlobal_);
         nonConstGlobalTopology->intermolecularExclusionGroup = genQmmmIndices(topGlobal_);
     }
-    int*                fep_state = isMainRank ? &stateGlobal_->fep_state : nullptr;
-    gmx::ArrayRef<real> lambda    = isMainRank ? stateGlobal_->lambda : gmx::ArrayRef<real>{};
+    int*           fep_state = isMainRank ? &stateGlobal_->fep_state : nullptr;
+    ArrayRef<real> lambda    = isMainRank ? stateGlobal_->lambda : ArrayRef<real>{};
     initialize_lambdas(
             fpLog_, ir->efep, ir->bSimTemp, *ir->fepvals, ir->simtempvals->temperatures, ekind_, isMainRank, fep_state, lambda);
-    const bool        simulationsShareState = false;
-    gmx_mdoutf*       outf                  = init_mdoutf(fpLog_,
+    const bool   simulationsShareState = false;
+    gmx_mdoutf*  outf                  = init_mdoutf(fpLog_,
                                    nFile_,
                                    fnm_,
                                    mdrunOptions_,
@@ -319,15 +318,15 @@ void gmx::LegacySimulator::do_rerun()
                                    StartingBehavior::NewSimulation,
                                    simulationsShareState,
                                    ms_);
-    gmx::EnergyOutput energyOutput(mdoutf_get_fp_ene(outf),
-                                   topGlobal_,
-                                   *ir,
-                                   pullWork_,
-                                   mdoutf_get_fp_dhdl(outf),
-                                   true,
-                                   StartingBehavior::NewSimulation,
-                                   simulationsShareState,
-                                   mdModulesNotifiers_);
+    EnergyOutput energyOutput(mdoutf_get_fp_ene(outf),
+                              topGlobal_,
+                              *ir,
+                              pullWork_,
+                              mdoutf_get_fp_dhdl(outf),
+                              true,
+                              StartingBehavior::NewSimulation,
+                              simulationsShareState,
+                              mdModulesNotifiers_);
 
     gstat = global_stat_init(ir);
 
@@ -337,6 +336,7 @@ void gmx::LegacySimulator::do_rerun()
                                  constr_ ? constr_->numFlexibleConstraints() : 0,
                                  ir->outputControl.nstcalcenergy,
                                  haveDDAtomOrdering(*cr_),
+                                 fr_->deviceStreamManager,
                                  runScheduleWork_->simulationWork);
 
     if (haveDDAtomOrdering(*cr_))
@@ -385,7 +385,8 @@ void gmx::LegacySimulator::do_rerun()
                                   constr_,
                                   virtualSites_,
                                   shellfc,
-                                  fr_->stateGpu);
+                                  fr_->stateGpu,
+                                  wallCycleCounters_);
     }
 
     auto* mdatoms = mdAtoms_->mdatoms();
@@ -472,7 +473,8 @@ void gmx::LegacySimulator::do_rerun()
     rerun_fr.natoms = 0;
     if (isMainRank)
     {
-        isLastStep = !read_first_frame(oenv_, &status, opt2fn("-rerun", nFile_, fnm_), &rerun_fr, TRX_NEED_X);
+        isLastStep = !read_first_frame(
+                oenv_, &status, opt2fn("-rerun", nFile_, fnm_), &rerun_fr, nullptr, TRX_NEED_X);
         if (rerun_fr.natoms != topGlobal_.natoms)
         {
             gmx_fatal(FARGS,
@@ -643,7 +645,7 @@ void gmx::LegacySimulator::do_rerun()
         const int shellfcFlags     = force_flags | (mdrunOptions_.verbose ? GMX_FORCE_ENERGY : 0);
         const int legacyForceFlags = ((shellfc) ? shellfcFlags : force_flags) | GMX_FORCE_NS;
 
-        gmx_edsam* const ed = nullptr;
+        edsam* const ed = nullptr;
 
         if (bNS)
         {
@@ -741,7 +743,7 @@ void gmx::LegacySimulator::do_rerun()
                          fr_->longRangeNonbondeds.get(),
                          ddBalanceRegionHandler);
             }
-            catch (const gmx::InternalError&)
+            catch (const InternalError&)
             {
                 GMX_LOG(mdLog_.warning)
                         .asParagraph()
@@ -897,7 +899,7 @@ void gmx::LegacySimulator::do_rerun()
                           ir,
                           swap_,
                           wallCycleCounters_,
-                          gmx::arrayRefFromArray(reinterpret_cast<gmx::RVec*>(rerun_fr.x), rerun_fr.natoms),
+                          arrayRefFromArray(reinterpret_cast<RVec*>(rerun_fr.x), rerun_fr.natoms),
                           rerun_fr.box,
                           isMainRank && mdrunOptions_.verbose,
                           doRerun);
@@ -954,3 +956,5 @@ void gmx::LegacySimulator::do_rerun()
 
     walltime_accounting_set_nsteps_done(wallTimeAccounting_, step_rel);
 }
+
+} // namespace gmx

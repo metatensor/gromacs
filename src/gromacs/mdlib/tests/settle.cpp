@@ -74,15 +74,16 @@
 #include "config.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "gromacs/gpu_utils/capabilities.h"
 #include "gromacs/hardware/device_management.h"
+#include "gromacs/math/arrayrefwithpadding.h"
 #include "gromacs/math/paddedvector.h"
 #include "gromacs/mdlib/tests/watersystem.h"
 #include "gromacs/mdtypes/md_enums.h"
@@ -91,6 +92,7 @@
 #include "gromacs/topology/idef.h"
 #include "gromacs/topology/ifunc.h"
 #include "gromacs/topology/topology.h"
+#include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
 #include "gromacs/utility/stringutil.h"
@@ -98,13 +100,22 @@
 #include "gromacs/utility/vec.h"
 #include "gromacs/utility/vectypes.h"
 
+#include "testutils/hardware_test_fixture.h"
+#include "testutils/naming.h"
 #include "testutils/refdata.h"
 #include "testutils/test_device.h"
 #include "testutils/test_hardware_environment.h"
 #include "testutils/testasserts.h"
 
 #include "settletestdata.h"
-#include "settletestrunners.h"
+
+#if GMX_GPU && !GMX_GPU_OPENCL
+#    include "gromacs/gpu_utils/device_context.h"
+#    include "gromacs/gpu_utils/device_stream.h"
+#    include "gromacs/gpu_utils/devicebuffer.h"
+#    include "gromacs/gpu_utils/gputraits.h"
+#    include "gromacs/mdlib/settle_gpu.h"
+#endif
 
 namespace gmx
 {
@@ -113,10 +124,123 @@ namespace test
 namespace
 {
 
+void applySettleCpu(SettleTestData*    testData,
+                    const t_pbc&       pbc,
+                    const bool         updateVelocities,
+                    const bool         calcVirial,
+                    const std::string& testDescription)
+{
+    SettleData settled(testData->mtop_);
+
+    settled.setConstraints(testData->idef_->il[InteractionFunction::SETTLE],
+                           testData->numAtoms_,
+                           testData->masses_,
+                           testData->inverseMasses_);
+
+    bool errorOccured;
+    int  numThreads  = 1;
+    int  threadIndex = 0;
+    csettle(settled,
+            numThreads,
+            threadIndex,
+            &pbc,
+            testData->x_.arrayRefWithPadding(),
+            testData->xPrime_.arrayRefWithPadding(),
+            testData->reciprocalTimeStep_,
+            updateVelocities ? testData->v_.arrayRefWithPadding() : ArrayRefWithPadding<RVec>(),
+            calcVirial,
+            testData->virial_,
+            &errorOccured);
+    EXPECT_FALSE(errorOccured) << testDescription;
+}
+
+#if GMX_GPU && !GMX_GPU_OPENCL
+
+void applySettleGpu(const DeviceContext& deviceContext,
+                    const DeviceStream&  deviceStream,
+                    SettleTestData*      testData,
+                    const t_pbc&         pbc,
+                    const bool           updateVelocities,
+                    const bool           calcVirial,
+                    const std::string& /* testDescription */)
+{
+    deviceContext.activate();
+
+    auto settleGpu = std::make_unique<SettleGpu>(testData->mtop_, deviceContext, deviceStream);
+
+    settleGpu->set(*testData->idef_);
+    PbcAiuc pbcAiuc;
+    setPbcAiuc(pbc.ndim_ePBC, pbc.box, &pbcAiuc);
+
+    int numAtoms = testData->numAtoms_;
+
+    DeviceBuffer<Float3> d_x, d_xp, d_v;
+
+    Float3* h_x  = gmx::asGenericFloat3Pointer(testData->x_);
+    Float3* h_xp = gmx::asGenericFloat3Pointer(testData->xPrime_);
+    Float3* h_v  = gmx::asGenericFloat3Pointer(testData->v_);
+
+    allocateDeviceBuffer(&d_x, numAtoms, deviceContext);
+    allocateDeviceBuffer(&d_xp, numAtoms, deviceContext);
+    allocateDeviceBuffer(&d_v, numAtoms, deviceContext);
+
+    copyToDeviceBuffer(&d_x, h_x, 0, numAtoms, deviceStream, GpuApiCallBehavior::Sync, nullptr);
+    copyToDeviceBuffer(&d_xp, h_xp, 0, numAtoms, deviceStream, GpuApiCallBehavior::Sync, nullptr);
+    if (updateVelocities)
+    {
+        copyToDeviceBuffer(&d_v, h_v, 0, numAtoms, deviceStream, GpuApiCallBehavior::Sync, nullptr);
+    }
+    settleGpu->apply(
+            d_x, d_xp, updateVelocities, d_v, testData->reciprocalTimeStep_, calcVirial, testData->virial_, pbcAiuc);
+
+    copyFromDeviceBuffer(h_xp, &d_xp, 0, numAtoms, deviceStream, GpuApiCallBehavior::Sync, nullptr);
+    if (updateVelocities)
+    {
+        copyFromDeviceBuffer(h_v, &d_v, 0, numAtoms, deviceStream, GpuApiCallBehavior::Sync, nullptr);
+    }
+
+    freeDeviceBuffer(&d_x);
+    freeDeviceBuffer(&d_xp);
+    freeDeviceBuffer(&d_v);
+}
+
+#endif // GMX_GPU && !GMX_GPU_OPENCL
+
+//! PBC types for testing
+enum class PbcTestType : int
+{
+    None,
+    XYZ,
+    Count
+};
+
 static constexpr real dOHTest = 0.10;
 static constexpr real dHHTest = 0.15;
 static constexpr real mOTest  = 10;
 static constexpr real mHTest  = 2;
+
+//! Static const array of test PBCs, initialized once for all tests
+static const gmx::EnumerationArray<PbcTestType, t_pbc> sc_testPbcs = []()
+{
+    gmx::EnumerationArray<PbcTestType, t_pbc> pbcs;
+    t_pbc                                     pbc;
+
+    // Infinitely small box (no PBC)
+    matrix boxNone = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    set_pbc(&pbc, PbcType::No, boxNone);
+    pbcs[PbcTestType::None] = pbc;
+
+    // Rectangular box (XYZ PBC)
+    matrix boxXyz = { { real(1.86206), 0, 0 }, { 0, real(1.86206), 0 }, { 0, 0, real(1.86206) } };
+    set_pbc(&pbc, PbcType::Xyz, boxXyz);
+    pbcs[PbcTestType::XYZ] = pbc;
+
+    return pbcs;
+}();
+
+//! Names for PBC test types
+static const gmx::EnumerationArray<PbcTestType, const char*> sc_pbcTestTypeNames = { { "PBCNone",
+                                                                                       "PBCXYZ" } };
 
 std::unique_ptr<gmx_mtop_t> mtopTwoIdenticalMoltypes()
 {
@@ -171,74 +295,54 @@ TEST(Settle, MultipleDifferentSettlesThrow)
     EXPECT_THROW(getSettleTopologyData(*mtop), InvalidInputError);
 }
 
-/*! \brief Parameters that will vary from test to test.
- */
-struct SettleTestParameters
-{
-    //! Number of water molecules (SETTLEs) [1, 2, 4, 5, 7, 10, 12, 15, 17]
-    int numSettles;
-    //! If the velocities should be updated while constraining [true/false]
-    bool updateVelocities;
-    //! If the virial should be computed [true/false]
-    bool calcVirial;
-    //! Periodic boundary conditions [PBCXYZ/PBCNone]
-    std::string pbcName;
-};
+//! Input configuration for SETTLE tests (defines the physical scenario being tested)
+using SettleInputConfig = std::tuple<int, bool, bool, PbcTestType>;
+
+/*! Hardware test helper for SETTLE
+ *
+ * \todo There are no execution modes - tests don't vary SETTLE
+ * implementation, but they should test SIMD vs no SIMD here. */
+using SettleTestHelper = HardwareAndExecutionTestHelper<SettleInputConfig, std::tuple<>>;
+
+//! Formatters for parameters in the config info
+static const auto sc_configInfoFormatters =
+        std::make_tuple([](int n) { return formatString("%dsettles", n); },
+                        [](bool b) { return b ? "velocities" : "novelocities"; },
+                        [](bool b) { return b ? "virial" : "novirial"; },
+                        [](PbcTestType pbc) { return sc_pbcTestTypeNames[pbc]; });
+//! Formatters for parameters in the execution mode (currently empty)
+static const auto sc_executionModeFormatters = std::make_tuple();
+
+//! Helper object to name tests using all parameters
+static const NameOfTestFromTuple<SettleTestHelper::DynamicParameters> sc_testNamer =
+        SettleTestHelper::testNamer(sc_configInfoFormatters, sc_executionModeFormatters);
 
 /*! \brief Sets of parameters on which to run the tests.
+ *
+ * Each entry is a tuple of (numSettles, updateVelocities, calcVirial, pbcType).
  */
-const SettleTestParameters parametersSets[] = {
-    { 1, false, false, "PBCXYZ" },   // 1 water molecule
-    { 2, false, false, "PBCXYZ" },   // 2 water molecules
-    { 4, false, false, "PBCXYZ" },   // 4 water molecules
-    { 5, false, false, "PBCXYZ" },   // 5 water molecules
-    { 6, false, false, "PBCXYZ" },   // 6 water molecules
-    { 10, false, false, "PBCXYZ" },  // 10 water molecules
-    { 12, false, false, "PBCXYZ" },  // 12 water molecules
-    { 15, false, false, "PBCXYZ" },  // 15 water molecules
-    { 17, true, false, "PBCXYZ" },   // Update velocities
-    { 17, false, true, "PBCXYZ" },   // Compute virial
-    { 17, false, false, "PBCNone" }, // No periodic boundary
-    { 17, true, true, "PBCNone" },   // Update velocities, compute virial, without PBC
-    { 17, true, true, "PBCXYZ" }
-}; // Update velocities, compute virial, with PBC
+const std::array<SettleInputConfig, 13> sc_settleConfigs = { {
+        { 1, false, false, PbcTestType::XYZ },   // 1 water molecule
+        { 2, false, false, PbcTestType::XYZ },   // 2 water molecules
+        { 4, false, false, PbcTestType::XYZ },   // 4 water molecules
+        { 5, false, false, PbcTestType::XYZ },   // 5 water molecules
+        { 6, false, false, PbcTestType::XYZ },   // 6 water molecules
+        { 10, false, false, PbcTestType::XYZ },  // 10 water molecules
+        { 12, false, false, PbcTestType::XYZ },  // 12 water molecules
+        { 15, false, false, PbcTestType::XYZ },  // 15 water molecules
+        { 17, true, false, PbcTestType::XYZ },   // Update velocities
+        { 17, false, true, PbcTestType::XYZ },   // Compute virial
+        { 17, false, false, PbcTestType::None }, // No periodic boundary
+        { 17, true, true, PbcTestType::None },   // Update velocities, compute virial, without PBC
+        { 17, true, true, PbcTestType::XYZ }     // Update velocities, compute virial, with PBC
+} };
 
 /*! \brief Test fixture for testing SETTLE.
  */
-class SettleTest : public ::testing::TestWithParam<SettleTestParameters>
+class SettleTest : public HardwareTestFixture<SettleTestHelper>
 {
 public:
-    //! PBC setups
-    std::unordered_map<std::string, t_pbc> pbcs_;
-    //! Reference data
-    TestReferenceData refData_;
-    //! Checker for reference data
-    TestReferenceChecker checker_;
-
-    /*! \brief Test setup function.
-     *
-     * Setting up the PBCs and algorithms. Note, that corresponding string keywords
-     * have to be explicitly specified when parameters are initialized.
-     *
-     */
-    SettleTest() : checker_(refData_.rootChecker())
-    {
-
-        //
-        // PBC initialization
-        //
-        t_pbc pbc;
-
-        // Infinitely small box
-        matrix boxNone = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
-        set_pbc(&pbc, PbcType::No, boxNone);
-        pbcs_["PBCNone"] = pbc;
-
-        // Rectangular box
-        matrix boxXyz = { { real(1.86206), 0, 0 }, { 0, real(1.86206), 0 }, { 0, 0, real(1.86206) } };
-        set_pbc(&pbc, PbcType::Xyz, boxXyz);
-        pbcs_["PBCXYZ"] = pbc;
-    }
+    SettleTest() : HardwareTestFixture(sc_configInfoFormatters) {}
 
     /*! \brief Check if the final interatomic distances are equal to target set by constraints.
      *
@@ -307,7 +411,7 @@ public:
     void checkFinalPositions(const int numSettles, const SettleTestData& testData)
     {
         TestReferenceChecker finalCoordinatesRef(
-                checker_.checkSequenceCompound("FinalCoordinates", numSettles));
+                checker().checkSequenceCompound("FinalCoordinates", numSettles));
         for (int i = 0; i < numSettles; ++i)
         {
             TestReferenceChecker settlerRef(finalCoordinatesRef.checkCompound("Settler", nullptr));
@@ -332,7 +436,7 @@ public:
     void checkFinalVelocities(const int numSettles, const SettleTestData& testData)
     {
         TestReferenceChecker finalCoordinatesRef(
-                checker_.checkSequenceCompound("FinalVelocities", numSettles));
+                checker().checkSequenceCompound("FinalVelocities", numSettles));
         for (int i = 0; i < numSettles; ++i)
         {
             TestReferenceChecker settlerRef(finalCoordinatesRef.checkCompound("Settler", nullptr));
@@ -356,7 +460,7 @@ public:
     void checkVirial(const SettleTestData& testData)
     {
         const tensor&        virial = testData.virial_;
-        TestReferenceChecker virialRef(checker_.checkCompound("Virial", nullptr));
+        TestReferenceChecker virialRef(checker().checkCompound("Virial", nullptr));
 
         // TODO: Is it worth it to make this in a loop??
         virialRef.checkReal(virial[XX][XX], "XX");
@@ -373,36 +477,19 @@ public:
 
 TEST_P(SettleTest, SatisfiesConstraints)
 {
-    // Construct the list of runners
-    std::vector<std::unique_ptr<ISettleTestRunner>> runners;
-    // Add runners for CPU version
-    runners.emplace_back(std::make_unique<SettleHostTestRunner>());
-    // If supported, add runners for the GPU version for each available GPU
-    if (GpuConfigurationCapabilities::Update)
+    // Extract parameters (skip hardware context with _)
+    auto [numSettles, updateVelocities, calcVirial, pbcType, _] = GetParam();
+
+    // Extra indentation for reviewer convenience
     {
-        for (const auto& testDevice : getTestHardwareEnvironment()->getTestDeviceList())
-        {
-            runners.emplace_back(std::make_unique<SettleDeviceTestRunner>(*testDevice));
-        }
-    }
-    for (const auto& runner : runners)
-    {
-        // Make some symbolic names for the parameter combination.
-        SettleTestParameters params = GetParam();
+        const t_pbc& pbc = sc_testPbcs[pbcType];
 
-        int         numSettles       = params.numSettles;
-        bool        updateVelocities = params.updateVelocities;
-        bool        calcVirial       = params.calcVirial;
-        std::string pbcName          = params.pbcName;
-
-
-        // Make a string that describes which parameter combination is
-        // being tested, to help make failing tests comprehensible.
+        // Make a string that describes which parameter combination is being tested
         std::string testDescription = formatString(
                 "Testing %s with %d SETTLEs, %s, %svelocities and %scalculating the virial.",
-                runner->hardwareDescription().c_str(),
+                hardwareContext()->description().c_str(),
                 numSettles,
-                pbcName.c_str(),
+                sc_pbcTestTypeNames[pbcType],
                 updateVelocities ? "with " : "without ",
                 calcVirial ? "" : "not ");
 
@@ -413,10 +500,21 @@ TEST_P(SettleTest, SatisfiesConstraints)
         ASSERT_LE(numSettles, testData->xPrime_.size() / testData->atomsPerSettle_)
                 << "cannot test that many SETTLEs. " << testDescription;
 
-        t_pbc pbc = pbcs_.at(pbcName);
-
-        // Apply SETTLE
-        runner->applySettle(testData.get(), pbc, updateVelocities, calcVirial, testDescription);
+        // Apply SETTLE based on hardware context
+        if (isGpuTest())
+        {
+#if GMX_GPU && !GMX_GPU_OPENCL
+            activateHardware();
+            applySettleGpu(
+                    *deviceContext(), *deviceStream(), testData.get(), pbc, updateVelocities, calcVirial, testDescription);
+#else
+            GMX_THROW(gmx::InternalError("GPU hardware context with no test code"));
+#endif
+        }
+        else
+        {
+            applySettleCpu(testData.get(), pbc, updateVelocities, calcVirial, testDescription);
+        }
 
         // The necessary tolerances for the test to pass were determined
         // empirically. This isn't nice, but the required behavior that
@@ -433,18 +531,18 @@ TEST_P(SettleTest, SatisfiesConstraints)
         checkConstrainsSatisfied(numSettles, tolerance, *testData);
         checkVirialSymmetric(calcVirial, toleranceVirial, *testData);
 
-        checker_.setDefaultTolerance(tolerancePositions);
+        checker().setDefaultTolerance(tolerancePositions);
         checkFinalPositions(numSettles, *testData);
 
         if (updateVelocities)
         {
-            checker_.setDefaultTolerance(toleranceVelocities);
+            checker().setDefaultTolerance(toleranceVelocities);
             checkFinalVelocities(numSettles, *testData);
         }
 
         if (calcVirial)
         {
-            checker_.setDefaultTolerance(toleranceVirial);
+            checker().setDefaultTolerance(toleranceVirial);
             checkVirial(*testData);
         }
     }
@@ -452,8 +550,15 @@ TEST_P(SettleTest, SatisfiesConstraints)
 
 // Run test on pre-determined set of combinations for test parameters, which include the numbers of SETTLEs (water
 // molecules), whether or not velocities are updated and virial contribution is computed, was the PBC enabled.
-// The test will cycle through all available runners, including CPU and, if applicable, GPU implementations of SETTLE.
-INSTANTIATE_TEST_SUITE_P(WithParameters, SettleTest, ::testing::ValuesIn(parametersSets));
+// Each test runs as a separate GoogleTest case for each hardware configuration.
+INSTANTIATE_TEST_SUITE_P(AllHardware,
+                         SettleTest,
+                         ::testing::ConvertGenerator(
+                                 ::testing::Combine(::testing::ValuesIn(sc_settleConfigs),
+                                                    ::testing::ValuesIn(getHardwareContextsWithCapability(
+                                                            GpuConfigurationCapabilities::Update))),
+                                 flattenTupleWithHardwareContext<SettleInputConfig>()),
+                         sc_testNamer);
 
 } // namespace
 } // namespace test

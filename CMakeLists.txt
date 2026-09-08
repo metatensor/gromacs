@@ -303,16 +303,9 @@ gmx_dependent_option(
 mark_as_advanced(GMX_BUILD_OWN_FFTW)
 mark_as_advanced(GMX_DISABLE_FFTW_MEASURE)
 
-gmx_dependent_option(
-    GMX_USE_HEFFTE
-    "Use HeFFTe for distributed FFT support. Used with CUDA backend"
-    OFF
-    "GMX_GPU STREQUAL CUDA OR GMX_GPU STREQUAL HIP OR GMX_GPU STREQUAL SYCL;GMX_MPI")
-gmx_dependent_option(
-    GMX_USE_CUFFTMP
-    "Use cuFFTMp for distributed FFT support. Used with CUDA backend"
-    OFF
-    "GMX_GPU STREQUAL CUDA;GMX_MPI")
+option(GMX_USE_HEFFTE "Use HeFFTe for distributed GPU FFT support with an MPI library." OFF)
+
+option(GMX_USE_CUFFTMP "Use cuFFTMp for distributed FFT support. Used with CUDA backend." OFF)
 
 # Here the default GPU FFT library is set up depending
 # on the build configuration. Other choices are
@@ -367,7 +360,8 @@ if (GMX_GPU)
         set("GMX_GPU_FFT_${_gpu_fft_library_upper}" "${_value}" CACHE INTERNAL "Use ${_gpu_fft_library} library for FFTs on GPUs")
     endforeach()
 endif()
-gmx_dependent_option(GMX_NVSHMEM "Build a parallel NVSHMEM multi-GPU code of GROMACS" OFF "GMX_GPU STREQUAL CUDA;GMX_MPI")
+
+option(GMX_NVSHMEM "Build a parallel NVSHMEM multi-GPU code of GROMACS" OFF)
 
 if (GMX_NVSHMEM)
     if (NVSHMEM_ROOT)
@@ -382,7 +376,7 @@ endif()
 gmx_dependent_cache_variable(GMX_SIMD_REF_FLOAT_WIDTH  "Reference SIMD single precision width" STRING "4" "GMX_SIMD STREQUAL REFERENCE")
 gmx_dependent_cache_variable(GMX_SIMD_REF_DOUBLE_WIDTH "Reference SIMD double precision width" STRING "4" "GMX_SIMD STREQUAL REFERENCE")
 
-# This should be moved to a separate NBNXN cmake module when that code is cleaned up and modularized
+# This should be moved to a separate NBNXM cmake module when that code is cleaned up and modularized
 
 option(GMX_BROKEN_CALLOC "Work around broken calloc()" OFF)
 mark_as_advanced(GMX_BROKEN_CALLOC)
@@ -452,7 +446,7 @@ gmx_c_flags()
 # in gmxCFlags nor are SIMD or MPI related.
 #
 # TODO These variables should be consolidated into
-# EXTRA_COMPILER_FLAGS so that we we don't perpetrate bugs where
+# EXTRA_COMPILER_FLAGS so that we don't perpetrate bugs where
 # things that work in C compilation (e.g. merging from old branches)
 # might not also work for C++ compilation.
 set(EXTRA_C_FLAGS "")
@@ -625,7 +619,7 @@ if (GMX_HWLOC)
     if (HWLOC_FIND_QUIETLY_AFTER_FIRST_RUN)
         set(HWLOC_FIND_QUIETLY TRUE)
     endif()
-    find_package(HWLOC 1.5)
+    find_package(HWLOC 2.0)
 
     if (HWLOC_FOUND)
         if (HWLOC_LIBRARIES MATCHES ".a$")
@@ -646,10 +640,6 @@ if (GMX_HWLOC)
         endif()
     elseif(GMX_HWLOC_FORCE)
         message(FATAL_ERROR "HWLOC package support required, but not found.")
-    endif()
-
-    if (HWLOC_FOUND AND HWLOC_VERSION VERSION_LESS "2")
-        message(STATUS "Support for hwloc versions 1.x is deprecated")
     endif()
 
     set(HWLOC_FIND_QUIETLY_AFTER_FIRST_RUN TRUE CACHE INTERNAL "Be quiet during future attempts to find HWLOC")

@@ -59,6 +59,7 @@
 #include "testutils/cmdlinetest.h"
 #include "testutils/mpitest.h"
 #include "testutils/refdata.h"
+#include "testutils/setenv.h"
 #include "testutils/simulationdatabase.h"
 #include "testutils/testasserts.h"
 #include "testutils/testfilemanager.h"
@@ -95,9 +96,8 @@ protected:
             GTEST_FAIL()
                     << "GMX_TEST_PLUMED_KERNEL_IS_AVAILABLE was set but PLUMED kernel not found";
         }
-        const bool overWriteEnvironmentVariable = true;
-        gmxSetenv("PLUMED_MAXBACKUP", "0", overWriteEnvironmentVariable);
     }
+    GmxEnvGuard dontBackup_{ "PLUMED_MAXBACKUP", "0" };
 
 public:
     static constexpr std::array<const char*, 3> component_names_ = { "x", "y", "z" };
@@ -125,7 +125,7 @@ TEST_P(PlumedRun, PlumedSees)
     {
         std::string plumed_string;
 
-        plumed_string += "DUMPATOMS PRECISION=10  ATOMS=@mdatoms FILE=" + plumedxyz.string() + "\n";
+        plumed_string += "DUMPATOMS PRECISION=17  ATOMS=@mdatoms FILE=" + plumedxyz.string() + "\n";
         plumed_string += "c: CELL\n";
         plumed_string += "PRINT ARG=c.* FILE=" + cell_data.string() + "\n";
         plumed_string += "t1: TIME\n";

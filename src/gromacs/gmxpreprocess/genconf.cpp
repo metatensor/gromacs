@@ -71,14 +71,16 @@
 
 struct gmx_output_env_t;
 
-static void
-rand_rot(int natoms, rvec x[], rvec v[], vec4 xrot[], vec4 vrot[], gmx::DefaultRandomEngine* rng, const rvec max_rot)
+namespace gmx
 {
-    mat4                               mt1, mt2, mr[DIM], mtemp1, mtemp2, mtemp3, mxtot, mvtot;
-    rvec                               xcm;
-    real                               phi;
-    int                                i, m;
-    gmx::UniformRealDistribution<real> dist(-1.0, 1.0);
+
+static void rand_rot(int natoms, rvec x[], rvec v[], vec4 xrot[], vec4 vrot[], DefaultRandomEngine* rng, const rvec max_rot)
+{
+    mat4                          mt1, mt2, mr[DIM], mtemp1, mtemp2, mtemp3, mxtot, mvtot;
+    rvec                          xcm;
+    real                          phi;
+    int                           i, m;
+    UniformRealDistribution<real> dist(-1.0, 1.0);
 
     clear_rvec(xcm);
     for (i = 0; (i < natoms); i++)
@@ -166,21 +168,21 @@ int gmx_genconf(int argc, char* argv[])
     };
 
     if (!parse_common_args(
-                &argc, argv, 0, NFILE, fnm, asize(pa), pa, asize(desc), desc, asize(bugs), bugs, &oenv))
+                &argc, argv, 0, NFILE, fnm, asize(pa), pa, asize(desc), desc, asize(bugs), bugs, &oenv, nullptr))
     {
         return 0;
     }
 
     if (seed == 0)
     {
-        seed = static_cast<int>(gmx::makeRandomSeed());
+        seed = static_cast<int>(makeRandomSeed());
     }
-    gmx::DefaultRandomEngine rng(seed);
+    DefaultRandomEngine rng(seed);
 
     bTRX = ftp2bSet(efTRX, NFILE, fnm);
-    nx   = gmx::roundToInt(nrbox[XX]);
-    ny   = gmx::roundToInt(nrbox[YY]);
-    nz   = gmx::roundToInt(nrbox[ZZ]);
+    nx   = roundToInt(nrbox[XX]);
+    ny   = roundToInt(nrbox[YY]);
+    nz   = roundToInt(nrbox[ZZ]);
 
     if ((nx <= 0) || (ny <= 0) || (nz <= 0))
     {
@@ -208,7 +210,7 @@ int gmx_genconf(int argc, char* argv[])
 
     if (bTRX)
     {
-        if (!read_first_frame(oenv, &status, ftp2fn(efTRX, NFILE, fnm), &frame, TRX_NEED_X))
+        if (!read_first_frame(oenv, &status, ftp2fn(efTRX, NFILE, fnm), &frame, nullptr, TRX_NEED_X))
         {
             gmx_fatal(FARGS, "Could not read trajectory %s", ftp2fn(efTRX, NFILE, fnm));
         }
@@ -338,3 +340,5 @@ int gmx_genconf(int argc, char* argv[])
 
     return 0;
 }
+
+} // namespace gmx

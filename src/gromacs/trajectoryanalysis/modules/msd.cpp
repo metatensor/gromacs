@@ -719,7 +719,7 @@ void Msd::analyzeFrame(int gmx_unused                frameNumber,
 
     for (MsdGroupData& msdData : groupData_)
     {
-        //NOLINTNEXTLINE(readability-static-accessed-through-instance)
+        // NOLINTNEXTLINE(readability-static-accessed-through-instance)
         const Selection& sel = pdata->parallelSelection(msdData.sel);
 
         ArrayRef<const DVec> coords = msdData.coordinateManager_.buildCoordinates(sel, pbc);
@@ -754,7 +754,7 @@ void Msd::analyzeFrame(int gmx_unused                frameNumber,
 
         // We only store the frame for the future if it's a restart per -trestart.
 
-        if (bRmod_fd(time, t0_, trestart_, false))
+        if (bRmod_fd(time, t0_, trestart_, frame.timeIsDouble))
         {
             msdData.frames.emplace_back(
                     std::make_pair(frameNumber, std::vector(coords.begin(), coords.end())));

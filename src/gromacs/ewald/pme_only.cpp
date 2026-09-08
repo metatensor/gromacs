@@ -84,6 +84,7 @@
 #include "gromacs/gpu_utils/hostallocator.h"
 #include "gromacs/math/gmxcomplex.h"
 #include "gromacs/math/units.h"
+#include "gromacs/mdlib/sighandler.h"
 #include "gromacs/mdtypes/forceoutput.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/simulation_workload.h"
@@ -107,7 +108,10 @@
 /*! \brief Main PP-PME communication data structure */
 struct gmx_pme_pp
 {
-    gmx_pme_pp(MPI_Comm simulationCommunicator, std::vector<PpRanks>&& ppRanks);
+    gmx_pme_pp(MPI_Comm                        simulationCommunicator,
+               std::vector<PpRanks>&&          ppRanks,
+               bool                            usePmeGpu,
+               const gmx::DeviceStreamManager* deviceStreamManager);
     MPI_Comm             mpi_comm_mysim; /**< MPI communicator for this simulation */
     std::vector<PpRanks> ppRanks;        /**< The PP partner ranks                 */
     int                  peerRankId;     /**< The peer PP rank id (the last one)   */
@@ -133,19 +137,16 @@ struct gmx_pme_pp
     /*! \brief object for sending PME force using communications operating on GPU memory space */
     std::unique_ptr<gmx::PmeForceSenderGpu> pmeForceSenderGpu;
 
-    //! whether GPU direct communications are generally active for bi-directional PME-PP transfers
-    bool useGpuPmePpCommunication = false;
     /*! \brief whether GPU direct communications should send forces directly to remote GPU memory */
     bool sendForcesDirectToPpGpu = false;
     /*! \brief Whether a GPU graph should be used to execute steps in the MD loop if run conditions allow */
     bool useMdGpuGraph = false;
-    /*! \brief Whether a NVSHMEM should be used for GPU communication if run conditions allow */
-    bool useNvshmem = false;
-    /*! \brief Whether GPU halo exchange is in use
+    /*! \brief Accumulated PME cycle counts since the last DD/NS report
      *
-     * Together with NVSHMEM support, this requires otherwise unnecessary communication
-     * and symmetric allocations */
-    bool useGpuHaloExchange = false;
+     * Cycles are summed every step and reported to the PP rank before DD/NS
+     * work so that DLB always receives accurate PME timing, even for steps
+     * where virial and energy are not computed. */
+    gmx_pme_comm_cyclecounters_t pendingCycleCounters_ = {};
 };
 
 static std::vector<PpRanks> makePpRanks(const gmx_domdec_t& dd)
@@ -164,10 +165,22 @@ static std::vector<PpRanks> makePpRanks(const gmx_domdec_t& dd)
     return ppRanks;
 }
 
-gmx_pme_pp::gmx_pme_pp(MPI_Comm simulationCommunicator, std::vector<PpRanks>&& ppRanksArg) :
+static bool usingNvshmemForceComm(const gmx::PmeOnlySimulationWorkload& simulationWork,
+                                  const bool                            computeEnergyAndVirial)
+{
+    return simulationWork.useNvshmem && !computeEnergyAndVirial;
+}
+
+gmx_pme_pp::gmx_pme_pp(MPI_Comm                        simulationCommunicator,
+                       std::vector<PpRanks>&&          ppRanksArg,
+                       const bool                      usePmeGpu,
+                       const gmx::DeviceStreamManager* deviceStreamManager) :
     mpi_comm_mysim(simulationCommunicator),
     ppRanks(std::move(ppRanksArg)),
     peerRankId(ppRanks.back().rankId),
+    chargeA{ makeHostAllocationPolicy(usePmeGpu, deviceStreamManager) },
+    chargeB{ makeHostAllocationPolicy(usePmeGpu, deviceStreamManager) },
+    x{ makeHostAllocationPolicy(usePmeGpu, deviceStreamManager) },
     req(eCommType_NR * ppRanks.size()),
     stat(eCommType_NR * ppRanks.size())
 {
@@ -276,34 +289,33 @@ static std::unique_ptr<gmx_pme_t> gmx_pmeonly_switch(std::unique_ptr<gmx_pme_t>&
  * \param[out] grid_size              PME grid size, if received.
  * \param[out] ewaldcoeff_q           Ewald cut-off parameter for electrostatics, if received.
  * \param[out] ewaldcoeff_lj          Ewald cut-off parameter for Lennard-Jones, if received.
- * \param[in]  useGpuForPme           Flag on whether PME is on GPU.
+ * \param[in]  pmeSimWork         Simulation-wide PME-only rank workload.
  * \param[in]  stateGpu               GPU state propagator object.
  * \param[in]  gpuHaloExchangeNvshmemHelper  Supports symmetric operations with NVSHMEM halo
  *                                           exchange
- * \param[in]  runMode                PME run mode.
  *
  * \retval pmerecvqxX                 All parameters were set, chargeA and chargeB can be NULL.
  * \retval pmerecvqxFINISH            No parameters were set.
  * \retval pmerecvqxSWITCHGRID        Only grid_size and *ewaldcoeff were set.
  * \retval pmerecvqxRESETCOUNTERS     *step was set.
+ * \retval pmerecvqxSENDCOUNTERS      No parameters were set.
  */
-static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
-                                      gmx_pme_pp*                  pme_pp,
-                                      int*                         natoms,
-                                      matrix                       box,
-                                      int*                         maxshift_x,
-                                      int*                         maxshift_y,
-                                      real*                        lambda_q,
-                                      real*                        lambda_lj,
-                                      gmx::StepWorkload*           stepWork,
-                                      int64_t*                     step,
-                                      ivec*                        grid_size,
-                                      real*                        ewaldcoeff_q,
-                                      real*                        ewaldcoeff_lj,
-                                      bool                         useGpuForPme,
-                                      gmx::StatePropagatorDataGpu* stateGpu,
-                                      gmx::GpuHaloExchangeNvshmemHelper* gpuHaloExchangeNvshmemHelper,
-                                      PmeRunMode gmx_unused runMode)
+static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*                     pme,
+                                      gmx_pme_pp*                           pme_pp,
+                                      int*                                  natoms,
+                                      matrix                                box,
+                                      int*                                  maxshift_x,
+                                      int*                                  maxshift_y,
+                                      real*                                 lambda_q,
+                                      real*                                 lambda_lj,
+                                      gmx::PmeStepWorkload*                 stepWork,
+                                      int64_t*                              step,
+                                      ivec*                                 grid_size,
+                                      real*                                 ewaldcoeff_q,
+                                      real*                                 ewaldcoeff_lj,
+                                      const gmx::PmeOnlySimulationWorkload& pmeSimWork,
+                                      gmx::StatePropagatorDataGpu*          stateGpu,
+                                      gmx::GpuHaloExchangeNvshmemHelper* gpuHaloExchangeNvshmemHelper)
 {
     int status = -1;
     int nat    = 0;
@@ -328,16 +340,17 @@ static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
         if (debug)
         {
             fprintf(debug,
-                    "PME only rank receiving:%s%s%s%s%s\n",
+                    "PME only rank receiving:%s%s%s%s%s%s\n",
                     (cnb.flags & PP_PME_CHARGE) ? " charges" : "",
                     (cnb.flags & PP_PME_COORD) ? " coordinates" : "",
                     (cnb.flags & PP_PME_FINISH) ? " finish" : "",
                     (cnb.flags & PP_PME_SWITCHGRID) ? " switch grid" : "",
-                    (cnb.flags & PP_PME_RESETCOUNTERS) ? " reset counters" : "");
+                    (cnb.flags & PP_PME_RESETCOUNTERS) ? " reset counters" : "",
+                    (cnb.flags & PP_PME_SENDCOUNTERS) ? " send counters" : "");
         }
 
-        stepWork->useGpuPmeFReduction = pme_pp->useGpuPmePpCommunication;
-        GMX_ASSERT(!pme_pp->useGpuPmePpCommunication || (pme_pp->pmeForceSenderGpu != nullptr),
+        stepWork->useGpuPmeFReduction = pmeSimWork.useGpuPmePpCommunication;
+        GMX_ASSERT(!pmeSimWork.useGpuPmePpCommunication || (pme_pp->pmeForceSenderGpu != nullptr),
                    "The use of GPU direct communication for PME-PP is enabled, "
                    "but the PME GPU force reciever object does not exist");
         pme_pp->sendForcesDirectToPpGpu = ((cnb.flags & PP_PME_RECVFTOGPU) != 0);
@@ -363,6 +376,11 @@ static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
         {
             /* Special case, receive the step (set above) and return */
             status = pmerecvqxRESETCOUNTERS;
+        }
+
+        if (cnb.flags & PP_PME_SENDCOUNTERS)
+        {
+            status = pmerecvqxSENDCOUNTERS;
         }
 
         const bool atomSetChanged = (cnb.flags & (PP_PME_CHARGE | PP_PME_SQRTC6 | PP_PME_SIGMA)) != 0u;
@@ -477,12 +495,11 @@ static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
             /* The box, FE flag and lambda are sent along with the coordinates
              *  */
             copy_mat(cnb.box, box);
-            *lambda_q               = cnb.lambda_q;
-            *lambda_lj              = cnb.lambda_lj;
-            stepWork->computeVirial = ((cnb.flags & PP_PME_ENER_VIR) != 0U);
-            stepWork->computeEnergy = stepWork->computeVirial;
-            *step                   = cnb.step;
-            if (useGpuForPme)
+            *lambda_q                        = cnb.lambda_q;
+            *lambda_lj                       = cnb.lambda_lj;
+            stepWork->computeEnergyAndVirial = ((cnb.flags & PP_PME_ENER_VIR) != 0U);
+            *step                            = cnb.step;
+            if (pmeSimWork.useGpu)
             {
                 // The peer PP rank always sends a box along with the
                 // flag, even when the box has not changed. This box
@@ -505,7 +522,7 @@ static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
             {
                 // With direct-GPU PME-PP communication, coordinates and
                 // forces are always transferred each step, even for empty domains.
-                if (pme_pp->useGpuPmePpCommunication)
+                if (pmeSimWork.useGpuPmePpCommunication)
                 {
                     if (GMX_THREAD_MPI)
                     {
@@ -558,7 +575,7 @@ static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
             // values have been received.
             gmx_pme_reinit_atoms(pme, nat, pme_pp->chargeA, pme_pp->chargeB);
 
-            if (useGpuForPme)
+            if (pmeSimWork.useGpu)
             {
                 // Does global communication and symmetric
                 // reallocation with NVSHMEM. Note that this must come
@@ -566,16 +583,16 @@ static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
                 // reallocation within stateGpu for NVSHMEM happens at
                 // the same time on all ranks.
                 stateGpu->reinit(nat, nat);
-                if (pme_pp->useNvshmem && pme_pp->useGpuHaloExchange)
+                if (pmeSimWork.useNvshmem && pmeSimWork.useGpuHaloExchange)
                 {
                     // Does global communication and symmetric reallocation
                     gpuHaloExchangeNvshmemHelper->reinit();
                 }
                 pme_gpu_set_device_x(pme, stateGpu->getCoordinates());
             }
-            if (pme_pp->useGpuPmePpCommunication)
+            if (pmeSimWork.useGpuPmePpCommunication)
             {
-                GMX_ASSERT((runMode == PmeRunMode::GPU || runMode == PmeRunMode::Mixed),
+                GMX_ASSERT(pmeSimWork.useGpu,
                            "GPU Direct PME-PP communication has been enabled, "
                            "but PME run mode does not support it\n");
 
@@ -602,7 +619,7 @@ static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
     GMX_UNUSED_VALUE(grid_size);
     GMX_UNUSED_VALUE(ewaldcoeff_q);
     GMX_UNUSED_VALUE(ewaldcoeff_lj);
-    GMX_UNUSED_VALUE(useGpuForPme);
+    GMX_UNUSED_VALUE(pmeSimWork);
     GMX_UNUSED_VALUE(stateGpu);
     GMX_UNUSED_VALUE(gpuHaloExchangeNvshmemHelper);
 
@@ -617,32 +634,44 @@ static int gmx_pme_recv_coeffs_coords(struct gmx_pme_t*            pme,
     return status;
 }
 
-/*! \brief Send the PME mesh force, virial and energy to the PP-only ranks. */
-static void gmx_pme_send_force_vir_ener(const gmx_pme_t& pme,
-                                        gmx_pme_pp*      pme_pp,
-                                        const PmeOutput& output,
-                                        float            cycles,
-                                        const bool       computeVirial)
+static void gmx_pme_send_cyclecounters(gmx_pme_pp* pme_pp)
 {
 #if GMX_MPI
-    gmx_pme_comm_vir_ene_t cve;
-    int                    messages, ind_start, ind_end;
-    cve.cycles = cycles;
+    pme_pp->pendingCycleCounters_.stop_cond = gmx_get_stop_condition();
+    MPI_Send(&pme_pp->pendingCycleCounters_,
+             sizeof(pme_pp->pendingCycleCounters_),
+             MPI_BYTE,
+             pme_pp->peerRankId,
+             eCommType_CYCLECOUNTERS,
+             pme_pp->mpi_comm_mysim);
+    pme_pp->pendingCycleCounters_ = {};
+#else
+    GMX_UNUSED_VALUE(pme_pp);
+#endif
+}
 
-    if (pme_pp->useGpuPmePpCommunication)
+/*! \brief Send the PME mesh force, virial and energy to the PP-only ranks. */
+static void gmx_pme_send_force_vir_ener(const gmx_pme_t&                      pme,
+                                        gmx_pme_pp*                           pme_pp,
+                                        const gmx::PmeOnlySimulationWorkload& simulationWork,
+                                        const PmeOutput&                      output,
+                                        const bool computeEnergyAndVirial)
+{
+#if GMX_MPI
+    if (simulationWork.useGpuPmePpCommunication)
     {
         GMX_ASSERT((pme_pp->pmeForceSenderGpu != nullptr),
                    "The use of GPU direct communication for PME-PP is enabled, "
                    "but the PME GPU force receiver object does not exist");
     }
 
-    messages = 0;
-    ind_end  = 0;
+    int messages = 0;
+    int ind_end  = 0;
 
     // Now the evaluated forces have to be transferred to the PP
     // ranks. With all kinds of PME-PP communication, forces are
     // always returned each step, even to empty domains.
-    if (pme_pp->useGpuPmePpCommunication && GMX_THREAD_MPI)
+    if (simulationWork.useGpuPmePpCommunication && GMX_THREAD_MPI)
     {
         int numPpRanks = static_cast<int>(pme_pp->ppRanks.size());
 #    pragma omp parallel for num_threads(std::min(numPpRanks, pme.nthread)) schedule(static)
@@ -655,17 +684,13 @@ static void gmx_pme_send_force_vir_ener(const gmx_pme_t& pme,
     }
     else
     {
-        if (!computeVirial && pme_pp->useNvshmem)
-        {
-            pme_pp->pmeForceSenderGpu->waitForEvents();
-        }
-        else
+        if (!usingNvshmemForceComm(simulationWork, computeEnergyAndVirial))
         {
             for (const auto& receiver : pme_pp->ppRanks)
             {
-                ind_start = ind_end;
-                ind_end   = ind_start + receiver.numAtoms;
-                if (pme_pp->useGpuPmePpCommunication)
+                int ind_start = ind_end;
+                ind_end       = ind_start + receiver.numAtoms;
+                if (simulationWork.useGpuPmePpCommunication)
                 {
                     pme_pp->pmeForceSenderGpu->sendFToPpGpuAwareMpi(pme_gpu_get_device_f(&pme),
                                                                     ind_start,
@@ -690,29 +715,29 @@ static void gmx_pme_send_force_vir_ener(const gmx_pme_t& pme,
         }
     }
 
-    /* send virial and energy to our last PP node */
-    copy_mat(output.coulombVirial_, cve.vir_q);
-    copy_mat(output.lennardJonesVirial_, cve.vir_lj);
-    cve.energy_q     = output.coulombEnergy_;
-    cve.energy_lj    = output.lennardJonesEnergy_;
-    cve.dvdlambda_q  = output.coulombDvdl_;
-    cve.dvdlambda_lj = output.lennardJonesDvdl_;
-    /* check for the signals to send back to a PP node */
-    cve.stop_cond = gmx_get_stop_condition();
-
-    cve.cycles = cycles;
-
-    if (debug)
+    gmx_pme_comm_vir_ene_t cve;
+    if (computeEnergyAndVirial)
     {
-        fprintf(debug, "PME rank sending to PP rank %d: virial and energy\n", pme_pp->peerRankId);
+        /* send virial and energy to our last PP node */
+        copy_mat(output.coulombVirial_, cve.vir_q);
+        copy_mat(output.lennardJonesVirial_, cve.vir_lj);
+        cve.energy_q     = output.coulombEnergy_;
+        cve.energy_lj    = output.lennardJonesEnergy_;
+        cve.dvdlambda_q  = output.coulombDvdl_;
+        cve.dvdlambda_lj = output.lennardJonesDvdl_;
+
+        if (debug)
+        {
+            fprintf(debug, "PME rank sending to PP rank %d: virial and energy\n", pme_pp->peerRankId);
+        }
+        MPI_Isend(&cve,
+                  sizeof(cve),
+                  MPI_BYTE,
+                  pme_pp->peerRankId,
+                  eCommType_ENERGY_VIRIAL_DVDL,
+                  pme_pp->mpi_comm_mysim,
+                  &pme_pp->req[messages++]);
     }
-    MPI_Isend(&cve,
-              sizeof(cve),
-              MPI_BYTE,
-              pme_pp->peerRankId,
-              eCommType_ENERGY_VIRIAL_DVDL,
-              pme_pp->mpi_comm_mysim,
-              &pme_pp->req[messages++]);
 
     /* Wait for the forces to arrive */
     MPI_Waitall(messages, pme_pp->req.data(), pme_pp->stat.data());
@@ -720,9 +745,9 @@ static void gmx_pme_send_force_vir_ener(const gmx_pme_t& pme,
     GMX_RELEASE_ASSERT(false, "Invalid call to gmx_pme_send_force_vir_ener");
     GMX_UNUSED_VALUE(pme);
     GMX_UNUSED_VALUE(pme_pp);
+    GMX_UNUSED_VALUE(simulationWork);
     GMX_UNUSED_VALUE(output);
-    GMX_UNUSED_VALUE(cycles);
-    GMX_UNUSED_VALUE(computeVirial);
+    GMX_UNUSED_VALUE(computeEnergyAndVirial);
 #endif
 }
 
@@ -732,10 +757,7 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
                                                    gmx_wallcycle*             wcycle,
                                                    gmx_walltime_accounting_t  walltime_accounting,
                                                    t_inputrec*                ir,
-                                                   PmeRunMode                 runMode,
-                                                   bool useGpuPmePpCommunication,
-                                                   bool useNvshmem,
-                                                   bool useGpuHaloExchange,
+                                                   const gmx::PmeOnlySimulationWorkload& simulationWork,
                                                    const gmx::DeviceStreamManager* deviceStreamManager)
 {
     int     ret;
@@ -754,26 +776,23 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
     // Add an empty spot for the current PME data
     pmedataList.emplace_back();
 
-    auto pme_pp = std::make_unique<gmx_pme_pp>(dd.mpiCommMySim().comm(), makePpRanks(dd));
-    pme_pp->useGpuPmePpCommunication = useGpuPmePpCommunication;
-    pme_pp->useNvshmem               = useNvshmem;
-    pme_pp->useGpuHaloExchange       = useGpuHaloExchange;
-
-    std::unique_ptr<gmx::StatePropagatorDataGpu>       stateGpu;
-    std::unique_ptr<gmx::GpuHaloExchangeNvshmemHelper> gpuHaloExchangeNvshmemHelper;
-    // TODO the variable below should be queried from the task assignment info
-    const bool useGpuForPme = (runMode == PmeRunMode::GPU) || (runMode == PmeRunMode::Mixed);
-    if (useGpuForPme)
+    if (simulationWork.useGpu)
     {
         GMX_RELEASE_ASSERT(
                 deviceStreamManager != nullptr,
                 "Device stream manager can not be nullptr when using GPU in PME-only rank.");
         GMX_RELEASE_ASSERT(deviceStreamManager->streamIsValid(gmx::DeviceStreamType::Pme),
                            "Device stream can not be nullptr when using GPU in PME-only rank");
-        changePinningPolicy(&pme_pp->chargeA, pme_get_pinning_policy());
-        changePinningPolicy(&pme_pp->chargeB, pme_get_pinning_policy());
-        changePinningPolicy(&pme_pp->x, pme_get_pinning_policy());
-        if (pme_pp->useGpuPmePpCommunication)
+    }
+    auto pme_pp = std::make_unique<gmx_pme_pp>(
+            dd.mpiCommMySim().comm(), makePpRanks(dd), simulationWork.useGpu, deviceStreamManager);
+
+    std::unique_ptr<gmx::StatePropagatorDataGpu>       stateGpu;
+    std::unique_ptr<gmx::GpuHaloExchangeNvshmemHelper> gpuHaloExchangeNvshmemHelper;
+
+    if (simulationWork.useGpu)
+    {
+        if (simulationWork.useGpuPmePpCommunication)
         {
             pme_pp->pmeCoordinateReceiverGpu = std::make_unique<gmx::PmeCoordinateReceiverGpu>(
                     pme_pp->mpi_comm_mysim, deviceStreamManager->context(), pme_pp->ppRanks);
@@ -782,22 +801,24 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
                     pme_pp->mpi_comm_mysim,
                     deviceStreamManager->context(),
                     pme_pp->ppRanks);
-            if (pme_pp->useNvshmem)
+            if (simulationWork.useNvshmem)
             {
-                if (pme_pp->useGpuHaloExchange && gpuHaloExchangeNvshmemHelper == nullptr)
+                if (simulationWork.useGpuHaloExchange && gpuHaloExchangeNvshmemHelper == nullptr)
                 {
                     gpuHaloExchangeNvshmemHelper = std::make_unique<gmx::GpuHaloExchangeNvshmemHelper>(
                             dd,
                             deviceStreamManager->context(),
                             deviceStreamManager->stream(gmx::DeviceStreamType::Pme),
+                            deviceStreamManager->stream(gmx::DeviceStreamType::HaloExchange),
                             std::nullopt,
                             pme_pp->peerRankId,
-                            wcycle,
                             pme_pp->mpi_comm_mysim,
                             pme_pp->mpi_comm_mysim);
+                    gpuHaloExchangeNvshmemHelper->addWallcycleCounters(wcycle);
                 }
-                pme_gpu_use_nvshmem(pme->gpu.get(), useNvshmem);
-                pme->gpu->nvshmemParams->ppRanksRef = pme_pp->ppRanks;
+                pme_gpu_use_nvshmem(pme->gpu.get(), simulationWork.useNvshmem);
+                pme->gpu->nvshmemParams->ppRanksRef   = pme_pp->ppRanks;
+                pme->gpu->nvshmemParams->mpiCommMySim = pme_pp->mpi_comm_mysim;
             }
         }
         // TODO: Special PME-only constructor is used here. There is no mechanism to prevent from using the other constructor here.
@@ -807,7 +828,7 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
                 deviceStreamManager->context(),
                 GpuApiCallBehavior::Async,
                 pme_gpu_get_block_size(*pme),
-                useNvshmem,
+                simulationWork.useNvshmem,
                 dd.mpiCommMySim(),
                 wcycle);
     }
@@ -815,8 +836,8 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
     clear_nrnb(mynrnb);
 
     // the current PME data structure, may change due to PME tuning
-    bool              haveStartedTiming = false;
-    gmx::StepWorkload stepWork;
+    bool                 haveStartedTiming = false;
+    gmx::PmeStepWorkload stepWork;
     stepWork.computeForces = true;
     do /****** this is a quasi-loop over time steps! */
     {
@@ -839,10 +860,9 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
                                              &newGridSize,
                                              &ewaldcoeff_q,
                                              &ewaldcoeff_lj,
-                                             useGpuForPme,
+                                             simulationWork,
                                              stateGpu.get(),
-                                             gpuHaloExchangeNvshmemHelper.get(),
-                                             runMode);
+                                             gpuHaloExchangeNvshmemHelper.get());
 
             if (ret == pmerecvqxSWITCHGRID)
             {
@@ -854,9 +874,19 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
             if (ret == pmerecvqxRESETCOUNTERS)
             {
                 /* Reset the cycle and flop counters */
-                reset_pmeonly_counters(wcycle, walltime_accounting, mynrnb, step, useGpuForPme);
+                reset_pmeonly_counters(wcycle, walltime_accounting, mynrnb, step, simulationWork.useGpu);
+                pme_pp->pendingCycleCounters_ = {};
             }
-        } while (ret == pmerecvqxSWITCHGRID || ret == pmerecvqxRESETCOUNTERS);
+
+            if (ret == pmerecvqxSENDCOUNTERS)
+            {
+                /* The PP rank requests cycle counters every nstlist steps, before DD/NS work.
+                 * When PME-only logic is refactored to be schedule-aware rather than
+                 * signal-driven, this send should occur every nstlist steps as part of
+                 * the explicit schedule. */
+                gmx_pme_send_cyclecounters(pme_pp.get());
+            }
+        } while (ret == pmerecvqxSWITCHGRID || ret == pmerecvqxRESETCOUNTERS || ret == pmerecvqxSENDCOUNTERS);
 
         if (ret == pmerecvqxFINISH)
         {
@@ -873,16 +903,17 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
             walltime_accounting_start_time(walltime_accounting);
         }
 
-        wallcycle_start(wcycle, useGpuForPme ? WallCycleCounter::PmeGpuMesh : WallCycleCounter::PmeMesh);
+        wallcycle_start(wcycle,
+                        simulationWork.useGpu ? WallCycleCounter::PmeGpuMesh : WallCycleCounter::PmeMesh);
 
         // TODO Make a struct of array refs onto these per-atom fields
         // of pme_pp (maybe box, energy and virial, too; and likewise
         // from mdatoms for the other call to gmx_pme_do), so we have
         // fewer lines of code and less parameter passing.
         PmeOutput output = { {}, false, 0, { { 0 } }, 0, 0, 0, { { 0 } } };
-        if (useGpuForPme)
+        if (simulationWork.useGpu)
         {
-            if (!pme_pp->useGpuPmePpCommunication)
+            if (!simulationWork.useGpuPmePpCommunication)
             {
                 /* In PME-only mode, everything is on the same stream, so we do not consume the
                  * event marking the completion of the coordinate transfer */
@@ -899,13 +930,16 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
                                   xReadyOnDevice,
                                   wcycle,
                                   lambda_q,
-                                  pme_pp->useGpuPmePpCommunication,
+                                  simulationWork.useGpuPmePpCommunication,
                                   pme_pp->pmeCoordinateReceiverGpu.get(),
                                   pme_pp->useMdGpuGraph);
             pme_gpu_launch_complex_transforms(pme.get(), wcycle, stepWork);
-            pme_gpu_launch_gather(pme.get(), wcycle, lambda_q, stepWork.computeVirial);
-            output = pme_gpu_wait_finish_task(
-                    pme.get(), stepWork.computeEnergy || stepWork.computeVirial, lambda_q, wcycle);
+            // With NVSHMEM, we use special signals to mark send completion; no need to mark GPU event
+            const bool markForceReadyEvent =
+                    !usingNvshmemForceComm(simulationWork, stepWork.computeEnergyAndVirial);
+            pme_gpu_launch_gather(
+                    pme.get(), wcycle, lambda_q, stepWork.computeEnergyAndVirial, markForceReadyEvent);
+            output = pme_gpu_wait_finish_task(pme.get(), stepWork.computeEnergyAndVirial, lambda_q, wcycle);
         }
         else
         {
@@ -939,20 +973,28 @@ std::optional<gmx_wallclock_gpu_pme_t> gmx_pmeonly(std::unique_ptr<gmx_pme_t> pm
         }
 
         cycles = wallcycle_stop(
-                wcycle, useGpuForPme ? WallCycleCounter::PmeGpuMesh : WallCycleCounter::PmeMesh);
+                wcycle, simulationWork.useGpu ? WallCycleCounter::PmeGpuMesh : WallCycleCounter::PmeMesh);
 
+        // Accumulate cycle counters to return in response to pmerecvqxSENDCOUNTERS
+        pme_pp->pendingCycleCounters_.cycles += cycles;
+        if (cycles > pme_pp->pendingCycleCounters_.cyclesMax)
+        {
+            pme_pp->pendingCycleCounters_.cyclesMax = cycles;
+        }
+        pme_pp->pendingCycleCounters_.numSteps++;
 
-        if (useGpuForPme && pme_pp->useMdGpuGraph)
+        if (simulationWork.useGpu && pme_pp->useMdGpuGraph)
         {
             // Reinit before PME->PP force send so it is included in graph
             // which implicitly joins back to PP task as part of force transfer
             pme_gpu_finish_step(pme->gpu.get(), pme_pp->useMdGpuGraph, wcycle);
         }
 
-        gmx_pme_send_force_vir_ener(*pme, pme_pp.get(), output, cycles, stepWork.computeVirial);
+        gmx_pme_send_force_vir_ener(
+                *pme, pme_pp.get(), simulationWork, output, stepWork.computeEnergyAndVirial);
 
         // Reinit after PME->PP force send so it is removed from the critical path
-        if (useGpuForPme && !pme_pp->useMdGpuGraph)
+        if (simulationWork.useGpu && !pme_pp->useMdGpuGraph)
         {
             pme_gpu_finish_step(pme->gpu.get(), pme_pp->useMdGpuGraph, wcycle);
         }
