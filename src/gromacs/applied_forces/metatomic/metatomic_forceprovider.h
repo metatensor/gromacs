@@ -35,7 +35,7 @@
  * \brief
  * Declares the Metatomic Force Provider class
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Rohit Goswami <rgoswami@ieee.org>
  * \ingroup module_applied_forces
  */
 

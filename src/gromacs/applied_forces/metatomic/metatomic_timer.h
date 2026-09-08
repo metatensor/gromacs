@@ -38,7 +38,7 @@
  * RAII timer that writes nested timing information to per-rank files
  * (metatomic_timer_rank_N.log).  Enable with GMX_METATOMIC_TIMER=1.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Rohit Goswami <rgoswami@ieee.org>
  * \ingroup module_applied_forces
  */
 

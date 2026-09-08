@@ -36,7 +36,7 @@
  * Stub implementation of the Metatomic Force Provider class.
  * Compiled in case Libtorch/Metatomic backend is not linked.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Rohit Goswami <rgoswami@ieee.org>
  * \ingroup module_applied_forces
  */
 

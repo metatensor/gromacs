@@ -35,7 +35,7 @@
  * \brief
  * Implements the options for NNPot MDModule class.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Rohit Goswami <rgoswami@ieee.org>
  * \ingroup module_applied_forces
  */
 // TODO(rg): Figure out how to insert the model into the .tpr file

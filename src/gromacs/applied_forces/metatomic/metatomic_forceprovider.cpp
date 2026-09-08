@@ -49,7 +49,7 @@
  *  - Ghost deduplication: periodic ghost images share the same model index
  *    but all GROMACS local indices are mapped via gmxLocalToMtaIdx_.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Rohit Goswami <rgoswami@ieee.org>
  * \ingroup module_applied_forces
  */
 #include "gmxpre.h"

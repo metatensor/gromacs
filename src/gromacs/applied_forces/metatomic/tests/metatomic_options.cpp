@@ -36,7 +36,7 @@
  * \brief
  * Tests for functionality of the MetatomicOptions
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Rohit Goswami <rgoswami@ieee.org>
  * \ingroup module_applied_forces
  */
 

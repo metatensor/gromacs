@@ -36,7 +36,7 @@
  * Declares the options for Metatomic MDModule class,
  * set during pre-processing in the .mdp-file.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Rohit Goswami <rgoswami@ieee.org>
  * \ingroup module_applied_forces
  */
 #pragma once

@@ -35,7 +35,7 @@
  * \brief
  * Declares factory structure for Metatomic MDModule class
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Rohit Goswami <rgoswami@ieee.org>
  * \ingroup module_applied_forces
  */
 #pragma once
