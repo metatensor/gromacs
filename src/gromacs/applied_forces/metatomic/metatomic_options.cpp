@@ -326,33 +326,45 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
         // so we know which embedded atoms are "real ML" vs "boundary MM".
         std::set<int> origMtaSet(params_.mtaIndices_.begin(), params_.mtaIndices_.end());
 
-        // Scan bonds to find direct MM neighbors of ML atoms
+        // Scan bonds to find direct MM neighbors of ML atoms.
+        //
+        // This runs before splitEmbeddedBlocks, so a block may still hold many
+        // molecules of the same type (one block of 34 lipids, say). Every
+        // molecule in the block therefore has to be visited with its own atom
+        // offset: using only the block's globalAtomStart finds the boundary of
+        // the first molecule and silently misses all the others.
         std::set<int> boundaryMM;
         for (size_t mb = 0; mb < top->molblock.size(); ++mb)
         {
-            const auto& moltype = top->moltype[top->molblock[mb].type];
-            int start = top->moleculeBlockIndices[mb].globalAtomStart;
+            const auto& moltype     = top->moltype[top->molblock[mb].type];
+            const int   blockStart  = top->moleculeBlockIndices[mb].globalAtomStart;
+            const int   numAtomsMol = moltype.atoms.nr;
 
-            for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
+            for (int mol = 0; mol < top->molblock[mb].nmol; ++mol)
             {
-                if (!(interaction_function[ftype].flags & IF_CHEMBOND) || NRAL(ftype) != 2
-                    || moltype.ilist[ftype].empty())
+                const int start = blockStart + mol * numAtomsMol;
+
+                for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
                 {
-                    continue;
-                }
-                for (int j = 0; j < moltype.ilist[ftype].size(); j += 3)
-                {
-                    int a1 = moltype.ilist[ftype].iatoms[j + 1] + start;
-                    int a2 = moltype.ilist[ftype].iatoms[j + 2] + start;
-                    bool a1_ml = origMtaSet.count(a1) > 0;
-                    bool a2_ml = origMtaSet.count(a2) > 0;
-                    if (a1_ml && !a2_ml)
+                    if (!(interaction_function[ftype].flags & IF_CHEMBOND) || NRAL(ftype) != 2
+                        || moltype.ilist[ftype].empty())
                     {
-                        addLinkFrontierAtom(&boundaryMM, &params_.linkFrontier_, a1, a2);
+                        continue;
                     }
-                    else if (a2_ml && !a1_ml)
+                    for (int j = 0; j < moltype.ilist[ftype].size(); j += 3)
                     {
-                        addLinkFrontierAtom(&boundaryMM, &params_.linkFrontier_, a2, a1);
+                        int  a1    = moltype.ilist[ftype].iatoms[j + 1] + start;
+                        int  a2    = moltype.ilist[ftype].iatoms[j + 2] + start;
+                        bool a1_ml = origMtaSet.count(a1) > 0;
+                        bool a2_ml = origMtaSet.count(a2) > 0;
+                        if (a1_ml && !a2_ml)
+                        {
+                            addLinkFrontierAtom(&boundaryMM, &params_.linkFrontier_, a1, a2);
+                        }
+                        else if (a2_ml && !a1_ml)
+                        {
+                            addLinkFrontierAtom(&boundaryMM, &params_.linkFrontier_, a2, a1);
+                        }
                     }
                 }
             }
