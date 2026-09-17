@@ -45,6 +45,7 @@
 #include "gromacs/fileio/confio.h"
 #include "gromacs/fileio/filetypes.h"
 #include "gromacs/fileio/oenv.h"
+#include "gromacs/fileio/timecontrol.h"
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
@@ -707,7 +708,7 @@ static void dielectric(FILE*                   fmj,
                     yfit[i - ii] = std::log(rtmp);
                 }
 
-                lsq_y_ax_b(ie - ii, xfit, yfit, &sigma, &malt, &err, &rest);
+                gmx::lsq_y_ax_b(ie - ii, xfit, yfit, &sigma, &malt, &err, &rest);
 
                 malt = std::exp(malt);
 
@@ -767,7 +768,7 @@ static void dielectric(FILE*                   fmj,
             yfit[i - bi] = dsp2[i];
         }
 
-        lsq_y_ax_b(ei - bi, xfit, yfit, &sigma, &malt, &err, &rest);
+        gmx::lsq_y_ax_b(ei - bi, xfit, yfit, &sigma, &malt, &err, &rest);
 
         sigma *= 1e12;
         dk_d = calceps(prefactor, md2, 0.5 * malt / prefactorav, corint, eps_rf, TRUE);
@@ -859,6 +860,7 @@ int gmx_current(int argc, char* argv[])
     };
 
     gmx_output_env_t* oenv;
+    gmx::TimeControl  timeControl;
     t_topology        top;
     char**            grpname = nullptr;
     const char*       indexfn;
@@ -950,7 +952,7 @@ int gmx_current(int argc, char* argv[])
 
     /* At first the arguments will be parsed and the system information processed */
     if (!parse_common_args(
-                &argc, argv, PCA_CAN_TIME | PCA_CAN_VIEW, NFILE, fnm, asize(pa), pa, asize(desc), desc, 0, nullptr, &oenv))
+                &argc, argv, PCA_CAN_TIME | PCA_CAN_VIEW, NFILE, fnm, asize(pa), pa, asize(desc), desc, 0, nullptr, &oenv, &timeControl))
     {
         return 0;
     }
@@ -967,7 +969,7 @@ int gmx_current(int argc, char* argv[])
 
     flags = flags | TRX_READ_X | TRX_READ_V;
 
-    read_first_frame(oenv, &status, ftp2fn(efTRX, NFILE, fnm), &fr, flags);
+    read_first_frame(oenv, &status, ftp2fn(efTRX, NFILE, fnm), &fr, &timeControl, flags);
 
     snew(mass2, top.atoms.nr);
     snew(qmol, top.atoms.nr);

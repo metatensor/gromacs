@@ -100,7 +100,9 @@
 #include "moduletest.h"
 #include "simulatorcomparison.h"
 
-namespace gmx::test
+namespace gmx
+{
+namespace test
 {
 namespace
 {
@@ -294,6 +296,62 @@ public:
         [[nodiscard]] std::tuple<RVec, RVec> calculateVSite(ArrayRef<const RVec> positions,
                                                             ArrayRef<const RVec> velocities) const;
     };
+
+    /*! \brief Run a simulation and check its virtual sites against the reference implementation
+     *
+     * Prepares the mdp input for the given coupling settings, runs grompp and mdrun
+     * (passing \p mdrunOptions on to mdrun), and compares the virtual sites in the
+     * resulting trajectory to the reference implementation.
+     */
+    void runTest(const std::string& integrator, const std::string& tcoupling, const std::string& pcoupling)
+    {
+        const real  timeStep       = 0.001;
+        const auto& simulationName = "vsite_test";
+
+        // Prepare mdp input
+        auto mdpFieldValues = prepareMdpFieldValues(simulationName, integrator, tcoupling, pcoupling);
+        mdpFieldValues["nsteps"]      = "8";
+        mdpFieldValues["nstxout"]     = "4";
+        mdpFieldValues["nstvout"]     = "4";
+        mdpFieldValues["dt"]          = toString(timeStep);
+        mdpFieldValues["constraints"] = "none";
+        if (tcoupling != "no" || integrator == "sd" || integrator == "bd")
+        {
+            mdpFieldValues["tc-grps"] = "system";
+            mdpFieldValues["ref-t"]   = "298";
+            mdpFieldValues["tau-t"]   = "1";
+        }
+        if (pcoupling == "parrinello-rahman")
+        {
+            mdpFieldValues["tau-p"] = "2";
+        }
+
+        if (pcoupling == "c-rescale" && tcoupling == "no" && integrator != "sd"
+            && integrator != "bd")
+        {
+            mdpFieldValues["ensemble-temperature-setting"] = "constant";
+            mdpFieldValues["ensemble-temperature"]         = "298";
+        }
+
+        // Run grompp
+        runner_.useTopGroAndNdxFromDatabase(simulationName);
+        runner_.useStringAsMdpFile(prepareMdpFileContents(mdpFieldValues));
+        runGrompp(&runner_);
+        // Run mdrun
+        runMdrun(&runner_);
+
+        TopologyInformation topologyInformation;
+        topologyInformation.fillFromInputFile(runner_.tprFileName_);
+        const auto virtualSites = vSiteList(topologyInformation);
+
+        // This is in line with other tests (e.g. exact continuation, rerun), which
+        // never reach the same reproducibility for BD as for the other integrators.
+        const auto tolerance =
+                (integrator == "bd") ? relativeToleranceAsUlp(1.0, 100) : defaultRealTolerance();
+
+        checkVirtualSitesAgainstReferenceImplementation(
+                runner_.fullPrecisionTrajectoryFileName_, virtualSites, tolerance);
+    }
 
     /*! \brief Helper function returning a list of virtual sites from the topology
      *
@@ -599,77 +657,32 @@ VirtualSiteTest::VirtualSite::calculate(ArrayRef<const RVec> constructingPositio
 
 TEST(VirtualSiteVelocityTest, ReferenceIsCorrect)
 {
-    // Test is too sensitive to run in single precision
-    if constexpr (GMX_DOUBLE)
+    if (!GMX_DOUBLE)
     {
-        VirtualSiteTest::checkReferenceImplementation();
+        GTEST_SKIP() << "Test is too sensitive to run in single precision";
     }
+    VirtualSiteTest::checkReferenceImplementation();
 }
 
 TEST_P(VirtualSiteTest, WithinToleranceOfReference)
 {
-    const auto& params         = GetParam();
-    const auto& integrator     = std::get<0>(params);
-    const auto& tcoupling      = std::get<1>(params);
-    const auto& pcoupling      = std::get<2>(params);
-    const real  timeStep       = 0.001;
-    const auto& simulationName = "vsite_test";
+    const auto& params     = GetParam();
+    const auto& integrator = std::get<0>(params);
+    const auto& tcoupling  = std::get<1>(params);
+    const auto& pcoupling  = std::get<2>(params);
 
     if (integrator == "md-vv" && pcoupling == "parrinello-rahman")
     {
-        // Parrinello-Rahman is not implemented in md-vv
-        return;
+        GTEST_SKIP() << "Parrinello-Rahman is not implemented in md-vv";
     }
 
     if ((integrator == "sd" || integrator == "bd") && tcoupling != "no")
     {
-        // bd and sd handle temperature coupling implicitly and would set tcoupling to "no" anyway
-        return;
+        GTEST_SKIP() << "bd and sd handle temperature coupling implicitly and would set tcoupling "
+                        "to \"no\" anyway";
     }
 
-    // Prepare mdp input
-    auto mdpFieldValues = prepareMdpFieldValues(simulationName, integrator, tcoupling, pcoupling);
-    mdpFieldValues["nsteps"]      = "8";
-    mdpFieldValues["nstxout"]     = "4";
-    mdpFieldValues["nstvout"]     = "4";
-    mdpFieldValues["dt"]          = toString(timeStep);
-    mdpFieldValues["constraints"] = "none";
-    if (tcoupling != "no" || integrator == "sd" || integrator == "bd")
-    {
-        mdpFieldValues["tc-grps"] = "system";
-        mdpFieldValues["ref-t"]   = "298";
-        mdpFieldValues["tau-t"]   = "1";
-    }
-    if (pcoupling == "parrinello-rahman")
-    {
-        mdpFieldValues["tau-p"] = "2";
-    }
-
-    if (pcoupling == "c-rescale" && tcoupling == "no" && integrator != "sd" && integrator != "bd")
-    {
-        mdpFieldValues["ensemble-temperature-setting"] = "constant";
-        mdpFieldValues["ensemble-temperature"]         = "298";
-    }
-
-
-    // Run grompp
-    runner_.useTopGroAndNdxFromDatabase(simulationName);
-    runner_.useStringAsMdpFile(prepareMdpFileContents(mdpFieldValues));
-    runGrompp(&runner_);
-    // Run mdrun
-    runMdrun(&runner_);
-
-    TopologyInformation topologyInformation;
-    topologyInformation.fillFromInputFile(runner_.tprFileName_);
-    const auto virtualSites = vSiteList(topologyInformation);
-
-    // This is in line with other tests (e.g. exact continuation, rerun), which
-    // never reach the same reproducibility for BD as for the other integrators.
-    const auto tolerance =
-            (integrator == "bd") ? relativeToleranceAsUlp(1.0, 100) : defaultRealTolerance();
-
-    checkVirtualSitesAgainstReferenceImplementation(
-            runner_.fullPrecisionTrajectoryFileName_, virtualSites, tolerance);
+    runTest(integrator, tcoupling, pcoupling);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -680,4 +693,5 @@ INSTANTIATE_TEST_SUITE_P(
                            ::testing::Values("no", "c-rescale", "parrinello-rahman")));
 
 } // namespace
-} // namespace gmx::test
+} // namespace test
+} // namespace gmx

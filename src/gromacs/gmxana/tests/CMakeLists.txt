@@ -36,8 +36,11 @@ gmx_add_gtest_executable(${exename}
     CPP_SOURCE_FILES
         entropy.cpp
         gmxanatestbase.cpp
+        gmx_angle.cpp
         gmx_chi.cpp
+        gmx_make_edi.cpp
         gmx_mindist.cpp
+        gmx_rama.cpp
         gmx_rms.cpp
         gmx_rmsdist.cpp
         gmx_rmsf.cpp

@@ -239,7 +239,7 @@ void MDModules::buildMdpOutput(KeyValueTreeObjectBuilder* builder)
 void MDModules::assignOptionsToModules(const KeyValueTreeObject&  params,
                                        IKeyValueTreeErrorHandler* errorHandler,
                                        t_inputrec*                inputrec,
-                                       gmx_inputrec_strings*      preprocessingStrings)
+                                       inputrec_strings*          preprocessingStrings)
 {
     // Configure module targets if inputrec provided
     if (inputrec)
@@ -247,14 +247,14 @@ void MDModules::assignOptionsToModules(const KeyValueTreeObject&  params,
         // Route OutputControl sub-object to output-control module
         IMDModule* outputControlModule =
                 impl_->modules_.at(std::string(OutputControlModuleInfo::sc_name)).get();
-        gmx::setOutputControlTarget(outputControlModule, &inputrec->outputControl);
+        setOutputControlTarget(outputControlModule, &inputrec->outputControl);
 
         // Set preprocessing strings if provided
         // For grompp, both inputrec and preprocessingStrings must be valid
         // For mdrun/tools reading TPR, only inputrec is needed
         if (preprocessingStrings)
         {
-            gmx::setOutputControlPreprocessingStrings(outputControlModule, preprocessingStrings);
+            setOutputControlPreprocessingStrings(outputControlModule, preprocessingStrings);
         }
 
         // Future: route other sub-objects here
@@ -267,9 +267,7 @@ void MDModules::assignOptionsToModules(const KeyValueTreeObject&  params,
     assignOptionsFromKeyValueTree(&moduleOptions, params, errorHandler);
 }
 
-void MDModules::adjustInputrecBasedOnModules(t_inputrec*           ir,
-                                             bool                  routeSubObjects,
-                                             gmx_inputrec_strings* preprocessingStrings)
+void MDModules::adjustInputrecBasedOnModules(t_inputrec* ir, bool routeSubObjects, inputrec_strings* preprocessingStrings)
 {
     GMX_RELEASE_ASSERT(ir, "adjustInputrecBasedOnModules() called with null inputrec");
     GMX_RELEASE_ASSERT(ir->params, "adjustInputrecBasedOnModules() called but ir->params is null");
@@ -280,12 +278,12 @@ void MDModules::adjustInputrecBasedOnModules(t_inputrec*           ir,
         // Route OutputControl sub-object to output-control module
         IMDModule* outputControlModule =
                 impl_->modules_.at(std::string(OutputControlModuleInfo::sc_name)).get();
-        gmx::setOutputControlTarget(outputControlModule, &ir->outputControl);
+        setOutputControlTarget(outputControlModule, &ir->outputControl);
 
         // Set preprocessing strings if provided so preprocessing-only options are registered
         if (preprocessingStrings)
         {
-            gmx::setOutputControlPreprocessingStrings(outputControlModule, preprocessingStrings);
+            setOutputControlPreprocessingStrings(outputControlModule, preprocessingStrings);
         }
 
         // Future: route other sub-objects here

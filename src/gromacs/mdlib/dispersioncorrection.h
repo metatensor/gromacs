@@ -44,7 +44,6 @@
 
 struct gmx_mtop_t;
 struct interaction_const_t;
-struct t_forcetable;
 struct t_inputrec;
 enum class DispersionCorrectionType : int;
 enum class VanDerWaalsType : int;
@@ -52,6 +51,7 @@ enum class FreeEnergyPerturbationType : int;
 namespace gmx
 {
 class MDLogger;
+struct t_forcetable;
 } // namespace gmx
 
 class DispersionCorrection
@@ -129,9 +129,9 @@ private:
         int numAtomsForDensity_;
         //! The number of interactions to correct for, usually num. atoms/2
         real numCorrections_;
-        //! Average C6 coefficient for for topology A/B ([0]/[1])
+        //! Average C6 coefficient for topology A/B ([0]/[1])
         std::array<real, 2> avcsix_;
-        //! Average C12 coefficient for for topology A/B ([0]/[1])
+        //! Average C12 coefficient for topology A/B ([0]/[1])
         std::array<real, 2> avctwelve_;
     };
 
@@ -143,7 +143,7 @@ private:
         ~InteractionParams();
 
         //! Table used for correcting modified LJ interactions
-        std::unique_ptr<t_forcetable> dispersionCorrectionTable_;
+        std::unique_ptr<gmx::t_forcetable> dispersionCorrectionTable_;
 
         //! Dispersion energy shift constant
         real enershiftsix_ = 0;

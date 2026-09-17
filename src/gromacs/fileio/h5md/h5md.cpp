@@ -588,25 +588,14 @@ bool H5md::readNextFrame(t_trxframe* frame, const std::string& selectionName)
 #if GMX_USE_HDF5
     bool frameWasRead = false;
 
-    // TODO: We should check this in the file (and use appropriate conversion when reading)
-    //
-    // The current data set opening framework does not support opening double-precision `real`
-    // data as single-precision (this results in a throw during setup). So for now bDouble
-    // always matches the build precision.
-    //
-    // Since reading trajectory data from any-precision builds is wanted we need to expand
-    // this and then set bDouble from the actual precision stored in the data sets.
-    //
-    // See issue #5474
-#    if GMX_DOUBLE
-    frame->bDouble = true;
-#    else
-    frame->bDouble = false;
-#    endif
     frame->bLambda = false;
     // TODO: This should be read from the file
     frame->bPrec = false;
     frame->prec  = 0.0;
+    // TODO: Due to current limitations, time is currently always read from double
+    // precision data sets, but after this is addressed we need to read this from
+    // the open file. See #5474.
+    frame->timeIsDouble = true;
 
     TrajectoryReadCursor& readCursor = particleBlocks_.at(selectionName);
     if (readCursor.nextFrameContents(
@@ -633,14 +622,8 @@ bool H5md::readNextFrame(t_trxframe* frame, const std::string& selectionName)
             forces = arrayRefFromArray(reinterpret_cast<RVec*>(frame->f), frame->natoms);
         }
 
-        double timeAsDouble;
         frameWasRead = readCursor.readNextFrame(
-                positions, velocities, forces, frame->box, &frame->step, &timeAsDouble);
-
-        if (frame->bTime)
-        {
-            frame->time = timeAsDouble;
-        }
+                positions, velocities, forces, frame->box, &frame->step, &frame->time);
     }
 
     return frameWasRead;

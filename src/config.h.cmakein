@@ -196,17 +196,11 @@
 /* Use the Portable Hardware Locality package (hwloc) */
 #cmakedefine01 GMX_USE_HWLOC
 
-/* Library version found for hwloc during configuration time */
-#define GMX_HWLOC_API_VERSION @GMX_HWLOC_API_VERSION@
-
 /* Can and should use nice(3) to set priority */
 #cmakedefine01 GMX_USE_NICE
 
 /* Maximum number of OpenMP threads supported */
 #define GMX_OPENMP_MAX_THREADS @GMX_OPENMP_MAX_THREADS@
-
-/* Use if we cannot rename checkpoints */
-#cmakedefine01 GMX_NO_RENAME
 
 /* Use sub-counters */
 #cmakedefine01 GMX_CYCLE_SUBCOUNTERS

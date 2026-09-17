@@ -61,6 +61,9 @@
 
 struct gmx_output_env_t;
 
+namespace gmx
+{
+
 static int calc_ntype(int nft, const InteractionFunction* ft, const t_idef* idef)
 {
     int i, f, nf = 0;
@@ -246,7 +249,7 @@ static InteractionFunction* select_ftype(const char* opt, int* nft, int* mult)
     if (opt[0] == 'a')
     {
         *mult = 3;
-        for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
+        for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
         {
             if ((interaction_function[ftype].flags & IF_ATYPE) || ftype == InteractionFunction::TabulatedAngles)
             {
@@ -305,7 +308,8 @@ int gmx_mk_angndx(int argc, char* argv[])
     t_filenm fnm[] = { { efTPR, nullptr, nullptr, ffREAD }, { efNDX, nullptr, "angle", ffWRITE } };
 #define NFILE asize(fnm)
 
-    if (!parse_common_args(&argc, argv, 0, NFILE, fnm, asize(pa), pa, asize(desc), desc, 0, nullptr, &oenv))
+    if (!parse_common_args(
+                &argc, argv, 0, NFILE, fnm, asize(pa), pa, asize(desc), desc, 0, nullptr, &oenv, nullptr))
     {
         return 0;
     }
@@ -346,3 +350,5 @@ int gmx_mk_angndx(int argc, char* argv[])
 
     return 0;
 }
+
+} // namespace gmx

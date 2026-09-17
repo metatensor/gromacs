@@ -2409,8 +2409,15 @@ void VirtualSitesHandler::Impl::spreadForces(ArrayRef<const RVec> x,
                 }
 
                 /* Spread the vsites that spread locally only */
-                spreadForceWrapper(
-                        x, f, virialHandling, fshift_t, tData.dxdf, false, iparams_, tData.ilists, pbc_null);
+                spreadForceWrapper(x,
+                                   f,
+                                   virialHandling,
+                                   fshift_t,
+                                   tData.dxdf,
+                                   !tData.useInterdependentTask,
+                                   iparams_,
+                                   tData.ilists,
+                                   pbc_null);
             }
             GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR
         }
@@ -2430,7 +2437,6 @@ void VirtualSitesHandler::Impl::spreadForces(ArrayRef<const RVec> x,
         {
             for (int th = 0; th < numThreads + 1; th++)
             {
-                /* MSVC doesn't like matrix references, so we use a pointer */
                 const matrix& dxdf = threadingInfo_.threadData(th).dxdf;
 
                 for (int i = 0; i < DIM; i++)

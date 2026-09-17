@@ -35,35 +35,28 @@ gmx_add_unit_test(MdlibUnitTest mdlib-test HARDWARE_DETECTION
     CPP_SOURCE_FILES
         calc_verletbuf.cpp
         calcvir.cpp
-        constr.cpp
         constraintgroupsize.cpp
         constrtestdata.cpp
-        constrtestrunners.cpp
         ebin.cpp
         energydrifttracker.cpp
         energyoutput.cpp
         expanded.cpp
         freeenergyparameters.cpp
-        langevin.cpp
         langevintestdata.cpp
-        langevintestrunners.cpp
-        leapfrog.cpp
         leapfrogtestdata.cpp
-        leapfrogtestrunners.cpp
         parrinellorahman.cpp
-        settle.cpp
         settletestdata.cpp
-        settletestrunners.cpp
         shake.cpp
         simulationsignal.cpp
         updategroups.cpp
         updategroupscog.cpp
         vsite.cpp
     GPU_CPP_SOURCE_FILES
-        constrtestrunners_gpu.cpp
-        leapfrogtestrunners_gpu.cpp
+        constr.cpp
+        langevin.cpp
+        leapfrog.cpp
         mdgpugraph.cpp
-        settletestrunners_gpu.cpp
+        settle.cpp
         wholemoleculetransform.cpp
         )
 target_link_libraries(mdlib-test PRIVATE

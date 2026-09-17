@@ -399,7 +399,7 @@ real max_pull_distance2(const pull_coord_work_t& pcrd, const t_pbc& pbc)
 
     if (pull_coordinate_is_directional(pcrd.params_))
     {
-        /* Directional pulling along along direction pcrd.vec.
+        /* Directional pulling along direction pcrd.vec.
          * Calculating the exact maximum distance is complex and bug-prone.
          * So we take a safe approach by not allowing distances that
          * are larger than half the distance between unit cell faces
@@ -1127,18 +1127,20 @@ static void do_constraint(struct pull_t* pull,
 
         /* update the atom positions */
         auto localAtomIndices = pgrp->atomSet_.localIndex();
-        DVec tmp              = dr;
+        // There is no point in using dr in double below, as all other quantities are reals
+        const RVec drRVec = dr.toRVec();
         for (gmx::Index j = 0; j < localAtomIndices.ssize(); j++)
         {
             const int ii = localAtomIndices[j];
+            RVec      dx = drRVec;
             if (!pgrp->localWeights.empty())
             {
-                tmp = static_cast<double>(pgrp->wscale * pgrp->localWeights[j]) * dr;
+                dx = pgrp->wscale * pgrp->localWeights[j] * drRVec;
             }
-            x[ii] += tmp.toRVec();
+            x[ii] += dx;
             if (!v.empty())
             {
-                v[ii] += invdt * tmp.toRVec();
+                v[ii] += invdt * dx;
             }
         }
     }
@@ -2112,12 +2114,14 @@ struct pull_t* init_pull(FILE*                     fplog,
 
         /* We only need to calculate the plain COM of a group
          * when it is not only used as a cylinder group.
-         * Also the absolute reference group 0 needs no COM computation.
+         * Also the absolute reference group 0 without external potentials needs no COM computation.
          */
         for (int i = 0; i < pcrd->params_.ngroup; i++)
         {
             int groupIndex = pcrd->params_.group[i];
-            if (groupIndex > 0 && !(pcrd->params_.eGeom == PullGroupGeometry::Cylinder && i == 0))
+            if (groupIndex > 0
+                && !(pcrd->params_.eGeom == PullGroupGeometry::Cylinder
+                     && pcrd->params_.eType != PullingAlgorithm::External && i == 0))
             {
                 pull->group[groupIndex].needToCalcCom = true;
             }
@@ -2138,10 +2142,9 @@ struct pull_t* init_pull(FILE*                     fplog,
                 /* With an external pull potential, the reference value loses
                  * it's meaning and should not be used. Setting it to zero
                  * makes any terms dependent on it disappear.
-                 * The only issue this causes is that with cylinder pulling
-                 * no atoms of the cylinder group within the cylinder radius
-                 * should be more than half a box length away from the COM of
-                 * the pull group along the axial direction.
+                 * Note that with cylinder pulling this reference is used for
+                 * PBC computation. In that case we use the COM of the reference
+                 * group instead.
                  */
                 pcrd->value_ref = 0.0;
             }

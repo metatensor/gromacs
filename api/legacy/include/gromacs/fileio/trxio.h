@@ -50,7 +50,8 @@ namespace gmx
 {
 template<typename>
 class ArrayRef;
-}
+struct TimeControl;
+} // namespace gmx
 /* a dedicated status type contains fp, etc. */
 typedef struct t_trxstatus t_trxstatus;
 
@@ -181,7 +182,7 @@ struct t_fileio* trx_get_fileio(t_trxstatus* status);
 float trx_get_time_of_final_frame(t_trxstatus* status);
 /* get time of final frame. Only supported for TNG and XTC */
 
-gmx_bool bRmod_fd(double a, double b, double c, gmx_bool bDouble);
+gmx_bool bRmod_fd(double a, double b, double c, gmx_bool compareTimesAsDouble);
 /* Returns TRUE when (a - b) MOD c = 0, using a margin which is slightly
  * larger than the float/double precision.
  */
@@ -192,22 +193,11 @@ gmx_bool bRmod_fd(double a, double b, double c, gmx_bool bDouble);
 #    define bRmod(a, b, c) bRmod_fd(a, b, c, FALSE)
 #endif
 
-int check_times2(real t, real t0, gmx_bool bDouble);
-/* This routine checkes if the read-in time is correct or not;
- * returns -1 if t<tbegin or t MOD dt = t0,
- *          0 if tbegin <= t <=tend+margin,
- *          1 if t>tend
- * where margin is 0.1*min(t-tp,tp-tpp), if this positive, 0 otherwise.
- * tp and tpp should be the time of the previous frame and the one before.
- * The mod is done with single or double precision accuracy depending
- * on the value of bDouble.
- */
-
-int check_times(real t);
-/* This routine checkes if the read-in time is correct or not;
- * returns -1 if t<tbegin,
- *          0 if tbegin <= t <=tend,
- *          1 if t>tend
+int check_times(real t, const gmx::TimeControl& timeControl);
+/* This routine checks if the read-in time is correct or not;
+ * returns -1 if t < timeControl.begin,
+ *          0 if timeControl.begin <= t <= timeControl.end,
+ *          1 if t > timeControl.end
  */
 
 
@@ -234,11 +224,13 @@ bool read_first_frame(const gmx_output_env_t*      oenv,
                       t_trxstatus**                status,
                       const std::filesystem::path& fn,
                       struct t_trxframe*           fr,
+                      const gmx::TimeControl*      timeControl,
                       int                          flags);
 /* Read the first frame which is in accordance with flags, which are
  * defined further up in this file.
  * Memory will be allocated for flagged entries.
- * The flags are copied to fr for subsequent calls to read_next_frame.
+ * The flags and timeControl are copied to status for subsequent calls
+ * to read_next_frame.
  * Returns true when succeeded, false otherwise.
  */
 
@@ -253,7 +245,8 @@ int read_first_x(const gmx_output_env_t*      oenv,
                  const std::filesystem::path& fn,
                  real*                        t,
                  rvec**                       x,
-                 matrix                       box);
+                 matrix                       box,
+                 const gmx::TimeControl*      timeControl);
 /* These routines read first coordinates and box, and allocates
  * memory for the coordinates, for a trajectory file.
  * The routine returns the number of atoms, or 0 when something is wrong.

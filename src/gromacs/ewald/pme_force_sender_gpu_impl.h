@@ -67,22 +67,20 @@ class GpuEventSynchronizer;
 namespace gmx
 {
 
-/*! \internal \brief Class with interfaces and data for GPU version of PME Force sending functionality*/
-
-typedef struct CacheLineAlignedFlag
+// GCC 12+ warns about such uses in header files in case they
+// could make a public ABI dependent on the compilation flags.
+// This is an internal header, so we silence gcc.
+#if defined(__GNUC__) && __GNUC__ > 11
+GCC_DIAGNOSTIC_IGNORE("-Winterference-size")
+#endif
+struct alignas(hardware_destructive_interference_size) CacheLineAlignedFlag
 {
-    // gcc 12+ warns about such uses in header files in case they
-    // could make a public ABI dependent on the compilation flags.
-    // This is an internal header, so we silence gcc. We could
-    // do this better if we had a proper CMake target
+    //! Flag to track the status of the item of interest
+    std::atomic<bool> flag;
+};
 #if defined(__GNUC__) && __GNUC__ > 11
-    GCC_DIAGNOSTIC_IGNORE("-Winterference-size")
+GCC_DIAGNOSTIC_RESET
 #endif
-    alignas(hardware_destructive_interference_size) bool flag;
-#if defined(__GNUC__) && __GNUC__ > 11
-    GCC_DIAGNOSTIC_RESET
-#endif
-} CacheLineAlignedFlag;
 
 /*! \internal
  *  \brief Object to manage communications with a specific PP rank
@@ -94,15 +92,18 @@ struct PpForceCommManager
     //! Event used for manging sync with remote PP rank
     std::unique_ptr<GpuEventSynchronizer> event;
     //! Flag to track when PP transfer event has been recorded
-    std::unique_ptr<std::atomic<CacheLineAlignedFlag>> eventRecorded;
+    std::unique_ptr<CacheLineAlignedFlag> eventRecorded;
     //! Address of local force buffer to send to remote PP rank
     DeviceBuffer<RVec> localForcePtr;
-    //! CPU force buffer pointer for remote PP rank
+    //! CPU force buffer pointer on remote PP rank
     Float3* pmeRemoteCpuForcePtr;
-    //! GPU force buffer pointers for remote PP rank
+    //! GPU force buffer pointer on remote PP rank
     Float3* pmeRemoteGpuForcePtr;
 };
 
+/*! \internal
+ * \brief Impl for PmeForceSenderGpu
+ */
 class PmeForceSenderGpu::Impl
 {
 
@@ -143,8 +144,6 @@ public:
      * \param[in] request  MPI request to track asynchronous MPI call status
      */
     void sendFToPpGpuAwareMpi(DeviceBuffer<RVec> sendbuf, int offset, int numBytes, int ppRank, MPI_Request* request);
-
-    void waitForEvents();
 
 private:
     //! Event indicating when PME forces are ready on the GPU in order for PP stream to sync with the PME stream

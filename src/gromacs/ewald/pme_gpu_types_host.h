@@ -127,8 +127,6 @@ struct PmeShared
     PmeRunMode runMode;
     /*! \brief  Whether PME execution is happening on a PME-only rank (from gmx_pme_t.bPPnode). */
     bool isRankPmeOnly;
-    /*! \brief The box scaler based on inputrec - created in pme_init and managed by CPU structure */
-    class EwaldBoxZScaler* boxScaler;
 
     /*! \brief The The number of decomposition dimensions */
     int ndecompdim;
@@ -184,6 +182,8 @@ struct PmeNvshmemHost
     int forcesReadyNvshmemFlagsSize = 0;
     /*! \brief sync object for nvshmem based pme-pp force comm allocation size tracker */
     int forcesReadyNvshmemFlagsSizeAlloc = 0;
+    //! MPI Communicator for simulation == NVSHMEM Team
+    MPI_Comm mpiCommMySim;
 };
 
 /*! \internal \brief
@@ -215,6 +215,9 @@ struct PmeGpu
 #if GMX_GPU_CUDA || GMX_GPU_OPENCL || GMX_GPU_SYCL || GMX_GPU_HIP || defined DOXYGEN
     ~PmeGpu();
 #endif
+
+    /*! \brief The allocation policy for pinned host memory */
+    const gmx::HostAllocationPolicy hostAllocationPolicy_;
 
     /*! \brief The information copied once per reinit from the CPU structure. */
     std::shared_ptr<PmeShared> common; // TODO: make the CPU structure use the same type

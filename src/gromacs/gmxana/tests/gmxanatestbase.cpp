@@ -76,13 +76,18 @@ GmxAnaTestBase::GmxAnaTestBase() : impl_(std::make_unique<Impl>(fileManager())) 
 
 GmxAnaTestBase::~GmxAnaTestBase() {}
 
-void GmxAnaTestBase::runAndCheckResults()
+void GmxAnaTestBase::runTool()
 {
     ASSERT_EQ(0, gmxTool(commandLine().argc(), commandLine().argv()));
+}
+
+void GmxAnaTestBase::runAndCheckResults()
+{
+    runTool();
     checkOutputFiles();
 }
 
-void GmxAnaTestBase::selectGroups(const std::initializer_list<const char*> groups)
+void GmxAnaTestBase::selectGroups(std::initializer_list<const char*> groups)
 {
     impl_->selectGroups(groups.begin(), groups.end());
 }

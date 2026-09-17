@@ -76,13 +76,16 @@ struct GpuConfigurationCapabilities
     static constexpr bool PmeSolveNeedsAtLeastFourWarps = GMX_GPU && !GMX_GPU_OPENCL;
     //! Whether this configuration supports running FFT kernels on the device
     static constexpr bool Fft = GMX_GPU
-                                && (GMX_GPU_FFT_MKL || GMX_GPU_FFT_ROCFFT || GMX_GPU_FFT_HIPFFT
-                                    || GMX_GPU_FFT_BBFFT || GMX_GPU_FFT_ONEMATH || GMX_GPU_FFT_VKFFT
-                                    || GMX_GPU_FFT_CUFFT || GMX_GPU_FFT_CLFFT);
+                                && (GMX_GPU_FFT_MKL || GMX_GPU_FFT_ROCFFT || GMX_GPU_FFT_BBFFT || GMX_GPU_FFT_ONEMATH
+                                    || GMX_GPU_FFT_VKFFT || GMX_GPU_FFT_CUFFT || GMX_GPU_FFT_CLFFT);
     //! Whether this configuration supports running bonded kernels on the device
     static constexpr bool Bonded = GMX_GPU && !GMX_GPU_OPENCL;
-    //! Whether this configuration supports running update+LINCS+SETTLE kernels on the device
-    static constexpr bool Update = GMX_GPU && !GMX_GPU_OPENCL;
+    //! Whether this configuration supports running update with leapfrog on the device
+    static constexpr bool UpdateLeapfrog = GMX_GPU && !GMX_GPU_OPENCL;
+    //! Whether this configuration supports running update with stochastic dynamics on the device
+    static constexpr bool UpdateSD = false;
+    //! Whether this configuration supports running the constraint kernels (LINCS+SETTLE) on the device
+    static constexpr bool Constraints = GMX_GPU && !GMX_GPU_OPENCL;
     //! Whether this configuration supports running the direct GPU communication path with thread-MPI
     static constexpr bool ThreadMpiDirectComm = GMX_GPU_CUDA || GMX_GPU_HIP;
     //! Whether this configuration supports running the direct GPU communication path with library-MPI
@@ -103,6 +106,8 @@ struct GpuConfigurationCapabilities
                                              || (GMX_GPU_SYCL && GMX_USE_Heffte)
                                              || (GMX_GPU_HIP && GMX_USE_Heffte);
     static constexpr bool TwoDPmeDecomposition = PmeDecomposition && GMX_GPU_CUDA;
+    //! Whether we support running the threefry random number generator on the device.
+    static constexpr bool Threefry = GMX_GPU && !GMX_GPU_OPENCL;
 };
 CLANG_DIAGNOSTIC_RESET
 

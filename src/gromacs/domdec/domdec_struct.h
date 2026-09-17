@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "gromacs/domdec/domdec_zones.h"
+#include "gromacs/gpu_utils/hostallocator.h"
 #include "gromacs/topology/block.h"
 #include "gromacs/topology/idef.h"
 #include "gromacs/utility/defaultinitializationallocator.h"
@@ -111,7 +112,7 @@ struct UnitCellInfo
 };
 
 struct gmx_domdec_t
-{ //NOLINT(clang-analyzer-optin.performance.Padding)
+{ // NOLINT(clang-analyzer-optin.performance.Padding)
     //! Constructor, only partial for now
     gmx_domdec_t(const gmx::MpiComm& mpiComm, const t_inputrec& ir, gmx::ArrayRef<const int> ddDims);
     ~gmx_domdec_t();
@@ -209,6 +210,9 @@ struct gmx_domdec_t
 
     //! Enables NVSHMEM-based GPU halo exchange
     bool useGpuHaloExchangeNvshmem = false;
+
+    //! Host allocation policy for GPU halo exchange with NVSHMEM
+    gmx::HostAllocationPolicy hostAllocationPolicy;
 };
 
 /*! \brief Returns whether this rank computes particle-particle interactions
