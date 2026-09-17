@@ -150,13 +150,13 @@
 #include "replicaexchange.h"
 #include "shellfc.h"
 
-struct gmx_edsam;
 struct gmx_mdoutf;
-struct gmx_shellfc_t;
 
-using gmx::SimulationSignaller;
+namespace gmx
+{
+struct edsam;
 
-void gmx::LegacySimulator::do_mimic()
+void LegacySimulator::do_mimic()
 {
     const t_inputrec* ir = inputRec_;
 
@@ -170,7 +170,7 @@ void gmx::LegacySimulator::do_mimic()
     rvec              mu_tot;
     ForceBuffers      f;
     gmx_global_stat_t gstat;
-    gmx_shellfc_t*    shellfc;
+    shellfc_t*        shellfc;
 
     double cycles;
 
@@ -262,8 +262,8 @@ void gmx::LegacySimulator::do_mimic()
                        &stateGlobal_->fep_state,
                        stateGlobal_->lambda);
 
-    const bool        simulationsShareState = false;
-    gmx_mdoutf*       outf                  = init_mdoutf(fpLog_,
+    const bool   simulationsShareState = false;
+    gmx_mdoutf*  outf                  = init_mdoutf(fpLog_,
                                    nFile_,
                                    fnm_,
                                    mdrunOptions_,
@@ -277,15 +277,15 @@ void gmx::LegacySimulator::do_mimic()
                                    StartingBehavior::NewSimulation,
                                    simulationsShareState,
                                    ms_);
-    gmx::EnergyOutput energyOutput(mdoutf_get_fp_ene(outf),
-                                   topGlobal_,
-                                   *ir,
-                                   pullWork_,
-                                   mdoutf_get_fp_dhdl(outf),
-                                   true,
-                                   StartingBehavior::NewSimulation,
-                                   simulationsShareState,
-                                   mdModulesNotifiers_);
+    EnergyOutput energyOutput(mdoutf_get_fp_ene(outf),
+                              topGlobal_,
+                              *ir,
+                              pullWork_,
+                              mdoutf_get_fp_dhdl(outf),
+                              true,
+                              StartingBehavior::NewSimulation,
+                              simulationsShareState,
+                              mdModulesNotifiers_);
 
     gstat = global_stat_init(ir);
 
@@ -295,6 +295,7 @@ void gmx::LegacySimulator::do_mimic()
                                  constr_ ? constr_->numFlexibleConstraints() : 0,
                                  ir->outputControl.nstcalcenergy,
                                  haveDDAtomOrdering(*cr_),
+                                 fr_->deviceStreamManager,
                                  runScheduleWork_->simulationWork);
 
     if (haveDDAtomOrdering(*cr_))
@@ -340,7 +341,8 @@ void gmx::LegacySimulator::do_mimic()
                                   constr_,
                                   virtualSites_,
                                   shellfc,
-                                  fr_->stateGpu);
+                                  fr_->stateGpu,
+                                  wallCycleCounters_);
     }
 
     auto* mdatoms = mdAtoms_->mdatoms();
@@ -533,7 +535,7 @@ void gmx::LegacySimulator::do_mimic()
         const int shellfcFlags     = force_flags | (mdrunOptions_.verbose ? GMX_FORCE_ENERGY : 0);
         const int legacyForceFlags = ((shellfc) ? shellfcFlags : force_flags) | GMX_FORCE_NS;
 
-        gmx_edsam* const ed = nullptr;
+        edsam* const ed = nullptr;
 
         if (bNS)
         {
@@ -693,12 +695,12 @@ void gmx::LegacySimulator::do_mimic()
         }
 
         {
-            gmx::HostVector<gmx::RVec>     fglobal(topGlobal_.natoms);
-            gmx::ArrayRef<gmx::RVec>       ftemp;
-            gmx::ArrayRef<const gmx::RVec> flocal = f.view().force();
+            HostVector<RVec>     fglobal(topGlobal_.natoms);
+            ArrayRef<RVec>       ftemp;
+            ArrayRef<const RVec> flocal = f.view().force();
             if (haveDDAtomOrdering(*cr_))
             {
-                ftemp = gmx::makeArrayRef(fglobal);
+                ftemp = makeArrayRef(fglobal);
                 dd_collect_vec(
                         cr_->dd, state_->ddp_count, state_->ddp_count_cg_gl, state_->cg_gl, flocal, ftemp);
             }
@@ -823,3 +825,5 @@ void gmx::LegacySimulator::do_mimic()
 
     walltime_accounting_set_nsteps_done(wallTimeAccounting_, step_rel);
 }
+
+} // namespace gmx

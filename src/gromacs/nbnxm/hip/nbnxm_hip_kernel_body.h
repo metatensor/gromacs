@@ -55,6 +55,7 @@
 #include "gromacs/mdtypes/simulation_workload.h"
 #include "gromacs/nbnxm/gpu_types_common.h"
 #include "gromacs/nbnxm/nbnxm_enums.h"
+#include "gromacs/nbnxm/nbnxm_kernel_utils.h"
 #include "gromacs/pbcutil/ishift.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/enumerationhelpers.h"
@@ -115,12 +116,20 @@ static const std::string getKernelName()
 #endif
 }
 
+template<typename T, bool Condition>
+using MaybeConstT = std::conditional_t<Condition, const T, T>;
+
 /*! \brief Main kernel for NBNXM.
  *
  */
 template<bool doPruneNBL, bool doCalcEnergies, enum ElecType elecType, enum VdwType vdwType, int nthreadZ, int minBlocksPerMp, PairlistType pairlistType>
 __launch_bounds__(c_clSizeSq<pairlistType>* nthreadZ, minBlocksPerMp) __global__
-        static void nbnxmKernel(NBAtomDataGpu atdat, NBParamGpu nbparam, GpuPairlist plist, bool doCalcShift)
+        static void nbnxmKernel(NBAtomDataGpu atdat,
+                                NBParamGpu    nbparam,
+                                GpuPairlist   plist,
+                                MaybeConstT<nbnxm_cj_packed_t, !doPruneNBL>* __restrict__ gm_plistCJPacked,
+                                const nbnxm_sci_t* __restrict__ gm_sci,
+                                bool doCalcShift)
 {
     {
 
@@ -142,20 +151,15 @@ __launch_bounds__(c_clSizeSq<pairlistType>* nthreadZ, minBlocksPerMp) __global__
         const int bidx       = blockIdx.x;
         const int tidxInWarp = tidx & (c_parallelExecutionWidth - 1);
 
-        using NbnxmExcl     = nbnxn_excl_t;
-        using NbnxmCjPacked = nbnxn_cj_packed_t;
+        using NbnxmExcl     = nbnxm_excl_t;
+        using NbnxmCjPacked = nbnxm_cj_packed_t;
 
         AmdFastBuffer<const float4> gm_xq{ atdat.xq };
-        float3*                     gm_f             = asFloat3(atdat.f);
-        float3*                     gm_shiftVec      = asFloat3(atdat.shiftVec);
-        float3*                     gm_fShift        = asFloat3(atdat.fShift);
-        float*                      gm_energyElec    = atdat.eElec;
-        float*                      gm_energyVdw     = atdat.eLJ;
-        NbnxmCjPacked*              gm_plistCJPacked = plist.cjPacked;
-        AmdFastBuffer<const nbnxn_sci_t> gm_plistSci{ doPruneNBL ? plist.sci : plist.sorting.sciSorted };
-        int* gm_plistSciHistogram = plist.sorting.sciHistogram;
-        int* gm_sciCount          = plist.sorting.sciCount;
-
+        float3*                     gm_f          = asFloat3(atdat.f);
+        float3*                     gm_shiftVec   = asFloat3(atdat.shiftVec);
+        float3*                     gm_fShift     = asFloat3(atdat.fShift);
+        float*                      gm_energyElec = atdat.eElec;
+        float*                      gm_energyVdw  = atdat.eLJ;
 
         AmdFastBuffer<const NbnxmExcl> gm_plistExcl{ plist.excl };
         AmdFastBuffer<const Float2>    gm_ljComb{ atdat.ljComb }; /* used iff ljComb<vdwType> */
@@ -228,7 +232,7 @@ __launch_bounds__(c_clSizeSq<pairlistType>* nthreadZ, minBlocksPerMp) __global__
             fCiBuffer[i] = { 0.0f, 0.0f, 0.0f };
         }
 
-        const nbnxn_sci_t nbSci          = gm_plistSci[bidx];
+        const nbnxm_sci_t nbSci          = gm_sci[bidx];
         const int         sci            = nbSci.sci;
         const int         cijPackedBegin = nbSci.cjPackedBegin;
         const int         cijPackedEnd   = nbSci.cjPackedEnd;
@@ -334,7 +338,7 @@ __launch_bounds__(c_clSizeSq<pairlistType>* nthreadZ, minBlocksPerMp) __global__
                     energyElec /= epsFac * c_clSize * nthreadZ;
                     energyElec *= -ewaldBeta * c_oneOverSqrtPi; /* last factor 1/sqrt(pi) */
                 }
-            } // (nbSci.shift == c_centralShiftIndex && a_plistCJPacked[cijPackedBegin].cj[0] == sci * c_nbnxnGpuNumClusterPerSupercluster)
+            } // (nbSci.shift == c_centralShiftIndex && a_plistCJPacked[cijPackedBegin].cj[0] == sci * c_nbnxmGpuNumClusterPerSupercluster)
         } // (doCalcEnergies && doExclusionForces)
 
         // Only needed if (doExclusionForces)
@@ -463,7 +467,7 @@ __launch_bounds__(c_clSizeSq<pairlistType>* nthreadZ, minBlocksPerMp) __global__
                             const float c12 = c6c12.y;
 
                             // Ensure distance do not become so small that r^-12 overflows
-                            r2                = fmax(r2, c_nbnxnMinDistanceSquared);
+                            r2                = fmax(r2, c_nbnxmMinDistanceSquared);
                             const float rInv  = __frsqrt_rn(r2);
                             const float r2Inv = rInv * rInv;
                             float       r6Inv, fInvR, energyLJPair;
@@ -497,8 +501,8 @@ __launch_bounds__(c_clSizeSq<pairlistType>* nthreadZ, minBlocksPerMp) __global__
                             }
                             if constexpr (props.vdwFSwitch)
                             {
-                                ljForceSwitch<doCalcEnergies>(
-                                        dispersionShift, repulsionShift, c6c12, rVdwSwitch, rInv, r2, &fInvR, &energyLJPair);
+                                ljForceSwitch<doCalcEnergies, true>(
+                                        dispersionShift, repulsionShift, rVdwSwitch, c6, c12, rInv, r2, &fInvR, &energyLJPair);
                             }
                             if constexpr (props.vdwEwald)
                             {
@@ -516,7 +520,7 @@ __launch_bounds__(c_clSizeSq<pairlistType>* nthreadZ, minBlocksPerMp) __global__
                             } // (props.vdwEwald)
                             if constexpr (props.vdwPSwitch)
                             {
-                                ljPotentialSwitch<doCalcEnergies>(
+                                ljPotentialSwitch<doCalcEnergies, false>(
                                         vdwSwitch, rVdwSwitch, rInv, r2, &fInvR, &energyLJPair);
                             }
                             if constexpr (props.elecEwaldTwin)
@@ -636,7 +640,9 @@ __launch_bounds__(c_clSizeSq<pairlistType>* nthreadZ, minBlocksPerMp) __global__
 
                 if (tidxi == 0 && tidxj == 0 && tidxz == 0)
                 {
-                    int index = max(c_sciHistogramSize - prunedPairCount - 1, 0);
+                    int* gm_plistSciHistogram = plist.sorting.sciHistogram;
+                    int* gm_sciCount          = plist.sorting.sciCount;
+                    int  index                = max(c_sciHistogramSize - prunedPairCount - 1, 0);
                     atomicAdd(gm_plistSciHistogram + index, 1);
                     gm_sciCount[bidx] = index;
                 }
@@ -707,12 +713,28 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const StepWorkload& stepWork, const I
     const DeviceInformation& deviceInfo   = nb->deviceContext.deviceInfo();
 
     auto* plist = nb->plist[iloc].get();
+    // Unpack this so that we can use it directly (sometimes as
+    // const) in the device code, which seems to generate better
+    // code than unpacking it from plist inside the device code.
+    const auto* gm_cjPacked = plist->cjPacked;
+    // Move selection of sciList here to avoid in kernel branch
+    const auto* gm_sci = doPruneNBL ? plist->sci : plist->sorting.sciSorted;
 
     GMX_ASSERT(doPruneNBL == (plist->haveFreshList && !nb->didPrune[iloc]), "Wrong template called");
     GMX_ASSERT(doCalcEnergies == stepWork.computeEnergy, "Wrong template called");
 
     chooseAndLaunchNbnxmKernel<sc_layoutType, hasLargeRegisterPool, doPruneNBL, doCalcEnergies>(
-            nbp->elecType, nbp->vdwType, deviceStream, plist->numSci, deviceInfo, adat, nbp, plist, &stepWork.computeVirial);
+            nbp->elecType,
+            nbp->vdwType,
+            deviceStream,
+            plist->numSci,
+            deviceInfo,
+            adat,
+            nbp,
+            plist,
+            &gm_cjPacked,
+            &gm_sci,
+            &stepWork.computeVirial);
 }
 
 } // namespace gmx

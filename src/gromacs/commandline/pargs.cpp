@@ -362,9 +362,13 @@ void OptionsAdapter::pargsToOptions(Options* options, t_pargs* pa)
             data.optionInfo =
                     options->addOption(RealOption(name).store(pa->u.r).description(desc).hidden(bHidden));
             return;
+        case etDOUBLE:
+            data.optionInfo = options->addOption(
+                    DoubleOption(name).store(pa->u.d).description(desc).hidden(bHidden));
+            return;
         case etTIME:
             data.optionInfo = options->addOption(
-                    RealOption(name).store(pa->u.r).timeValue().description(desc).hidden(bHidden));
+                    DoubleOption(name).store(pa->u.d).timeValue().description(desc).hidden(bHidden));
             return;
         case etSTR:
         {
@@ -460,7 +464,8 @@ gmx_bool parse_common_args(int*               argc,
                            const char**       desc,
                            int                nbugs,
                            const char**       bugs,
-                           gmx_output_env_t** oenv)
+                           gmx_output_env_t** oenv,
+                           gmx::TimeControl*  timeControl)
 {
     // Lambda function to test the (local) Flags parameter against a bit mask.
     auto isFlagSet = [Flags](unsigned long bits) { return (Flags & bits) == bits; };
@@ -565,15 +570,21 @@ gmx_bool parse_common_args(int*               argc,
         /* Extract Time info from arguments */
         if (bBeginTimeSet)
         {
-            setTimeValue(TimeControl::Begin, tbegin);
+            GMX_RELEASE_ASSERT(timeControl != nullptr,
+                               "TimeControl* must be valid for PCA_CAN_BEGIN or PCA_CAN_TIME");
+            timeControl->begin = tbegin;
         }
         if (bEndTimeSet)
         {
-            setTimeValue(TimeControl::End, tend);
+            GMX_RELEASE_ASSERT(timeControl != nullptr,
+                               "TimeControl* must be valid for PCA_CAN_END or PCA_CAN_TIME");
+            timeControl->end = tend;
         }
         if (bDtSet)
         {
-            setTimeValue(TimeControl::Delta, tdelta);
+            GMX_RELEASE_ASSERT(timeControl != nullptr,
+                               "TimeControl* must be valid for PCA_CAN_DT or PCA_CAN_TIME");
+            timeControl->delta = tdelta;
         }
 
         adapter.copyValues();

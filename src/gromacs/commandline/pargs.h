@@ -51,6 +51,11 @@
 
 struct gmx_output_env_t;
 
+namespace gmx
+{
+struct TimeControl;
+} // namespace gmx
+
 /*! \addtogroup module_commandline
  * \{
  */
@@ -61,6 +66,7 @@ enum
     etINT,
     etINT64,
     etREAL,
+    etDOUBLE,
     etTIME,
     etSTR,
     etBOOL,
@@ -102,8 +108,10 @@ typedef struct
         int* i;
         /** Integer value for etINT64. */
         int64_t* is;
-        /** Real value for etREAL and etTIME. */
+        /** Real value for etREAL. */
         real* r;
+        /** Double value for etDOUBLE and etTIME. */
+        double* d;
         /*! \brief
          * String value for etSTR and etENUM.
          *
@@ -252,6 +260,9 @@ bool opt2parg_bSet(const char* option, int nparg, const t_pargs* pa);
  * to be aware that if the program is executed with -h and MPI, the code before
  * parse_common_args() only executes on the main node.
  *
+ * If any time control \p Flags are set (PCA_CAN_TIME, etc.), \p timeControl
+ * must be a valid object.
+ *
  * If the return value is `FALSE`, the program should return immediately (this
  * is necessary for -h and a few other cases).
  *
@@ -268,7 +279,8 @@ bool parse_common_args(int*               argc,
                        const char**       desc,
                        int                nbugs,
                        const char**       bugs,
-                       gmx_output_env_t** oenv);
+                       gmx_output_env_t** oenv,
+                       gmx::TimeControl*  timeControl);
 
 /*! \} */
 

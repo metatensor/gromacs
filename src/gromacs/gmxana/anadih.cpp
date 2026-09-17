@@ -64,6 +64,10 @@
 #include "gromacs/utility/vecdump.h"
 #include "gromacs/utility/vectypes.h"
 
+namespace gmx
+{
+struct TimeControl;
+} // namespace gmx
 struct gmx_output_env_t;
 
 void print_one(const gmx_output_env_t* oenv,
@@ -161,7 +165,6 @@ void ana_dih_trans(const char*             fn_trans,
     int* multiplicity;
     int  k;
 
-    std::vector<t_dlist> dlist(nangles);
     snew(multiplicity, nangles);
     for (k = 0; (k < nangles); k++)
     {
@@ -169,7 +172,7 @@ void ana_dih_trans(const char*             fn_trans,
     }
 
     low_ana_dih_trans(
-            TRUE, fn_trans, TRUE, fn_histo, maxchi, dih, dlist, nframes, nangles, grpname, multiplicity, time, bRb, 0.5, oenv);
+            TRUE, fn_trans, TRUE, fn_histo, maxchi, dih, {}, nframes, nangles, grpname, multiplicity, time, bRb, 0.5, oenv);
     sfree(multiplicity);
 }
 
@@ -824,7 +827,8 @@ void read_ang_dih(const char*             trj_fn,
                   real**                  trans_frac,
                   real**                  aver_angle,
                   real*                   dih[],
-                  const gmx_output_env_t* oenv)
+                  const gmx_output_env_t* oenv,
+                  const gmx::TimeControl& timeControl)
 {
     struct t_pbc* pbc;
     t_trxstatus*  status;
@@ -839,7 +843,7 @@ void read_ang_dih(const char*             trj_fn,
 
     snew(pbc, 1);
     gmx::sfree_guard pbcGuard(pbc);
-    read_first_x(oenv, &status, trj_fn, &t, &x, box);
+    read_first_x(oenv, &status, trj_fn, &t, &x, box, &timeControl);
 
     if (bAngles)
     {

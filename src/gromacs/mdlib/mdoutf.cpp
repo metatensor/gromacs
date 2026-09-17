@@ -355,7 +355,6 @@ static void write_checkpoint(const char*                     fn,
         npmenodes = 0;
     }
 
-#if !GMX_NO_RENAME
     /* make the new temporary filename */
     snew(fntemp, std::strlen(fn) + 5 + STEPSTRSIZE);
     std::strcpy(fntemp, fn);
@@ -363,13 +362,6 @@ static void write_checkpoint(const char*                     fn,
     sprintf(suffix, "_%s%s", "step", gmx_step_str(step, sbuf));
     std::strcat(fntemp, suffix);
     std::strcat(fntemp, fn + std::strlen(fn) - std::strlen(ftp2ext(fn2ftp(fn))) - 1);
-#else
-    /* if we can't rename, we just overwrite the cpt file.
-     * dangerous if interrupted.
-     */
-    snew(fntemp, std::strlen(fn));
-    std::strcpy(fntemp, fn);
-#endif
     std::string timebuf = gmx_format_current_time();
 
     if (fplog)
@@ -394,38 +386,38 @@ static void write_checkpoint(const char*                     fn,
     edsamhistory_t* edsamhist = observablesHistory->edsamHistory.get();
     int             nED       = (edsamhist ? edsamhist->nED : 0);
 
-    swaphistory_t* swaphist    = observablesHistory->swapHistory.get();
-    SwapType       eSwapCoords = (swaphist ? swaphist->eSwapCoords : SwapType::No);
+    gmx::swaphistory_t* swaphist    = observablesHistory->swapHistory.get();
+    SwapType            eSwapCoords = (swaphist ? swaphist->eSwapCoords : SwapType::No);
 
-    CheckpointHeaderContents headerContents = { CheckPointVersion::UnknownVersion0,
-                                                { 0 },
-                                                { 0 },
-                                                { 0 },
-                                                { 0 },
-                                                GMX_DOUBLE,
-                                                { 0 },
-                                                { 0 },
-                                                eIntegrator,
-                                                simulation_part,
-                                                step,
-                                                t,
-                                                nppnodes,
-                                                { 0 },
-                                                npmenodes,
-                                                state->numAtoms(),
-                                                state->ngtc,
-                                                state->nnhpres,
-                                                state->nhchainlength,
-                                                nlambda,
-                                                state->flags(),
-                                                0,
-                                                0,
-                                                0,
-                                                0,
-                                                0,
-                                                nED,
-                                                eSwapCoords,
-                                                false };
+    gmx::CheckpointHeaderContents headerContents = { gmx::CheckPointVersion::UnknownVersion0,
+                                                     { 0 },
+                                                     { 0 },
+                                                     { 0 },
+                                                     { 0 },
+                                                     GMX_DOUBLE,
+                                                     { 0 },
+                                                     { 0 },
+                                                     eIntegrator,
+                                                     simulation_part,
+                                                     step,
+                                                     t,
+                                                     nppnodes,
+                                                     { 0 },
+                                                     npmenodes,
+                                                     state->numAtoms(),
+                                                     state->ngtc,
+                                                     state->nnhpres,
+                                                     state->nhchainlength,
+                                                     nlambda,
+                                                     state->flags(),
+                                                     0,
+                                                     0,
+                                                     0,
+                                                     0,
+                                                     0,
+                                                     nED,
+                                                     eSwapCoords,
+                                                     false };
     std::strcpy(headerContents.version, gmx_version());
     std::strcpy(headerContents.fprog, gmx::getProgramContext().fullBinaryPath().string().c_str());
     std::strcpy(headerContents.ftime, timebuf.c_str());
@@ -468,7 +460,6 @@ static void write_checkpoint(const char*                     fn,
 
     /* we don't move the checkpoint if the user specified they didn't want it,
        or if the fsyncs failed */
-#if !GMX_NO_RENAME
     if (!bNumberAndKeep && !ret)
     {
         // Add a barrier before renaming to reduce chance to get out of sync (#2440)
@@ -517,7 +508,6 @@ static void write_checkpoint(const char*                     fn,
                     "Cannot rename checkpoint file from %s to %s; maybe you are out of disk space?", fntemp, fn)));
         }
     }
-#endif /* GMX_NO_RENAME */
 
     sfree(fntemp);
 

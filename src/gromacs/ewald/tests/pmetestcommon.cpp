@@ -68,7 +68,6 @@
 #include "gromacs/gpu_utils/device_context.h"
 #include "gromacs/gpu_utils/gpu_utils.h"
 #include "gromacs/gpu_utils/hostallocator.h"
-#include "gromacs/math/boxmatrix.h"
 #include "gromacs/mdtypes/locality.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/pbcutil/pbc.h"
@@ -180,13 +179,9 @@ PmePointer pmeInitWrapper(const t_inputrec*    inputRec,
                                                   pmeGpuProgram,
                                                   dummyLogger);
 
-    switch (mode)
+    if (mode == CodePath::GPU)
     {
-        case CodePath::CPU: invertBoxMatrix(boxTemp, pme->recipbox); break;
-
-        case CodePath::GPU: pme_gpu_set_testing(pme->gpu.get(), true); break;
-
-        default: GMX_THROW(InternalError("Test not implemented for this mode"));
+        pme_gpu_set_testing(pme->gpu.get(), true);
     }
 
     return pme;
@@ -261,8 +256,8 @@ static real* pmeGetRealGridInternal(const gmx_pme_t* pme)
 //! Getting local PME real grid dimensions
 static void pmeGetRealGridSizesInternal(const gmx_pme_t* pme,
                                         CodePath         mode,
-                                        IVec& gridSize,       //NOLINT(google-runtime-references)
-                                        IVec& paddedGridSize) //NOLINT(google-runtime-references)
+                                        IVec& gridSize,       // NOLINT(google-runtime-references)
+                                        IVec& paddedGridSize) // NOLINT(google-runtime-references)
 {
     const size_t gridIndex = 0;
     IVec         gridOffsetUnused;
@@ -290,8 +285,8 @@ static t_complex* pmeGetComplexGridInternal(gmx_pme_t* pme)
 
 //! Getting local PME complex grid dimensions
 static void pmeGetComplexGridSizesInternal(const gmx_pme_t* pme,
-                                           IVec& gridSize,       //NOLINT(google-runtime-references)
-                                           IVec& paddedGridSize) //NOLINT(google-runtime-references)
+                                           IVec& gridSize, // NOLINT(google-runtime-references)
+                                           IVec& paddedGridSize) // NOLINT(google-runtime-references)
 {
     const size_t gridIndex = 0;
     IVec         gridOffsetUnused, complexOrderUnused;
@@ -306,9 +301,9 @@ static void pmeGetComplexGridSizesInternal(const gmx_pme_t* pme,
 template<typename ValueType>
 static void pmeGetGridAndSizesInternal(gmx_pme_t* /*unused*/,
                                        CodePath /*unused*/,
-                                       ValueType*& /*unused*/, //NOLINT(google-runtime-references)
-                                       IVec& /*unused*/,       //NOLINT(google-runtime-references)
-                                       IVec& /*unused*/) = delete; //NOLINT(google-runtime-references)
+                                       ValueType*& /*unused*/, // NOLINT(google-runtime-references)
+                                       IVec& /*unused*/,       // NOLINT(google-runtime-references)
+                                       IVec& /*unused*/) = delete; // NOLINT(google-runtime-references)
 
 //! Getting the PME real grid memory buffer and its sizes
 template<>
@@ -492,11 +487,12 @@ void pmePerformGather(gmx_pme_t* pme, CodePath mode, ForcesVector& forces)
         {
             // Variable initialization needs a non-switch scope
             const bool computeEnergyAndVirial = false;
+            const bool markFReadyEvent        = true;
             const real lambdaQ                = 1.0;
             PmeOutput  output = pme_gpu_getOutput(pme, computeEnergyAndVirial, lambdaQ);
             GMX_ASSERT(forces.size() == output.forces_.size(),
                        "Size of force buffers did not match");
-            pme_gpu_gather(pme->gpu.get(), pme->gridsCoulomb, lambdaQ, nullptr, computeEnergyAndVirial);
+            pme_gpu_gather(pme->gpu.get(), pme->gridsCoulomb, lambdaQ, nullptr, computeEnergyAndVirial, markFReadyEvent);
             std::copy(std::begin(output.forces_), std::end(output.forces_), std::begin(forces));
         }
         break;
@@ -573,6 +569,11 @@ static int getSplineParamFullIndex(int order, int splineIndex, int dimIndex, int
         case 8:
             indexBase = getSplineParamIndexBase<fixedOrder, 8>(warpIndex, atomWarpIndex);
             result    = getSplineParamIndex<fixedOrder, 8>(indexBase, dimIndex, splineIndex);
+            break;
+
+        case 16:
+            indexBase = getSplineParamIndexBase<fixedOrder, 16>(warpIndex, atomWarpIndex);
+            result    = getSplineParamIndex<fixedOrder, 16>(indexBase, dimIndex, splineIndex);
             break;
 
         default:
@@ -1032,6 +1033,11 @@ ArrayRef<const PmeTestHardwareContext> getPmeTestHardwareContexts()
         }
     }
     return s_pmeTestHardwareContexts;
+}
+
+void pmeResetMinSplineRecalculationAtomCount(gmx_pme_t* pme)
+{
+    pme->gpu->minParticleCountToRecalculateSplines = 0;
 }
 
 void registerTestsDynamically()

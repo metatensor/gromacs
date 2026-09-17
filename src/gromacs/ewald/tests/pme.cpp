@@ -47,6 +47,8 @@
 
 #include <gtest/gtest.h>
 
+#include "gromacs/ewald/pme_grid.h"
+#include "gromacs/mdtypes/simulation_workload.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/stringcompare.h"
 
@@ -117,6 +119,73 @@ TEST_F(SeparatePmeRanksPermittedTest, EmptyDisableReasonText)
 
     // Expect that reasonsWhyDisabled works with empty reason
     EXPECT_TRUE(separatePmeRanksPermitted_.reasonsWhyDisabled().empty());
+}
+TEST(PmeStepWorkloadTest, ConvertsRelevantStepWork)
+{
+    StepWorkload stepWork;
+    EXPECT_FALSE(PmeStepWorkload{ stepWork }.computeEnergyAndVirial);
+
+    stepWork.computeEnergy = true;
+    EXPECT_TRUE(PmeStepWorkload{ stepWork }.computeEnergyAndVirial);
+
+    stepWork.computeEnergy       = false;
+    stepWork.computeVirial       = true;
+    stepWork.computeForces       = true;
+    stepWork.useGpuPmeFReduction = true;
+    const PmeStepWorkload pmeWork{ stepWork };
+
+    EXPECT_TRUE(pmeWork.computeEnergyAndVirial);
+    EXPECT_TRUE(pmeWork.computeForces);
+    EXPECT_TRUE(pmeWork.useGpuPmeFReduction);
+}
+
+TEST(PmeOnlySimulationWorkloadTest, ConvertsRelevantSimulationWork)
+{
+    SimulationWorkload simulationWork;
+    simulationWork.useGpuPmePpCommunication = true;
+    simulationWork.useNvshmem               = true;
+    simulationWork.useGpuHaloExchange       = true;
+    simulationWork.useMdGpuGraph            = true;
+    simulationWork.useGpuPme                = true;
+    simulationWork.useGpuPmeFft             = false;
+
+    const PmeOnlySimulationWorkload pmeWork{ simulationWork };
+
+    EXPECT_TRUE(pmeWork.useGpu);
+    EXPECT_TRUE(pmeWork.useGpuPmePpCommunication);
+    EXPECT_TRUE(pmeWork.useNvshmem);
+    EXPECT_TRUE(pmeWork.useGpuHaloExchange);
+    EXPECT_TRUE(pmeWork.useMdGpuGraph);
+
+    simulationWork.useGpuPme = false;
+    const PmeOnlySimulationWorkload cpuPmeWork{ simulationWork };
+    EXPECT_FALSE(cpuPmeWork.useGpu);
+}
+
+
+TEST(PmeGridOverlapTest, UsesAlignedZStrideForMajorOverlapBuffer)
+{
+    constexpr int pmeOrder  = 5;
+    constexpr int gridY     = 120;
+    constexpr int gridZ     = 121;
+    constexpr int minorRank = 1;
+
+    const int unalignedGridZ = gridZ + pmeOrder - 1;
+    const int alignedGridZ   = pmeGridAlignedZSize(gridZ, pmeOrder);
+    if (alignedGridZ == unalignedGridZ)
+    {
+        GTEST_SKIP() << "PME z grid alignment is not active in this build";
+    }
+
+    const int gridYBlockSize = (gridY + minorRank - 1) / minorRank + pmeOrder;
+    const int maxLocalGridY  = gridYBlockSize - 1;
+
+    const int oldBufferSize      = pmeOrder * gridYBlockSize * unalignedGridZ;
+    const int requiredBufferSize = pmeOrder * maxLocalGridY * alignedGridZ;
+    const int fixedBufferSize    = pmeOrder * gridYBlockSize * alignedGridZ;
+
+    EXPECT_GT(requiredBufferSize, oldBufferSize);
+    EXPECT_LE(requiredBufferSize, fixedBufferSize);
 }
 
 } // namespace test

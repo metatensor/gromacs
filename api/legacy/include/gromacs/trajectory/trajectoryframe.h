@@ -39,6 +39,8 @@
 #ifndef GMX_TRAJECTORY_TRX_H
 #define GMX_TRAJECTORY_TRX_H
 
+#include <optional>
+
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/matrix.h"
@@ -48,15 +50,15 @@
 struct t_atoms;
 enum class PbcType : int;
 
-typedef struct t_trxframe // NOLINT (clang-analyzer-optin.performance.Padding)
+typedef struct t_trxframe // NOLINT(clang-analyzer-optin.performance.Padding)
 {
-    int      not_ok;  /* integrity flags                  */
-    gmx_bool bDouble; /* Double precision?                */
-    int      natoms;  /* number of atoms (atoms, x, v, f, index) */
+    int      not_ok; /* integrity flags                  */
+    int      natoms; /* number of atoms (atoms, x, v, f, index) */
     gmx_bool bStep;
     int64_t  step; /* MD step number                   */
     gmx_bool bTime;
-    real     time; /* time of the frame                */
+    bool     timeIsDouble; /* true when time was read in double precision */
+    double   time;         /* time of the frame                */
     gmx_bool bLambda;
     gmx_bool bFepState; /* does it contain fep_state?       */
     real     lambda;    /* free energy perturbation lambda  */
@@ -79,12 +81,12 @@ typedef struct t_trxframe // NOLINT (clang-analyzer-optin.performance.Padding)
     int*     index; /* atom indices of contained coordinates */
 } t_trxframe;
 
+namespace gmx
+{
+
 void comp_frame(FILE* fp, t_trxframe* fr1, t_trxframe* fr2, gmx_bool bRMSD, real ftol, real abstol);
 
 void done_frame(t_trxframe* frame);
-
-namespace gmx
-{
 
 /*! \internal
  * \brief Contains a valid trajectory frame.
@@ -113,6 +115,8 @@ public:
     std::int64_t step() const;
     //! Time read from the trajectory file frame.
     double time() const;
+    //! Precision of position coordinates read from the trajectory file frame, if available.
+    std::optional<real> positionPrecision() const;
     //! The PBC characteristics of the box.
     PbcType pbc() const;
     //! Get a view of position coordinates of the frame (which could be empty).

@@ -45,6 +45,7 @@
 #include "gromacs/commandline/viewit.h"
 #include "gromacs/fileio/confio.h"
 #include "gromacs/fileio/filetypes.h"
+#include "gromacs/fileio/timecontrol.h"
 #include "gromacs/fileio/tpxio.h"
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
@@ -114,7 +115,7 @@ int gmx_helix(int argc, char* argv[])
                      { "-ahxend", FALSE, etINT, { &rEnd }, "Last residue in helix" } };
 
     typedef struct
-    { //NOLINT(clang-analyzer-optin.performance.Padding)
+    { // NOLINT(clang-analyzer-optin.performance.Padding)
         FILE *      fp, *fp2;
         gmx_bool    bfp2;
         const char* filenm;
@@ -145,6 +146,7 @@ int gmx_helix(int argc, char* argv[])
     };
 
     gmx_output_env_t* oenv;
+    gmx::TimeControl  timeControl;
     char              buf[54];
     t_trxstatus*      status;
     int               natoms, nres;
@@ -168,7 +170,7 @@ int gmx_helix(int argc, char* argv[])
 #define NFILE asize(fnm)
 
     if (!parse_common_args(
-                &argc, argv, PCA_CAN_VIEW | PCA_CAN_TIME, NFILE, fnm, asize(pa), pa, asize(desc), desc, 0, nullptr, &oenv))
+                &argc, argv, PCA_CAN_VIEW | PCA_CAN_TIME, NFILE, fnm, asize(pa), pa, asize(desc), desc, 0, nullptr, &oenv, &timeControl))
     {
         return 0;
     }
@@ -177,7 +179,7 @@ int gmx_helix(int argc, char* argv[])
 
     top = read_top(ftp2fn(efTPR, NFILE, fnm), &pbcType);
 
-    natoms = read_first_x(oenv, &status, opt2fn("-f", NFILE, fnm), &t, &x, box);
+    natoms = read_first_x(oenv, &status, opt2fn("-f", NFILE, fnm), &t, &x, box, &timeControl);
 
     if (natoms != top->atoms.nr)
     {

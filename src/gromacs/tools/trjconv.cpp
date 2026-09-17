@@ -57,6 +57,7 @@
 #include "gromacs/fileio/groio.h"
 #include "gromacs/fileio/oenv.h"
 #include "gromacs/fileio/pdbio.h"
+#include "gromacs/fileio/timecontrol.h"
 #include "gromacs/fileio/tngio.h"
 #include "gromacs/fileio/tpxio.h"
 #include "gromacs/fileio/trrio.h"
@@ -87,6 +88,9 @@
 #include "gromacs/utility/vectypes.h"
 
 struct gmx_output_env_t;
+
+namespace gmx
+{
 
 static void mk_filenm(char* base, const char* ext, int ndigit, int file_nr, char out_file[])
 {
@@ -234,23 +238,23 @@ static std::unique_ptr<gmx_mtop_t> read_mtop_for_tng(const char* tps_file,
 //! Do a deep copy of \c input and store in (pre-allocated) \c copy
 static void copyTrxframeDeeply(const t_trxframe& input, t_trxframe* copy)
 {
-    copy->not_ok    = input.not_ok;
-    copy->bDouble   = input.bDouble;
-    copy->natoms    = input.natoms;
-    copy->bStep     = input.bStep;
-    copy->step      = input.step;
-    copy->bTime     = input.bTime;
-    copy->time      = input.time;
-    copy->bLambda   = input.bLambda;
-    copy->bFepState = input.bFepState;
-    copy->lambda    = input.lambda;
-    copy->fep_state = input.fep_state;
-    copy->bPrec     = input.bPrec;
-    copy->prec      = input.prec;
-    copy->bX        = input.bX;
-    copy->bV        = input.bV;
-    copy->bF        = input.bF;
-    copy->bAtoms    = input.bAtoms;
+    copy->not_ok       = input.not_ok;
+    copy->natoms       = input.natoms;
+    copy->bStep        = input.bStep;
+    copy->step         = input.step;
+    copy->bTime        = input.bTime;
+    copy->timeIsDouble = input.timeIsDouble;
+    copy->time         = input.time;
+    copy->bLambda      = input.bLambda;
+    copy->bFepState    = input.bFepState;
+    copy->lambda       = input.lambda;
+    copy->fep_state    = input.fep_state;
+    copy->bPrec        = input.bPrec;
+    copy->prec         = input.prec;
+    copy->bX           = input.bX;
+    copy->bV           = input.bV;
+    copy->bF           = input.bF;
+    copy->bAtoms       = input.bAtoms;
     if (input.bAtoms)
     {
         done_atom(copy->atoms);
@@ -291,11 +295,11 @@ static void copyTrxframeDeeply(const t_trxframe& input, t_trxframe* copy)
 static void swapFrames(t_trxframe* a, t_trxframe* b)
 {
     std::swap(a->not_ok, b->not_ok);
-    std::swap(a->bDouble, b->bDouble);
     std::swap(a->natoms, b->natoms);
     std::swap(a->bStep, b->bStep);
     std::swap(a->step, b->step);
     std::swap(a->bTime, b->bTime);
+    std::swap(a->timeIsDouble, b->timeIsDouble);
     std::swap(a->time, b->time);
     std::swap(a->bLambda, b->bLambda);
     std::swap(a->bFepState, b->bFepState);
@@ -515,7 +519,7 @@ int gmx_trjconv(int argc, char* argv[])
     gmx_bool bSeparate = FALSE, bVels = TRUE, bForce = FALSE, bCONECT = FALSE;
     gmx_bool bCenter = FALSE;
     int      skip_nr = 1, ndec = 3, nzero = 0;
-    real     tzero = 0, delta_t = 0, timestep = 0, ttrunc = -1, tdump = -1, split_t = 0;
+    double   tzero = 0, delta_t = 0, timestep = 0, ttrunc = -1, tdump = -1, split_t = 0;
     rvec     newbox = { 0, 0, 0 }, shift = { 0, 0, 0 }, trans = { 0, 0, 0 };
     char*    exec_command = nullptr;
     real     dropunder = 0, dropover = 0;
@@ -630,6 +634,7 @@ int gmx_trjconv(int argc, char* argv[])
     const char*  outf_ext  = nullptr;
     char         top_title[256], timestr[32], stepstr[32], filemode[5];
     gmx_output_env_t* oenv;
+    gmx::TimeControl  timeControl;
 
     t_filenm fnm[] = { { efTRX, "-f", nullptr, ffREAD },     { efTRO, "-o", nullptr, ffWRITE },
                        { efTPS, nullptr, nullptr, ffOPTRD }, { efNDX, nullptr, nullptr, ffOPTRD },
@@ -648,7 +653,8 @@ int gmx_trjconv(int argc, char* argv[])
                            desc,
                            0,
                            nullptr,
-                           &oenv))
+                           &oenv,
+                           &timeControl))
     {
         return 0;
     }
@@ -893,7 +899,7 @@ int gmx_trjconv(int argc, char* argv[])
                 t_trxstatus* temporaryStatus;
                 clear_trxframe(&temporaryFrame, true);
                 /* no index file, so read natoms from TRX */
-                if (!read_first_frame(oenv, &temporaryStatus, in_file, &temporaryFrame, TRX_DONT_SKIP))
+                if (!read_first_frame(oenv, &temporaryStatus, in_file, &temporaryFrame, &timeControl, TRX_DONT_SKIP))
                 {
                     gmx_fatal(FARGS, "Could not read a frame from %s", in_file);
                 }
@@ -991,7 +997,7 @@ int gmx_trjconv(int argc, char* argv[])
         }
 
         /* open trx file for reading */
-        bHaveFirstFrame = read_first_frame(oenv, &trxin, in_file, &fr, flags);
+        bHaveFirstFrame = read_first_frame(oenv, &trxin, in_file, &fr, &timeControl, flags);
         if (fr.bPrec)
         {
             fprintf(stderr, "\nPrecision of %s is %g (nm)\n", in_file, 1 / fr.prec);
@@ -1068,14 +1074,8 @@ int gmx_trjconv(int argc, char* argv[])
             switch (ftp)
             {
                 case efTNG:
-                    trxout = trjtools_gmx_prepare_tng_writing(out_file,
-                                                              filemode[0],
-                                                              trxin,
-                                                              {},
-                                                              nout,
-                                                              mtop.get(),
-                                                              gmx::arrayRefFromArray(index, nout),
-                                                              grpnm);
+                    trxout = trjtools_gmx_prepare_tng_writing(
+                            out_file, filemode[0], trxin, {}, nout, mtop.get(), arrayRefFromArray(index, nout), grpnm);
                     break;
                 case efXTC:
                 case efTRR:
@@ -1402,8 +1402,7 @@ int gmx_trjconv(int argc, char* argv[])
                             }
                         }
 
-                        auto positionsArrayRef =
-                                gmx::arrayRefFromArray(reinterpret_cast<gmx::RVec*>(fr.x), natoms);
+                        auto positionsArrayRef = arrayRefFromArray(reinterpret_cast<RVec*>(fr.x), natoms);
                         if (bPBCcomAtom)
                         {
                             switch (unitcell_enum)
@@ -1518,7 +1517,7 @@ int gmx_trjconv(int argc, char* argv[])
                             case efPDB:
                                 // Only add a generator statement if title is empty,
                                 // to avoid multiple generated-by statements from various programs
-                                if (std::strlen(top_title) == 0)
+                                if (!bTPS || std::strlen(top_title) == 0)
                                 {
                                     sprintf(top_title, "Generated by trjconv");
                                 }
@@ -1538,7 +1537,7 @@ int gmx_trjconv(int argc, char* argv[])
                                 {
                                     std::strcpy(stepstr, "");
                                 }
-                                title = gmx::formatString("%s%s%s", top_title, timestr, stepstr);
+                                title = formatString("%s%s%s", top_title, timestr, stepstr);
                                 if (bSeparate || bSplitHere)
                                 {
                                     out = gmx_ffopen(out_file2, "w");
@@ -1709,3 +1708,5 @@ int gmx_trjconv(int argc, char* argv[])
     output_env_done(oenv);
     return 0;
 }
+
+} // namespace gmx

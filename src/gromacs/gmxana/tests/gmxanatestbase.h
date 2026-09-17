@@ -63,11 +63,18 @@ public:
     //! \brief Run command and check the resulting output.
     void runAndCheckResults();
 
-    //! \brief Select groups when prompted for when running the tool.
-    void selectGroups(const std::initializer_list<const char*> groups);
+    /*! \brief Run command without checking output files.
+     *
+     * Use this when validation is done externally (e.g., comparing against
+     * files in simulationdatabase) rather than via the reference data framework.
+     */
+    void runTool();
 
     //! \brief Select groups when prompted for when running the tool.
-    void selectGroups(const ArrayRef<const std::string> groups);
+    void selectGroups(std::initializer_list<const char*> groups);
+
+    //! \brief Select groups when prompted for when running the tool.
+    void selectGroups(ArrayRef<const std::string> groups);
 
 private:
     //! \brief Function for tool to test, must be set by derived class.

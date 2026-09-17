@@ -51,6 +51,8 @@ namespace gmx
 {
 
 template<typename ValueType>
+class ArrayRef;
+template<typename ValueType>
 class BasicVector;
 template<typename ValueType>
 class H5mdDataSetBuilder;
@@ -98,15 +100,15 @@ public:
      */
     hid_t id() const;
 
-    /*! \brief Return the HDF5 handle of the data type for the managed data set.
+    /*! \brief Return the HDF5 handle of the stored (in-file) data type for the managed data set.
      *
      *  \warning Must not be closed by the caller.
      *
      *  \deprecated This handle will not be exposed once I/O is implemented as class methods.
      */
-    hid_t dataType() const;
+    hid_t storedDataType() const;
 
-    /*! \brief Return the HDF5 handle of the native data type for the managed data set.
+    /*! \brief Return the HDF5 handle of the native (in-memory) data type for the managed data set.
      *
      *  \warning Must not be closed by the caller.
      *
@@ -120,6 +122,32 @@ public:
      */
     DataSetDims dims() const;
 
+    /*! \brief Perform a low-level operation to read data into \p values.
+     *
+     * \note Assumes that the caller has validated the given handles
+     * and that \p values is of the correct size.
+     *
+     * \param[out] values          Container to read data into.
+     * \param[in]  memoryDataSpace Data space for the memory buffer (called `mem_space_id` in hdf5 documentation).
+     * \param[in]  fileDataSpace   Data space for the file buffer (called `file_space_id` in hdf5 documentation).
+     *
+     * \returns True if the read operation was successful, otherwise false.
+     */
+    bool read(ArrayRef<ValueType> values, hid_t memoryDataSpace, hid_t fileDataSpace) const;
+
+    /*! \brief Perform a low-level operation to write \p values into data set.
+     *
+     * \note Assumes that the caller has validated the given handles
+     * and that \p values is of the correct size.
+     *
+     * \param[in] values          Values to write into the data set.
+     * \param[in] memoryDataSpace Data space for the memory buffer (called `mem_space_id` in hdf5 documentation).
+     * \param[in] fileDataSpace   Data space for the file buffer (called `file_space_id` in hdf5 documentation).
+     *
+     * \returns True if the write operation was successful, otherwise false.
+     */
+    bool write(ArrayRef<const ValueType> values, hid_t memoryDataSpace, hid_t fileDataSpace) const;
+
 private:
     /*! \brief Constructor to manage a data set with given \p dataSetHandle.
      *
@@ -128,7 +156,7 @@ private:
      */
     explicit H5mdDataSetBase(hid_t dataSetHandle);
 
-    //!< Handle to the managed data set.
+    //! \brief Handle to the managed data set.
     const hid_t dataSet_;
 
     /*! \brief Scope guard which closes the data set handle when the destructor is called.
@@ -139,8 +167,8 @@ private:
      */
     H5mdGuard dataSetGuard_ = sg::make_scope_guard(H5mdCloser(dataSet_, H5Dclose));
 
-    //!< Handle to the data type of the managed data set used when writing the set.
-    const hid_t dataType_;
+    //! \brief Handle to the stored (in-file) data type of the managed data set.
+    const hid_t storedDataType_;
 
     /*! \brief Scope guard which closes the data type handle when the destructor is called.
      *
@@ -148,17 +176,17 @@ private:
      * handle. If not the guard may not be active if a subsequent initialization fails,
      * resulting in a memory leak.
      */
-    H5mdGuard dataTypeGuard_ = sg::make_scope_guard(H5mdCloser(dataType_, H5Tclose));
+    H5mdGuard storedDataTypeGuard_ = sg::make_scope_guard(H5mdCloser(storedDataType_, H5Tclose));
 
-    /*! \brief Handle to the immutable native data type of the managed data set.
+    /*! \brief Handle to the immutable native (in-memory) data type of the managed data set.
      *
-     * This may be different from dataType_ when opening a data set from a file which was created
-     * on another machine. When reading data from a data set this is used along with dataType_ to
-     * convert the data into the correct type of the current compiler target (i.e. native).
+     * This may be different from \p storedDataType_ when opening a data set from a file
+     * which was created on another machine. When reading data from or writing data to
+     * a data set this is used to convert the data from/to the \p storedDataType_.
      */
     const hid_t nativeDataType_;
 
-    /*! \brief Scope guard which closes the native data type handle when the destructor is called.
+    /*! \brief Scope guard which closes the data type handle when the destructor is called.
      *
      * \note Must be declared directly below and thus initialized just after the guarded
      * handle. If not the guard may not be active if a subsequent initialization fails,
@@ -166,22 +194,16 @@ private:
      */
     H5mdGuard nativeDataTypeGuard_ = sg::make_scope_guard(H5mdCloser(nativeDataType_, H5Tclose));
 
-    //!< Number of dimensions of data set.
+    //! \brief Number of dimensions of data set.
     const hsize_t numDims_;
 };
 
 extern template class H5mdDataSetBase<int32_t>;
-
 extern template class H5mdDataSetBase<int64_t>;
-
 extern template class H5mdDataSetBase<float>;
-
 extern template class H5mdDataSetBase<double>;
-
 extern template class H5mdDataSetBase<BasicVector<float>>;
-
 extern template class H5mdDataSetBase<BasicVector<double>>;
-
 extern template class H5mdDataSetBase<std::string>;
 
 } // namespace gmx

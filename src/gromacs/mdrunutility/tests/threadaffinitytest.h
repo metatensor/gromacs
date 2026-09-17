@@ -50,6 +50,7 @@
 #include "gromacs/utility/stringutil.h"
 
 #include "testutils/loggertest.h"
+#include "testutils/setenv.h"
 
 namespace gmx
 {
@@ -121,7 +122,7 @@ public:
             expectAffinitySet(core);
         }
     }
-    // NOLINTNEXTLINE readability-convert-member-functions-to-static
+    // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
     void expectAffinitySetThatFails(int core)
     {
         using ::testing::Return;
@@ -175,6 +176,8 @@ private:
     MockThreadAffinityAccess          affinityAccess_;
     LoggerTestHelper                  logHelper_;
     int                               physicalNodeId_;
+
+    gmx::test::GmxEnvGuard dontReportAffinity_{ "GMX_REPORT_CPU_AFFINITY", nullptr };
 };
 
 } // namespace test

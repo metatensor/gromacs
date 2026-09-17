@@ -45,6 +45,7 @@
 #include "gromacs/commandline/viewit.h"
 #include "gromacs/correlationfunctions/autocorr.h"
 #include "gromacs/fileio/filetypes.h"
+#include "gromacs/fileio/timecontrol.h"
 #include "gromacs/fileio/trrio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/angle_correction.h"
@@ -120,8 +121,9 @@ int gmx_g_angle(int argc, char* argv[])
         "a group of angles as a function of time. With the [TT]-all[tt] option,",
         "the first graph is the average and the rest are the individual angles.[PAR]",
         "With the [TT]-of[tt] option, [THISMODULE] also calculates the fraction of trans",
-        "dihedrals (only for dihedrals) as function of time, but this is",
-        "probably only fun for a select few.[PAR]",
+        "dihedrals (only for ryckaert-bellemans dihedrals) as function of time, but this is",
+        "probably only fun for a select few. An output file is only generated if [TT]-type",
+        "ryckaert-bellemans[tt] is specified.[PAR]",
         "With option [TT]-oc[tt], a dihedral correlation function is calculated.[PAR]",
         "It should be noted that the index file must contain",
         "atom triplets for angles or atom quadruplets for dihedrals.",
@@ -132,7 +134,8 @@ int gmx_g_angle(int argc, char* argv[])
         "Option [TT]-ot[tt] plots when transitions occur between",
         "dihedral rotamers of multiplicity 3 and [TT]-oh[tt]",
         "records a histogram of the times between such transitions,",
-        "assuming the input trajectory frames are equally spaced in time."
+        "assuming the input trajectory frames are equally spaced in time. Output files are only",
+        "generated if [TT]-type dihedral[tt] is specified."
     };
     static const char* opt[] = { nullptr, "angle", "dihedral", "improper", "ryckaert-bellemans",
                                  nullptr };
@@ -179,7 +182,8 @@ int gmx_g_angle(int argc, char* argv[])
     int           nangles, first, last;
     gmx_bool      bAver, bRb, bPeriodic, bFrac, /* calculate fraction too?  */
             bTrans,                             /* worry about transtions too? */
-            bCorr;                              /* correlation function ? */
+            bCorr,                              /* correlation function ? */
+            bHisto;                             /* generate transition histogram */
     double   tfrac = 0;
     char     title[256];
     real**   dih = nullptr; /* mega array with all dih. angles at all times*/
@@ -193,11 +197,12 @@ int gmx_g_angle(int argc, char* argv[])
     int               npargs;
     t_pargs*          ppa;
     gmx_output_env_t* oenv;
+    gmx::TimeControl  timeControl;
 
     npargs = asize(pa);
     ppa    = add_acf_pargs(&npargs, pa);
     if (!parse_common_args(
-                &argc, argv, PCA_CAN_VIEW | PCA_CAN_TIME, NFILE, fnm, npargs, ppa, asize(desc), desc, asize(bugs), bugs, &oenv))
+                &argc, argv, PCA_CAN_VIEW | PCA_CAN_TIME, NFILE, fnm, npargs, ppa, asize(desc), desc, asize(bugs), bugs, &oenv, &timeControl))
     {
         sfree(ppa);
         return 0;
@@ -253,11 +258,20 @@ int gmx_g_angle(int argc, char* argv[])
     bCorr  = opt2bSet("-oc", NFILE, fnm);
     bAver  = opt2bSet("-ov", NFILE, fnm);
     bTrans = opt2bSet("-ot", NFILE, fnm);
+    bHisto = opt2bSet("-oh", NFILE, fnm);
     bFrac  = opt2bSet("-of", NFILE, fnm);
-    if (bTrans && opt[0][0] != 'd')
+    if ((bTrans || bCorr || bHisto || bFrac) && opt[0][0] == 'a')
     {
-        fprintf(stderr, "Option -ot should only accompany -type dihedral. Disabling -ot.\n");
-        bTrans = FALSE;
+        gmx_fatal(
+                FARGS,
+                "Options -ot, -oc, -oh, and -of calculate dihedral properties and are incompatible "
+                "with -type angle. Specify -type dihedral, improper, or ryckaert-bellemans and "
+                "select a valid dihedral group to generate these files.\n");
+    }
+
+    if (!bTrans && bHisto)
+    {
+        fprintf(stderr, "Warning: Option -ot is not specified. -oh will not be generated.\n");
     }
 
     if (bChandler && !bCorr)
@@ -268,17 +282,9 @@ int gmx_g_angle(int argc, char* argv[])
     if (bFrac && !bRb)
     {
         fprintf(stderr,
-                "Warning:"
-                " calculating fractions as defined in this program\n"
-                "makes sense for Ryckaert Bellemans dihs. only. Ignoring -of\n\n");
+                "Warning: Option -of should only accompany -type ryckaert-bellemans. Disabling "
+                "-of.\n\n");
         bFrac = FALSE;
-    }
-
-    if ((bTrans || bFrac || bCorr) && mult == 3)
-    {
-        gmx_fatal(FARGS,
-                  "Can only do transition, fraction or correlation\n"
-                  "on dihedrals. Select -d\n");
     }
 
     /*
@@ -306,7 +312,8 @@ int gmx_g_angle(int argc, char* argv[])
                  &trans_frac,
                  &aver_angle,
                  dih,
-                 oenv);
+                 oenv,
+                 timeControl);
 
     dt = (time[nframes - 1] - time[0]) / (nframes - 1);
 

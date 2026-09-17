@@ -54,6 +54,7 @@
 #include "gromacs/fileio/matio.h"
 #include "gromacs/fileio/oenv.h"
 #include "gromacs/fileio/rgb.h"
+#include "gromacs/fileio/timecontrol.h"
 #include "gromacs/fileio/tpxio.h"
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
@@ -824,7 +825,8 @@ static void do_dip(const t_topology*       top,
                    int                     nslices,
                    const char*             axtitle,
                    const char*             slabfn,
-                   const gmx_output_env_t* oenv)
+                   const gmx_output_env_t* oenv,
+                   const gmx::TimeControl& timeControl)
 {
     std::array<std::string, 4> leg_mtot = { "M\\sx \\N", "M\\sy \\N", "M\\sz \\N", "|M\\stot \\N|" };
     std::array<std::string, 3> leg_eps     = { "epsilon", "G\\sk", "g\\sk" };
@@ -857,7 +859,7 @@ static void do_dip(const t_topology*       top,
     double         M_diff = 0, epsilon, invtel, vol_aver;
     double         mu_ave, mu_mol, M2_ave = 0, M_ave2 = 0, M_av[DIM], M_av2[DIM];
     double         M[3], M2[3], M4[3], Gk = 0, g_k = 0;
-    gmx_stats_t *  Qlsq, mulsq, muframelsq = nullptr;
+    gmx::stats_t * Qlsq, mulsq, muframelsq = nullptr;
     ivec           iMu;
     real**         muall        = nullptr;
     rvec*          slab_dipoles = nullptr;
@@ -951,9 +953,9 @@ static void do_dip(const t_topology*       top,
     snew(Qlsq, DIM);
     for (i = 0; (i < DIM); i++)
     {
-        Qlsq[i] = gmx_stats_init();
+        Qlsq[i] = gmx::stats_init();
     }
-    mulsq = gmx_stats_init();
+    mulsq = gmx::stats_init();
 
     /* Open all the files */
     outmtot = xvgropen(out_mtot,
@@ -1046,7 +1048,7 @@ static void do_dip(const t_topology*       top,
             bCont = read_mu_from_enx(fmu, iVol, iMu, mu_t, &volume, &t, nre, fr);
             if (bCont)
             {
-                timecheck = check_times(t);
+                timecheck = check_times(t, timeControl);
                 if (timecheck < 0)
                 {
                     teller++;
@@ -1066,7 +1068,7 @@ static void do_dip(const t_topology*       top,
     }
     else
     {
-        natom = read_first_x(oenv, &status, fn, &t, &x, box);
+        natom = read_first_x(oenv, &status, fn, &t, &x, box, &timeControl);
     }
 
     /* Calculate spacing for dipole bin (simple histogram) */
@@ -1111,7 +1113,7 @@ static void do_dip(const t_topology*       top,
         }
         t1 = t;
 
-        muframelsq = gmx_stats_init();
+        muframelsq = gmx::stats_init();
 
         /* Initialise */
         for (m = 0; (m < DIM); m++)
@@ -1148,8 +1150,8 @@ static void do_dip(const t_topology*       top,
                     ind1 = mols->index[molindex[n][i] + 1];
 
                     mol_dip(ind0, ind1, x, atom, dipole[i]);
-                    gmx_stats_add_point(mulsq, 0, norm(dipole[i]), 0, 0);
-                    gmx_stats_add_point(muframelsq, 0, norm(dipole[i]), 0, 0);
+                    gmx::stats_add_point(mulsq, 0, norm(dipole[i]), 0, 0);
+                    gmx::stats_add_point(muframelsq, 0, norm(dipole[i]), 0, 0);
                     if (bSlab)
                     {
                         update_slab_dipoles(ind0, ind1, x, dipole[i], idim, nslices, slab_dipoles, box);
@@ -1159,7 +1161,7 @@ static void do_dip(const t_topology*       top,
                         mol_quad(ind0, ind1, x, atom, quad);
                         for (m = 0; (m < DIM); m++)
                         {
-                            gmx_stats_add_point(Qlsq[m], 0, quad[m], 0, 0);
+                            gmx::stats_add_point(Qlsq[m], 0, quad[m], 0, 0);
                         }
                     }
                     if (bCorr && !bTotal)
@@ -1364,7 +1366,7 @@ static void do_dip(const t_topology*       top,
 
             if (fnadip)
             {
-                fprintf(adip, "%10g %f \n", t, gmx_stats_get_average(muframelsq));
+                fprintf(adip, "%10g %f \n", t, gmx::stats_get_average(muframelsq));
             }
             /*if (dipole)
                printf("%f %f\n", norm(dipole[0]), norm(dipole[1]));
@@ -1391,7 +1393,7 @@ static void do_dip(const t_topology*       top,
                 fprintf(outeps, "%10g  %12.8e\n", t, epsilon);
             }
         }
-        gmx_stats_free(muframelsq);
+        gmx::stats_free(muframelsq);
 
         if (bMU)
         {
@@ -1401,7 +1403,7 @@ static void do_dip(const t_topology*       top,
         {
             bCont = read_next_x(oenv, status, &t, x, box);
         }
-        timecheck = check_times(t);
+        timecheck = check_times(t, timeControl);
     } while (bCont && (timecheck == 0));
 
     gmx_rmpbc_done(gpbc);
@@ -1483,15 +1485,15 @@ static void do_dip(const t_topology*       top,
     }
     if (!bMU)
     {
-        auto [aver, sigma, error] = gmx_stats_get_ase(mulsq);
+        auto [aver, sigma, error] = gmx::stats_get_ase(mulsq);
         printf("\nDipole moment (Debye)\n");
         printf("---------------------\n");
         printf("Average  = %8.4f  Std. Dev. = %8.4f  Error = %8.4f\n", aver, sigma, error);
         if (bQuad)
         {
-            auto [averageXX, sigmaXX, errorXX] = gmx_stats_get_ase(Qlsq[XX]);
-            auto [averageYY, sigmaYY, errorYY] = gmx_stats_get_ase(Qlsq[YY]);
-            auto [averageZZ, sigmaZZ, errorZZ] = gmx_stats_get_ase(Qlsq[ZZ]);
+            auto [averageXX, sigmaXX, errorXX] = gmx::stats_get_ase(Qlsq[XX]);
+            auto [averageYY, sigmaYY, errorYY] = gmx::stats_get_ase(Qlsq[YY]);
+            auto [averageZZ, sigmaZZ, errorZZ] = gmx::stats_get_ase(Qlsq[ZZ]);
 
             printf("\nQuadrupole moment (Debye-Ang)\n");
             printf("-----------------------------\n");
@@ -1624,6 +1626,7 @@ int gmx_dipoles(int argc, char* argv[])
     int               skip = 0, nFA = 0, nFB = 0, ncos = 1;
     int               nlevels = 20, ndegrees = 90;
     gmx_output_env_t* oenv;
+    gmx::TimeControl  timeControl;
     t_pargs           pa[] = {
         { "-mu", FALSE, etREAL, { &mu_aver }, "dipole of a single molecule (in Debye)" },
         { "-mumax", FALSE, etREAL, { &mu_max }, "max dipole in Debye (for histogram)" },
@@ -1722,7 +1725,7 @@ int gmx_dipoles(int argc, char* argv[])
     npargs = asize(pa);
     ppa    = add_acf_pargs(&npargs, pa);
     if (!parse_common_args(
-                &argc, argv, PCA_CAN_TIME | PCA_CAN_VIEW, NFILE, fnm, npargs, ppa, asize(desc), desc, 0, nullptr, &oenv))
+                &argc, argv, PCA_CAN_TIME | PCA_CAN_VIEW, NFILE, fnm, npargs, ppa, asize(desc), desc, 0, nullptr, &oenv, &timeControl))
     {
         sfree(ppa);
         return 0;
@@ -1824,7 +1827,8 @@ int gmx_dipoles(int argc, char* argv[])
            nslices,
            axtitle,
            opt2fn("-slab", NFILE, fnm),
-           oenv);
+           oenv,
+           timeControl);
 
     do_view(oenv, opt2fn("-o", NFILE, fnm), "-autoscale xy -nxy");
     do_view(oenv, opt2fn("-eps", NFILE, fnm), "-autoscale xy -nxy");

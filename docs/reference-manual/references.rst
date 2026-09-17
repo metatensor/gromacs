@@ -2738,3 +2738,27 @@ structures into cryoelectron microscopy maps using biased molecular dynamics sim
 .. raw:: html
 
    </div>
+
+.. raw:: html
+
+   <div id="refMiletic2026">
+
+.. _refMiletic2026:
+
+:sup:`199` Miletić, V., Wieczór, M., Simmerling, C., Rampp, M., De Groot, B. L., Kutzner, C. & Gapsys, V. Force Fields and Simulation Engines: Lessons Learned from Porting Amber ff14SB and ff19SB to GROMACS. Preprint at `doi:10.26434/chemrxiv.15006112/v1 <https://doi.org/10.26434/chemrxiv.15006112/v1>`_ (2026).
+
+.. raw:: html
+
+   </div>
+
+.. raw:: html
+
+   <div id="refIn-Chul1999">
+
+.. _refIn-Chul1999:
+
+:sup:`200` In-Chul, Y., and , Berkowitz, M. L. "Ewald summation for systems with slab geometry", *J. Chem. Phys.* **111**, 3155-3162 (1999).
+
+.. raw:: html
+
+   </div>

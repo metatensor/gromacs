@@ -68,6 +68,9 @@
 
 struct gmx_output_env_t;
 
+namespace gmx
+{
+
 #define TIME_EXPLICIT 0
 #define TIME_CONTINUE 1
 #define TIME_LAST 2
@@ -75,7 +78,7 @@ struct gmx_output_env_t;
 #    define FLT_MAX 1e36
 #endif
 
-static int* select_it(gmx::ArrayRef<const gmx_enxnm_t> nm, int* nset)
+static int* select_it(ArrayRef<const gmx_enxnm_t> nm, int* nset)
 {
     gmx_bool* bE;
     int       n, k, j, i;
@@ -131,12 +134,12 @@ static int* select_it(gmx::ArrayRef<const gmx_enxnm_t> nm, int* nset)
     return set;
 }
 
-static void sort_files(gmx::ArrayRef<std::string> files, real* settime)
+static void sort_files(ArrayRef<std::string> files, double* settime)
 {
-    for (gmx::Index i = 0; i < files.ssize(); i++)
+    for (Index i = 0; i < files.ssize(); i++)
     {
-        gmx::Index minidx = i;
-        for (gmx::Index j = i + 1; j < files.ssize(); j++)
+        Index minidx = i;
+        for (Index j = i + 1; j < files.ssize(); j++)
         {
             if (settime[j] < settime[minidx])
             {
@@ -145,7 +148,7 @@ static void sort_files(gmx::ArrayRef<std::string> files, real* settime)
         }
         if (minidx != i)
         {
-            real timeswap   = settime[i];
+            double timeswap = settime[i];
             settime[i]      = settime[minidx];
             settime[minidx] = timeswap;
             std::string tmp = files[i];
@@ -156,12 +159,12 @@ static void sort_files(gmx::ArrayRef<std::string> files, real* settime)
 }
 
 
-static int scan_ene_files(const std::vector<std::string>& files, real* readtime, real* timestep, int* nremax)
+static int scan_ene_files(const std::vector<std::string>& files, double* readtime, double* timestep, int* nremax)
 {
     /* Check number of energy terms and start time of all files */
     int         nremin = 0, nresav = 0;
     ener_file_t in;
-    real        t1, t2;
+    double      t1, t2;
     char        inputstring[STRLEN];
     t_enxframe* fr;
 
@@ -228,12 +231,12 @@ static int scan_ene_files(const std::vector<std::string>& files, real* readtime,
 }
 
 
-static void edit_files(gmx::ArrayRef<std::string> files,
-                       real*                      readtime,
-                       real*                      settime,
-                       int*                       cont_type,
-                       gmx_bool                   bSetTime,
-                       gmx_bool                   bSort)
+static void edit_files(ArrayRef<std::string> files,
+                       double*               readtime,
+                       double*               settime,
+                       int*                  cont_type,
+                       gmx_bool              bSetTime,
+                       gmx_bool              bSort)
 {
     gmx_bool ok;
     char     inputstring[STRLEN], *chptr;
@@ -262,7 +265,7 @@ static void edit_files(gmx::ArrayRef<std::string> files,
                 "          File             Current start       New start\n"
                 "---------------------------------------------------------\n");
 
-        for (gmx::Index i = 0; i < files.ssize(); i++)
+        for (Index i = 0; i < files.ssize(); i++)
         {
             fprintf(stderr, "%25s   %10.3f             ", files[i].c_str(), readtime[i]);
             ok = FALSE;
@@ -311,7 +314,7 @@ static void edit_files(gmx::ArrayRef<std::string> files,
     }
     else
     {
-        for (gmx::Index i = 0; i < files.ssize(); i++)
+        for (Index i = 0; i < files.ssize(); i++)
         {
             settime[i] = readtime[i];
         }
@@ -332,7 +335,7 @@ static void edit_files(gmx::ArrayRef<std::string> files,
             "\nSummary of files and start times used:\n\n"
             "          File                Start time\n"
             "-----------------------------------------\n");
-    for (gmx::Index i = 0; i < files.ssize(); i++)
+    for (Index i = 0; i < files.ssize(); i++)
     {
         switch (cont_type[i])
         {
@@ -402,9 +405,9 @@ static void update_ee_sum(int         nre,
         {
             for (i = 0; i < nre; i++)
             {
-                ee_sum[i].sumSqDev += gmx::square(ee_sum[i].esum / nsum
-                                                  - (ee_sum[i].esum + fr->ener[i].e) / (nsum + 1))
-                                      * nsum * (nsum + 1);
+                ee_sum[i].sumSqDev +=
+                        square(ee_sum[i].esum / nsum - (ee_sum[i].esum + fr->ener[i].e) / (nsum + 1))
+                        * nsum * (nsum + 1);
                 ee_sum[i].esum += fr->ener[i].e;
             }
         }
@@ -414,8 +417,8 @@ static void update_ee_sum(int         nre,
             {
                 ee_sum[i].sumSqDev +=
                         fr->ener[i].sumSqDev
-                        + gmx::square(ee_sum[i].esum / nsum
-                                      - (ee_sum[i].esum + fr->ener[i].esum) / (nsum + fr->nsum))
+                        + square(ee_sum[i].esum / nsum
+                                 - (ee_sum[i].esum + fr->ener[i].esum) / (nsum + fr->nsum))
                                   * nsum * (nsum + fr->nsum) / static_cast<double>(fr->nsum);
                 ee_sum[i].esum += fr->ener[i].esum;
             }
@@ -470,7 +473,7 @@ int gmx_eneconv(int argc, char* argv[])
     int               noutfr;
     int               nre, nremax, kkk, nset, *set = nullptr;
     double            last_t;
-    real *            readtime, *settime, timestep, tadjust;
+    double *          readtime, *settime, timestep, tadjust;
     char              buf[22], buf2[22];
     int*              cont_type;
     gmx_bool          bNewFile, bFirst, bNewOutput;
@@ -487,18 +490,20 @@ int gmx_eneconv(int argc, char* argv[])
 
 #define NFILE asize(fnm)
     gmx_bool        bWrite;
-    static real     delta_t = 0.0, toffset = 0, scalefac = 1;
+    static double   delta_t  = 0.0;
+    static double   toffset  = 0;
+    static real     scalefac = 1;
     static gmx_bool bSetTime = FALSE;
     static gmx_bool bSort = TRUE, bError = TRUE;
-    static real     begin     = -1;
-    static real     end       = -1;
+    static double   begin     = -1;
+    static double   end       = -1;
     gmx_bool        remove_dh = FALSE;
 
     t_pargs pa[] = {
-        { "-b", FALSE, etREAL, { &begin }, "First time to use" },
-        { "-e", FALSE, etREAL, { &end }, "Last time to use" },
-        { "-dt", FALSE, etREAL, { &delta_t }, "Only write out frame when t MOD dt = offset" },
-        { "-offset", FALSE, etREAL, { &toffset }, "Time offset for [TT]-dt[tt] option" },
+        { "-b", FALSE, etTIME, { &begin }, "First time to use" },
+        { "-e", FALSE, etTIME, { &end }, "Last time to use" },
+        { "-dt", FALSE, etTIME, { &delta_t }, "Only write out frame when t MOD dt = offset" },
+        { "-offset", FALSE, etTIME, { &toffset }, "Time offset for [TT]-dt[tt] option" },
         { "-settime", FALSE, etBOOL, { &bSetTime }, "Change starting time interactively" },
         { "-sort", FALSE, etBOOL, { &bSort }, "Sort energy files (not frames)" },
         { "-rmdh", FALSE, etBOOL, { &remove_dh }, "Remove free energy block data" },
@@ -507,7 +512,7 @@ int gmx_eneconv(int argc, char* argv[])
     };
 
     if (!parse_common_args(
-                &argc, argv, 0, NFILE, fnm, asize(pa), pa, asize(desc), desc, asize(bugs), bugs, &oenv))
+                &argc, argv, 0, NFILE, fnm, asize(pa), pa, asize(desc), desc, asize(bugs), bugs, &oenv, nullptr))
     {
         return 0;
     }
@@ -522,7 +527,7 @@ int gmx_eneconv(int argc, char* argv[])
     lastfilestep = 0;
     laststep     = 0;
 
-    auto files = gmx::copyOf(opt2fns("-f", NFILE, fnm));
+    auto files = copyOf(opt2fns("-f", NFILE, fnm));
 
     if (files.empty())
     {
@@ -570,7 +575,7 @@ int gmx_eneconv(int argc, char* argv[])
         }
 
         /* start reading from the next file */
-        while ((fro->t <= (settime[f + 1] + GMX_REAL_EPS)) && do_enx(in, fr))
+        while (fro->t <= settime[f + 1] * (1 + GMX_DOUBLE_EPS) && do_enx(in, fr))
         {
             if (bNewFile)
             {
@@ -598,8 +603,8 @@ int gmx_eneconv(int argc, char* argv[])
             fro->step = lastfilestep + fr->step - startstep_file;
             fro->t    = tadjust + fr->t;
 
-            bWrite = ((begin < 0 || (fro->t >= begin - GMX_REAL_EPS))
-                      && (end < 0 || (fro->t <= end + GMX_REAL_EPS))
+            bWrite = ((begin < 0 || (fro->t >= begin * (1 - GMX_DOUBLE_EPS)))
+                      && (end < 0 || (fro->t <= end * (1 + GMX_DOUBLE_EPS)))
                       && (fro->t <= settime[f + 1] + 0.5 * timestep));
 
             if (debug)
@@ -610,19 +615,19 @@ int gmx_eneconv(int argc, char* argv[])
                         fr->t,
                         gmx_step_str(fro->step, buf2),
                         fro->t,
-                        gmx::boolToString(bWrite));
+                        boolToString(bWrite));
             }
 
             if (bError)
             {
-                if ((end > 0) && (fro->t > end + GMX_REAL_EPS))
+                if (end > 0 && fro->t > end * (1 + GMX_DOUBLE_EPS))
                 {
                     f = files.size();
                     break;
                 }
             }
 
-            if (fro->t >= begin - GMX_REAL_EPS)
+            if (fro->t >= begin * (1 - GMX_DOUBLE_EPS))
             {
                 if (bFirst)
                 {
@@ -635,7 +640,7 @@ int gmx_eneconv(int argc, char* argv[])
             }
 
             /* determine if we should write it */
-            if (bWrite && (delta_t == 0 || bRmod(fro->t, toffset, delta_t)))
+            if (bWrite && (delta_t == 0 || bRmod_fd(fro->t, toffset, delta_t, TRUE)))
             {
                 laststep = fro->step;
                 last_t   = fro->t;
@@ -816,3 +821,5 @@ int gmx_eneconv(int argc, char* argv[])
 
     return 0;
 }
+
+} // namespace gmx
