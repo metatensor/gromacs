@@ -202,6 +202,35 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
             metatensor_torch
         )
 
+        # GROMACS links with the install RPATH, so pre-installed libraries
+        # outside torch's lib directory need their own entry. A conda/pixi
+        # prefix shares one lib/ with torch, but pip wheels install each
+        # package into its own site-packages directory.
+        foreach(_mta_target IN ITEMS metatensor metatensor_torch metatomic_torch)
+            get_target_property(_mta_aliased ${_mta_target} ALIASED_TARGET)
+            if(_mta_aliased)
+                set(_mta_target ${_mta_aliased})
+            endif()
+            get_target_property(_mta_imported ${_mta_target} IMPORTED)
+            if(NOT _mta_imported)
+                continue()
+            endif()
+            unset(_mta_location)
+            string(TOUPPER "${CMAKE_BUILD_TYPE}" _mta_config)
+            foreach(_mta_property IN ITEMS IMPORTED_LOCATION_${_mta_config} IMPORTED_LOCATION IMPORTED_LOCATION_RELEASE
+                                           IMPORTED_LOCATION_RELWITHDEBINFO IMPORTED_LOCATION_DEBUG)
+                get_target_property(_mta_location ${_mta_target} ${_mta_property})
+                if(_mta_location)
+                    break()
+                endif()
+            endforeach()
+            if(_mta_location)
+                get_filename_component(_mta_libdir "${_mta_location}" DIRECTORY)
+                list(APPEND CMAKE_INSTALL_RPATH "${_mta_libdir}")
+            endif()
+        endforeach()
+        list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
+
     elseif(GMX_METATOMIC STREQUAL "TORCH")
         message(FATAL_ERROR "Torch not found. Please install libtorch and add its installation prefix"
                             " to CMAKE_PREFIX_PATH or set Torch_DIR to a directory containing "
