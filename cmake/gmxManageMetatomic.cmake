@@ -133,11 +133,11 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
         # Minimum versions for find_package when using an installed stack
         # (pixi/metatomic-cpu). FetchContent tarballs below are only used when
         # DOWNLOAD_METATENSOR / DOWNLOAD_METATOMIC are ON.
-        set(METATENSOR_CORE_VERSION "0.1.17")
-        set(METATENSOR_CORE_SHA256 "42119e11908239915ccc187d7ca65449b461f1d4b5af4d6df1fb613d687da76a")
+        set(METATENSOR_CORE_VERSION "0.2.2")
+        set(METATENSOR_CORE_SHA256 "a104512516c8761080075e3ba7c023fcc1bb3430df7c67b25bded359a729e2ff")
 
         set(METATENSOR_TORCH_VERSION "0.10.0")
-        set(METATENSOR_TORCH_SHA256 "ea0b7e110098b91a08ceae562d9f1a77b212228305e7a148ce4ddaa7958b4ec8")
+        set(METATENSOR_TORCH_SHA256 "a0a25e061ae4fbf2a563e9fcceed68ac79b4d857e4c9803a1614d301dc3fdfcd")
 
         set(METATOMIC_TORCH_VERSION "0.1.15")
         set(METATOMIC_TORCH_SHA256 "2fa4c94144164168834a90ff195ed7d788959c9d9ffd3ea4a85e2f470925c708")
