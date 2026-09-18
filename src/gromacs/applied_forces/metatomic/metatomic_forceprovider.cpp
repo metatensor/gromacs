@@ -1427,7 +1427,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                                           * (inputs.box_[YY][XX] * inputs.box_[ZZ][YY]
                                              - inputs.box_[YY][YY] * inputs.box_[ZZ][XX]);
 
-                virialTensor = (-stress_tensor * volume)
+                // 1/2 for GROMACS' virial convention
+                virialTensor = (0.5 * stress_tensor * volume)
                                        .to(torch::kCPU).to(torch::kFloat64);
             }
             else
@@ -1454,8 +1455,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
             MetatomicTimer toCPUTimer("toCPU", mpiComm_);
 
-            forceTensor  = torch_positions.grad().to(torch::kCPU).to(torch::kFloat64);
-            virialTensor = strain.grad().to(torch::kCPU).to(torch::kFloat64);
+            forceTensor = torch_positions.grad().to(torch::kCPU).to(torch::kFloat64);
+            // 1/2 for GROMACS' virial convention; "-" since backward ran on -E
+            virialTensor = (-0.5 * strain.grad()).to(torch::kCPU).to(torch::kFloat64);
 
             toCPUTimer.stop();
         }
