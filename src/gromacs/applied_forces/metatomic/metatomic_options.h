@@ -47,6 +47,7 @@
 
 #include "gromacs/mdtypes/imdpoptionprovider.h"
 #include "gromacs/topology/atoms.h"
+#include "gromacs/topology/embedded_system_preprocessing.h"
 
 // some forward declarations
 struct gmx_mtop_t;
@@ -102,6 +103,12 @@ struct MetatomicParameters
     //! (default whole System)
     std::string inputGroup = "System";
 
+    //! Enable subtractive ONIOM topology preprocessing
+    bool oniom = false;
+
+    //! Enable ONIOM link atoms at cut bonds between ML and MM regions
+    bool linkAtoms = false;
+
     std::vector<Index>            mtaIndices_;
     std::vector<Index>            mmIndices_;
     std::unique_ptr<LocalAtomSet> mtaAtoms_;
@@ -109,6 +116,11 @@ struct MetatomicParameters
     t_atoms                       atoms_;
     int                           numAtoms_;
     std::unique_ptr<PbcType>      pbcType_;
+
+    //! Link frontier atoms (bonds crossing ML/MM boundary)
+    std::vector<LinkFrontierAtom> linkFrontier_;
+    //! Topology charges indexed by global atom
+    std::vector<real>             mmCharges_;
 };
 
 class MetatomicOptions final : public IMdpOptionProvider

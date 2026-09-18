@@ -44,6 +44,7 @@
 #define GMX_TOPOLOGY_EMBEDDED_SYSTEM_PREPROCESSING_H
 
 #include <set>
+#include <tuple>
 #include <vector>
 
 #include "gromacs/utility/basedefinitions.h"
@@ -123,6 +124,21 @@ private:
     int linkAtomNumber_ = 1;
 };
 
+/*! \brief Redistributes a force on a link atom to its adjacent embedded and MM atoms.
+ *
+ * \param[in] forceOnLink       Force acting on the link atom.
+ * \param[in] embeddedPosition  Position of the embedded atom.
+ * \param[in] mmPosition        Position of the MM atom.
+ * \param[in] mmShift           Shift vector applied to the MM atom position.
+ * \param[in] linkDistance      Embedded atom to link atom distance.
+ * \returns Forces on the embedded and MM atoms.
+ */
+std::tuple<RVec, RVec> spreadLinkAtomForce(const RVec& forceOnLink,
+                                           const RVec& embeddedPosition,
+                                           const RVec& mmPosition,
+                                           const RVec& mmShift,
+                                           real        linkDistance);
+
 /*! \brief Splits embedded atom containing molecules out of MM blocks in topology
  *
  * Modifies molblocks in topology \p mtop
@@ -183,7 +199,7 @@ void modifyEmbeddedTwoCenterInteractions(gmx_mtop_t*              mtop,
 
 /*! \brief Modifies three-centers interactions (i.e. Angles, Settles)
  *
- * Removes any other three-centers bonded interactions including 2 or more embedded atoms
+ * Removes three-center bonded interactions where all atoms are embedded
  * Any restraints and constraints will be kept
  * Any F_SETTLE containing embedded atoms will be converted to the pair of F_CONNBONDS
  * \param[in,out] mtop topology to be modified
@@ -198,7 +214,7 @@ void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
 
 /*! \brief Modifies four-centers interactions
  *
- * Removes any other four-centers bonded interactions including 3 or more embedded atoms
+ * Removes four-center bonded interactions where all atoms are embedded
  * Any restraints and constraints will be kept
  * \param[in,out] mtop topology to be modified
  * \param[in] embeddedIndices set with global indices of embedded atoms
