@@ -162,6 +162,8 @@ struct MetatomicData
     //! Sparse/dense force exchange threshold (atom count). Env: GMX_METATOMIC_SPARSE_THRESHOLD.
     int32_t sparseThreshold = 1000;
 
+    //! Energy output key, including the variant suffix (e.g. "energy/pbe0").
+    std::string energy_key;
     //! Energy uncertainty output key (empty if disabled or model lacks it).
     std::string energy_uq_key;
     //! Requested uncertainty output (nullptr if disabled).
@@ -334,7 +336,8 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     auto outputs    = data_->capabilities->outputs();
     auto v_energy   = normalize_variant(options_.params_.variant);
-    auto energy_key = pick_output("energy", outputs, v_energy);
+    data_->energy_key = pick_output("energy", outputs, v_energy);
+    const auto& energy_key = data_->energy_key;
 
     if (!outputs.contains(energy_key))
     {
@@ -1346,7 +1349,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             ivalue_output = data_->model.forward(
                     { systems, data_->evaluations_options, data_->check_consistency });
             auto dict_output = ivalue_output.toGenericDict();
-            output_map = dict_output.at("energy").toCustomClass<metatensor_torch::TensorMapHolder>();
+            output_map = dict_output.at(data_->energy_key).toCustomClass<metatensor_torch::TensorMapHolder>();
         }
         catch (const std::exception& e)
         {
