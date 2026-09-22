@@ -59,8 +59,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -78,6 +80,7 @@
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/exceptions.h"
+#include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
 #include "gromacs/utility/stringutil.h"
@@ -1224,18 +1227,19 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
                 int64_t outIdx = 0; // running output index for filtered pairs
 
+                std::array<RVec, c_numShiftVectors> shiftVecs;
+                calc_shifts(inputs.box_, shiftVecs);
+
                 for (int64_t k = 0; k < nHalf; k++)
                 {
                     const int32_t ai = pairlistMta_[2 * k];
                     const int32_t aj = pairlistMta_[2 * k + 1];
 
-                    // Compute shift vector from cell shift and current box
-                    RVec shift;
                     const IVec& n = cellShiftsMta_[k];
-                    shift[XX] = n[XX] * inputs.box_[XX][XX] + n[YY] * inputs.box_[YY][XX]
-                                + n[ZZ] * inputs.box_[ZZ][XX];
-                    shift[YY] = n[YY] * inputs.box_[YY][YY] + n[ZZ] * inputs.box_[ZZ][YY];
-                    shift[ZZ] = n[ZZ] * inputs.box_[ZZ][ZZ];
+                    GMX_ASSERT(std::abs(n[XX]) <= c_dBoxX && std::abs(n[YY]) <= c_dBoxY
+                                       && std::abs(n[ZZ]) <= c_dBoxZ,
+                               "cell shift outside the range calc_shifts() tabulates");
+                    const RVec& shift = shiftVecs[ivecToShiftIndex(n)];
 
                     // Displacement: r_ij = pos[j] - pos[i] + shift  (metatensor convention)
                     const double dx = static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
