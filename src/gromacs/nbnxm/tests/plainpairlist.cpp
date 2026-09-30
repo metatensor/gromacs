@@ -42,6 +42,7 @@
 #include "gmxpre.h"
 
 #include <algorithm>
+#include <iterator>
 #include <numeric>
 #include <vector>
 
@@ -268,6 +269,62 @@ TEST_P(PlainPairlistTest, ContainsAllPairs)
 
     EXPECT_EQ(numExcludedPairs, c_numExcludedPairsRef);
 };
+
+//! Test case that checks that an atom filter keeps exactly the pairs between atoms in the filter
+TEST_P(PlainPairlistTest, AtomFilterKeepsOnlyFilteredPairs)
+{
+    const NbnxmKernelType kernelType = GetParam();
+    const KernelOptions   options(kernelType);
+
+    if (!sc_haveNbnxmSimd4xmKernels && kernelType == NbnxmKernelType::Cpu4xN_Simd_4xN)
+    {
+        GTEST_SKIP()
+                << "Cannot test or generate data for 4xN kernels without suitable SIMD support";
+    }
+
+    if (!sc_haveNbnxmSimd2xmmKernels && kernelType == NbnxmKernelType::Cpu4xN_Simd_2xNN)
+    {
+        GTEST_SKIP()
+                << "Cannot test or generate data for 2xNN kernels without suitable SIMD support";
+    }
+
+    const TestSystem system(LJCombinationRule::Geometric, true);
+
+    std::unique_ptr<nonbonded_verlet_t> nbv = setupNbnxmForBenchInstance(options, system);
+
+    std::vector<RVec> shiftVecs(c_numShiftVectors);
+    calc_shifts(system.box, shiftVecs);
+
+    // A filter with a compact region, the first quarter of the atoms, and a sparse set
+    const int         numAtoms = system.coordinates.size();
+    std::vector<char> atomFilter(numAtoms, 0);
+    for (int a = 0; a < numAtoms; a++)
+    {
+        atomFilter[a] = (a < numAtoms / 4 || a % 7 == 0);
+    }
+
+    const PlainPairlist allPairs = nbv->plainPairlist(options.plainPairlistRange, shiftVecs);
+    const PlainPairlist filteredPairs =
+            nbv->plainPairlist(options.plainPairlistRange, shiftVecs, atomFilter);
+
+    const auto filtered = [&](ArrayRef<const PlainPairlist::PairlistEntry> pairs)
+    {
+        std::vector<PlainPairlist::PairlistEntry> kept;
+        std::copy_if(pairs.begin(),
+                     pairs.end(),
+                     std::back_inserter(kept),
+                     [&](const auto& entry)
+                     { return atomFilter[entry.first.first] && atomFilter[entry.first.second]; });
+        return kept;
+    };
+
+    const auto expectedPairs         = filtered(allPairs.pairs);
+    const auto expectedExcludedPairs = filtered(allPairs.excludedPairs);
+    EXPECT_GT(expectedPairs.size(), 0);
+    EXPECT_LT(expectedPairs.size(), allPairs.pairs.size());
+    EXPECT_EQ(filteredPairs.pairs, expectedPairs);
+    EXPECT_EQ(filteredPairs.excludedPairs, expectedExcludedPairs);
+}
 
 INSTANTIATE_TEST_SUITE_P(WithParameters,
                          PlainPairlistTest,

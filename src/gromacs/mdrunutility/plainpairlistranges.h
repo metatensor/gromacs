@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "gromacs/utility/arrayref.h"
+#include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/real.h"
 
@@ -85,8 +86,28 @@ public:
      */
     void addRange(real range);
 
+    /*! Adds a range request for pairs between atoms in \p atoms only
+     *
+     * The plain pairlist is restricted to pairs of atoms that are both in the union of
+     * the requested atom sets, but only when all range requests supply an atom set.
+     *
+     * \param[in] range  The range of the pairlist in nm, should be > 0 (throws otherwise)
+     * \param[in] atoms  Global atom indices, should not be empty (throws otherwise)
+     */
+    void addRange(real range, ArrayRef<const Index> atoms);
+
     //! Returns the list of requested ranges
     ArrayRef<const real> ranges() const { return ranges_; }
+
+    //! Returns the range of the normal pairlist, the upper limit for any requested range
+    real pairlistCutoff() const;
+
+    /*! Returns the global atom indices the plain pairlist can be restricted to
+     *
+     * Returns the sorted union of the requested atom sets when every range request
+     * supplied one, otherwise no value.
+     */
+    std::optional<std::vector<Index>> atoms() const;
 
 private:
     //! Reference to the global topology
@@ -95,6 +116,10 @@ private:
     const t_inputrec& inputrec_;
     //! List of ranges
     std::vector<real> ranges_;
+    //! Union of the atom sets of the restricted range requests
+    std::vector<Index> atoms_;
+    //! Whether a range was requested without an atom set
+    bool haveUnrestrictedRange_ = false;
 };
 
 } // namespace gmx

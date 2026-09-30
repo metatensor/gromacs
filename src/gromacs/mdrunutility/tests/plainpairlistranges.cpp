@@ -42,10 +42,13 @@
 
 #include "gromacs/mdrunutility/plainpairlistranges.h"
 
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/topology/topology.h"
+#include "gromacs/utility/exceptions.h"
 
 #include "testutils/testasserts.h"
 
@@ -102,6 +105,56 @@ TEST(PlainPairlistRanges, RmsdDistance)
 
     FloatingPointTolerance tolerance(relativeToleranceAsFloatingPoint(1.0, 1e-5));
     EXPECT_REAL_EQ_TOL(rmsdDistance.value(), 0.0776441, tolerance);
+}
+
+TEST(PlainPairlistRanges, AtomsWhenAllRangesAreRestricted)
+{
+    const auto mtop = testSystem();
+    t_inputrec ir;
+
+    PlainPairlistRanges ppr(*mtop, ir);
+    EXPECT_FALSE(ppr.atoms().has_value());
+
+    const std::vector<Index> atomsA = { 5, 1, 3 };
+    const std::vector<Index> atomsB = { 3, 7 };
+    ppr.addRange(0.5, atomsA);
+    ppr.addRange(0.6, atomsB);
+
+    ASSERT_TRUE(ppr.atoms().has_value());
+    EXPECT_EQ(ppr.atoms().value(), (std::vector<Index>{ 1, 3, 5, 7 }));
+    EXPECT_EQ(ppr.ranges().size(), 2);
+}
+
+TEST(PlainPairlistRanges, NoAtomsWithAnUnrestrictedRange)
+{
+    const auto mtop = testSystem();
+    t_inputrec ir;
+
+    PlainPairlistRanges ppr(*mtop, ir);
+    const std::vector<Index> atoms = { 0, 2 };
+    ppr.addRange(0.5, atoms);
+    ppr.addRange(0.6);
+
+    EXPECT_FALSE(ppr.atoms().has_value());
+}
+
+TEST(PlainPairlistRanges, PairlistCutoffIsRlist)
+{
+    const auto mtop = testSystem();
+    t_inputrec ir;
+    ir.rlist = 0.576;
+
+    PlainPairlistRanges ppr(*mtop, ir);
+    EXPECT_EQ(ppr.pairlistCutoff(), ir.rlist);
+}
+
+TEST(PlainPairlistRanges, ThrowsWithAnEmptyAtomSet)
+{
+    const auto mtop = testSystem();
+    t_inputrec ir;
+
+    PlainPairlistRanges ppr(*mtop, ir);
+    EXPECT_THROW(ppr.addRange(0.5, ArrayRef<const Index>{}), APIError);
 }
 
 } // namespace

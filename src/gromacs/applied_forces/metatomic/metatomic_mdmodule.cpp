@@ -52,8 +52,12 @@
 #include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/imdmodule.h"
 #include "gromacs/utility/basenetwork.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
+#include "gromacs/utility/logger.h"
+#include "gromacs/utility/stringutil.h"
 
+#include "embedded_coulomb_correction.h"
 #include "metatomic_forceprovider.h"
 #include "metatomic_options.h"
 #ifdef DIM
@@ -112,6 +116,11 @@ public:
 
         const auto modifyTopologyFunction = [this](gmx_mtop_t* top) { options_.modifyTopology(top); };
         notifiers->preProcessingNotifier_.subscribe(modifyTopologyFunction);
+
+        // Exclusions between embedded atoms are corrected at any distance with ONIOM
+        const auto exemptExclusionsFunction = [this](ExclusionDistanceExemptions* exemptions)
+        { options_.addExclusionDistanceExemptions(exemptions); };
+        notifiers->preProcessingNotifier_.subscribe(exemptExclusionsFunction);
 
         const auto writeParamsToKvtFunction = [this](KeyValueTreeObjectBuilder kvt)
         { options_.writeParamsToKvt(kvt); };
@@ -220,14 +229,39 @@ public:
                     max_cutoff = interaction_range;
                 }
 
-                // Check requested neighbor lists
-                auto requested_nl = model.run_method("requested_neighbor_lists");
+                // The model only reads pairs within its neighbor-list cutoffs; the longer
+                // interaction range comes from message passing over them. So the plain
+                // pairlist needs the largest cutoff plus a buffer for the motion between
+                // pairlist updates, not the interaction range (which forced rlist up to it).
+                double nlCutoff     = 0.0;
+                auto   requested_nl = model.run_method("requested_neighbor_lists");
                 for (const auto& ivalue : requested_nl.toList())
                 {
                     auto options =
                             ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
-                    double cutoff = options->engine_cutoff("nm");
-                    max_cutoff    = std::max(max_cutoff, cutoff);
+                    nlCutoff = std::max(nlCutoff, options->engine_cutoff("nm"));
+                }
+                if (nlCutoff > 0.0)
+                {
+                    // Twice the RMS displacement over a pairlist lifetime, as recommended
+                    // for PlainPairlistRanges, and at least 0.1 nm for fast ML hydrogens.
+                    // The normal pairlist holds no pairs beyond rlist, so the buffer ends
+                    // there; the cutoff itself must fit (mdrun stops otherwise).
+                    const double rmsd = ranges->rmsdDistance().value_or(0.0);
+                    max_cutoff        = std::max(
+                            nlCutoff,
+                            std::min(nlCutoff + std::max(2 * rmsd, 0.1),
+                                     static_cast<double>(ranges->pairlistCutoff())));
+                    const double buffer = max_cutoff - nlCutoff;
+                    GMX_LOG(options_.logger().info)
+                            .asParagraph()
+                            .appendTextFormatted(
+                                    "Metatomic: plain pairlist range %.3f nm (neighbor-list "
+                                    "cutoff %.3f nm + %.3f nm buffer; interaction range %.3f nm)",
+                                    max_cutoff,
+                                    nlCutoff,
+                                    buffer,
+                                    interaction_range);
                 }
             }
             catch (const std::exception& e)
@@ -244,7 +278,8 @@ public:
                     GMX_THROW(InconsistentInputError("Metatomic model cutoff is 0.0 or invalid."));
                 }
             }
-            ranges->addRange(max_cutoff);
+            // The model only uses pairs between its own atoms
+            ranges->addRange(max_cutoff, options_.parameters().mtaIndices_);
         };
         // Register the callback
         notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);
@@ -288,6 +323,46 @@ public:
         force_provider_ = std::make_unique<MetatomicForceProvider>(
                 options_, options_.logger(), options_.mpiComm());
         forceProviders->addForceProvider(force_provider_.get(), "Metatomic");
+
+        // The embedded atoms are mutually excluded: remove the rest of their
+        // classical Coulomb interaction, which the kernels leave beyond (Ewald)
+        // or within (reaction-field) the cut-off.
+        const auto& params = options_.parameters();
+        if (params.oniom)
+        {
+            std::vector<real> charges;
+            std::vector<int>  groups;
+            for (const Index i : params.mtaIndices_)
+            {
+                const auto& atom = params.atoms_.atom[i];
+                if (atom.q != atom.qB)
+                {
+                    GMX_THROW(
+                            NotImplementedError("metatomic-oniom does not support perturbed "
+                                                "charges on embedded atoms."));
+                }
+                charges.push_back(atom.q);
+                groups.push_back(params.energyGroups_[i]);
+            }
+            // With several sites only pairs within a site are corrected, matching the exclusions
+            std::vector<int> sites;
+            if (params.numSites() > 1)
+            {
+                sites = params.mtaSites_;
+            }
+            embeddedCoulomb_ = std::make_unique<EmbeddedCoulombCorrectionProvider>(
+                    *params.mtaAtoms_, charges, groups, params.numEnergyGroups_, *params.pbcType_, options_.mpiComm(), sites);
+            forceProviders->addForceProvider(embeddedCoulomb_.get(), "Metatomic embedded Coulomb");
+            GMX_LOG(options_.logger().info)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "Metatomic ONIOM: removing the classical Coulomb interaction between "
+                            "the %zu embedded atoms%s, including pairs beyond rcoulomb.",
+                            params.mtaIndices_.size(),
+                            params.numSites() > 1
+                                    ? formatString(" within each of %d sites", params.numSites()).c_str()
+                                    : "");
+        }
     }
 
     IMdpOptionProvider* mdpOptionProvider() override { return &options_; }
@@ -296,6 +371,8 @@ public:
 private:
     MetatomicOptions options_;
 
+    //! Removes the classical Coulomb interaction between embedded atoms (ONIOM)
+    std::unique_ptr<EmbeddedCoulombCorrectionProvider> embeddedCoulomb_;
     std::unique_ptr<MetatomicForceProvider> force_provider_;
 };
 

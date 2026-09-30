@@ -474,8 +474,12 @@ public:
      * \param[in] range  Range of the pairlist in nm, should not be larger than the range
      *                   of the normal pairlist (is release-asserted)
      * \param[in] shiftVectors  List of shift vectors
+     * \param[in] atomFilter  When not empty, only pairs of atoms with a non-zero entry,
+     *                        indexed by local atom index, are returned
      */
-    const PlainPairlist& plainPairlist(real range, ArrayRef<const RVec> shiftVectors);
+    const PlainPairlist& plainPairlist(real                 range,
+                                       ArrayRef<const RVec> shiftVectors,
+                                       ArrayRef<const char> atomFilter = {});
 
 private:
     //! All data related to the pair lists

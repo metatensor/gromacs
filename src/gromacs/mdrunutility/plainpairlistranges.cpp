@@ -42,6 +42,8 @@
 
 #include "plainpairlistranges.h"
 
+#include <algorithm>
+
 #include "gromacs/math/units.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/multipletimestepping.h"
@@ -109,6 +111,11 @@ std::optional<real> PlainPairlistRanges::rmsdDistance() const
     return std::nullopt;
 }
 
+real PlainPairlistRanges::pairlistCutoff() const
+{
+    return inputrec_.rlist;
+}
+
 void PlainPairlistRanges::addRange(const real range)
 {
     if (range <= 0)
@@ -117,6 +124,36 @@ void PlainPairlistRanges::addRange(const real range)
     }
 
     ranges_.push_back(range);
+    haveUnrestrictedRange_ = true;
+}
+
+void PlainPairlistRanges::addRange(const real range, ArrayRef<const Index> atoms)
+{
+    if (range <= 0)
+    {
+        GMX_THROW(APIError("PlainPairlistRanges.addRange() expects an argument > 0"));
+    }
+    if (atoms.empty())
+    {
+        GMX_THROW(APIError("PlainPairlistRanges.addRange() expects a non-empty atom set"));
+    }
+
+    ranges_.push_back(range);
+    atoms_.insert(atoms_.end(), atoms.begin(), atoms.end());
+}
+
+std::optional<std::vector<Index>> PlainPairlistRanges::atoms() const
+{
+    if (ranges_.empty() || haveUnrestrictedRange_)
+    {
+        return std::nullopt;
+    }
+
+    std::vector<Index> atoms = atoms_;
+    std::sort(atoms.begin(), atoms.end());
+    atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
+
+    return atoms;
 }
 
 } // namespace gmx

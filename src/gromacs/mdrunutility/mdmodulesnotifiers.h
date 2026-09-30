@@ -328,6 +328,19 @@ struct PlumedInputFilename
     std::optional<std::string> plumedFilename_{};
 };
 
+/*! \libinternal \brief Atom groups whose mutual exclusions a module corrects at any distance
+ *
+ * grompp stops when excluded atoms are farther apart than the cut-off, as the long-range
+ * part of their interaction would be missing. A module that removes the full interaction of
+ * such pairs itself (as metatomic ONIOM does for its embedded atoms) lists the atoms here,
+ * and pairs within one group are left out of that check.
+ */
+struct ExclusionDistanceExemptions
+{
+    //! Groups of global atom indices
+    std::vector<std::vector<int>> groups;
+};
+
 /*! \libinternal \brief Provides the constant ensemble temperature
  */
 struct EnsembleTemperature
@@ -462,6 +475,9 @@ struct MDModulesNotifiers
      *                              Allows modules to access the Coulomb interaction type configured
      *                              for the simulation (e.g., PME, RF, FMM, etc.).
      * \tparam EnsembleTemperature  Provides modules with the constant ensemble temperature.
+     * \tparam ExclusionDistanceExemptions*
+     *                              Lets modules exempt the exclusions they correct at any
+     *                              distance from the exclusion distance check
      */
     BuildMDModulesNotifier<const CoordinatesAndBoxPreprocessed&,
                            const MDLogger&,
@@ -472,7 +488,8 @@ struct MDModulesNotifiers
                            KeyValueTreeObjectBuilder,
                            const QMInputFileName&,
                            const MdModulesCoulombTypeInfo&,
-                           const EnsembleTemperature&>::type preProcessingNotifier_;
+                           const EnsembleTemperature&,
+                           ExclusionDistanceExemptions*>::type preProcessingNotifier_;
 
     /*! \brief Handles subscribing and calling checkpointing callback functions.
      *

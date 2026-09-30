@@ -59,6 +59,7 @@
 struct gmx_domdec_t;
 struct gmx_enerdata_t;
 struct gmx_wallcycle;
+struct interaction_const_t;
 struct t_forcerec;
 
 namespace gmx
@@ -120,6 +121,8 @@ public:
     matrix               box_ = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }; //!< The simulation box
     const MpiComm&       mpiComm_; //!< Communication object for my group
     const gmx_domdec_t*  dd_;      //!< Domain decomposition object, deprecated
+    //! Non-bonded interaction constants, nullptr when not available
+    const interaction_const_t* interactionConst_ = nullptr;
 };
 
 /*! \brief Take pointer, check if valid, return reference
