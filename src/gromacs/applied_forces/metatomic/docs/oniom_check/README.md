@@ -72,3 +72,36 @@ Without the embedded Coulomb correction, the PME energy is off by 51 kJ/mol
 (the ML pairs beyond rcoulomb keep their MM interaction), and with both PME
 and RF the forces are off by 8000 kJ/mol/nm where the pair crosses the
 cut-off.
+
+## Several ML sites, with domain decomposition
+
+`check_sites.py` runs four copies of the chain, each site the ML atoms of one copy with its
+link caps, and gives each site its own `metatomic-site-charges` and
+`metatomic-site-spin-multiplicities`. With a fifth parameter `kappa` in the model file, the pair
+model requests the per-system `charge` and `spin_multiplicity` and scales the pairs of each
+system by `1 + kappa (Q + 0.1 M)`, so a site given another site's values changes the energy.
+Copy 0 wraps across the periodic boundary, copy 1 straddles a domain boundary, and copies 2
+and 3 are within the model cutoff of each other, so their cross-site pairs must be left out.
+
+With domain decomposition every rank holds every site, and each site is evaluated whole by
+one rank, the largest sites first to the least-loaded rank. For each rank count the check
+compares the energy with a site-by-site Python evaluation, the forces and virial with finite
+differences, all three with the first rank count, and the site assignment logged by mdrun
+with the expected line.
+
+```bash
+python check_sites.py --gmx build/bin/gmx --plugin libpair_model.so                     # 4 sites, 1-4 ranks, 2x2x1
+python check_sites.py --gmx build/bin/gmx --plugin libpair_model.so --sites "0 1 2:12 3" --ranks 1 2 3
+python check_sites.py --gmx build/bin/gmx --plugin libpair_model.so --sites "0 2:12" --ranks 1 3 4   # idle ranks
+python check_sites.py --gmx build/bin/gmx --plugin libpair_model.so --system-energy
+```
+
+| sites | ranks | Metatomic energy (reference 2084.39157) | max force error | max virial error | vs 1 rank |
+| --- | --- | --- | --- | --- | --- |
+| 0 1 2 3 | 1 | 2084.39111 | 0.52 kJ/mol/nm (forces up to 3409) | 0.26 | |
+| 0 1 2 3 | 2, 3, 4, 2x2x1 | 2084.39111 | 0.36-0.48 | 0.17-0.29 | forces within 1.4e-5 |
+
+The site sizes count the caps: 7 model atoms for a full copy, 5 for `2:12`. Leaving copies
+in no site gives ranks without sites ("rank 2: none"), which skip the model and still take
+part in the force exchange. A site must lie within one molecule (grompp checks this), so
+uneven sizes come from atom subsets rather than from joining copies.

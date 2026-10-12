@@ -43,9 +43,13 @@
 
 #include "metatomic_options.h"
 
-#include <array>
 #include <cmath>
+#include <cstdint>
+
+#include <algorithm>
+#include <array>
 #include <map>
+#include <numeric>
 #include <set>
 #include <stdexcept>
 #include <type_traits>
@@ -65,6 +69,7 @@
 #include "gromacs/topology/ifunc.h"
 #include "gromacs/topology/mtop_util.h"
 #include "gromacs/topology/topology.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 #include "gromacs/utility/keyvaluetreetransform.h"
 #include "gromacs/utility/logger.h"
@@ -416,6 +421,31 @@ bool MetatomicOptions::isActive() const
     return params_.active;
 }
 
+
+std::vector<std::vector<int>> assignSitesToRanks(ArrayRef<const int> siteSizes, const int numRanks)
+{
+    if (numRanks < 1)
+    {
+        GMX_THROW(InternalError(formatString("Cannot assign metatomic sites to %d ranks.", numRanks)));
+    }
+    std::vector<int> bySize(siteSizes.size());
+    std::iota(bySize.begin(), bySize.end(), 0);
+    std::stable_sort(
+            bySize.begin(), bySize.end(), [&](int a, int b) { return siteSizes[a] > siteSizes[b]; });
+    std::vector<int64_t>          load(numRanks, 0);
+    std::vector<std::vector<int>> sites(numRanks);
+    for (const int site : bySize)
+    {
+        const auto rank = std::min_element(load.begin(), load.end()) - load.begin();
+        sites[rank].push_back(site);
+        load[rank] += siteSizes[site];
+    }
+    for (auto& rankSites : sites)
+    {
+        std::sort(rankSites.begin(), rankSites.end());
+    }
+    return sites;
+}
 
 void MetatomicOptions::setInputGroupIndices(const IndexGroupsAndNames& indexGroupsAndNames)
 {

@@ -199,6 +199,12 @@ private:
      */
     int32_t gatherAllMtaAtoms();
 
+    //! Log which ML sites each rank evaluates (assignSitesToRanks), once per run.
+    void logSiteAssignment(const std::vector<std::vector<int>>& bySite,
+                           const std::vector<int>&              siteSizes) const;
+    //! Whether logSiteAssignment has run
+    bool siteAssignmentLogged_ = false;
+
     //! Distribute non-home forces via sparse indexed exchange (allgatherv pattern).
     //! Home forces are applied directly; only halo forces are communicated.
     //! \param[in] forces   Flat force array [numLocalMta_ * 3], row-major (fx,fy,fz).

@@ -35,6 +35,7 @@ gmx_add_unit_test(MTAAppliedForcesUnitTest mta_applied_forces-test
     CPP_SOURCE_FILES
         # metatomic_forceprovider.cpp
         metatomic_options.cpp
+        metatomic_sites.cpp
         c_api_contract.cpp
         embedded_coulomb_correction.cpp
 )

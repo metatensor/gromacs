@@ -189,6 +189,18 @@ static void pbc_flags(const PbcType* pbcType, std::array<uint8_t, 3>* flags)
     }
 }
 
+//! The name metatomic gives a sample kind ("atom", "system", "atom_pair")
+static const char* sampleKindName(metatomic::SampleKind kind)
+{
+    switch (kind)
+    {
+        case metatomic::SampleKind::Atom: return "atom";
+        case metatomic::SampleKind::System: return "system";
+        case metatomic::SampleKind::AtomPair: return "atom_pair";
+    }
+    return "unknown";
+}
+
 //! Whether a requested model input is the per-atom charge (`charge`, `charge/<variant>`).
 static bool isChargeInput(const std::string& name)
 {
@@ -634,21 +646,33 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         }
         if (!isChargeInput(input.name()) || input.sample_kind() != metatomic::SampleKind::Atom)
         {
-            GMX_THROW(APIError(formatString(
-                    "The model requests the input '%s' (per %s), which GROMACS can not provide. "
-                    "Supported inputs are the per-atom 'charge' (from the topology) and the "
-                    "per-system 'charge' and 'spin_multiplicity' (metatomic-site-charges, "
+            // the same message as the libtorch engine
+            GMX_THROW(NotImplementedError(formatString(
+                    "The model requests the input '%s' (per %s), which GROMACS does not provide. "
+                    "Supported inputs are per-atom charges (from the topology) and per-system "
+                    "charge and spin_multiplicity (metatomic-site-charges, "
                     "metatomic-site-spin-multiplicities).",
                     input.name().c_str(),
-                    perSystem ? "system" : "atom")));
+                    sampleKindName(input.sample_kind()))));
         }
         if (options_.params_.mmCharges_.empty())
         {
-            GMX_THROW(InconsistentInputError(formatString(
-                    "The model requests '%s', but no topology charges are available.",
-                    input.name().c_str())));
+            GMX_THROW(InconsistentInputError(
+                    "Metatomic model requests charges, but topology charges are not available."));
         }
         data_->chargeInputs.push_back(input);
+    }
+    if (!data_->systemInputs.empty())
+    {
+        GMX_LOG(logger_.info)
+                .asParagraph()
+                .appendTextFormatted(
+                        "Metatomic: the model takes a total charge and/or spin multiplicity per "
+                        "system; %d ML site(s), charge %s, multiplicity %s",
+                        options_.params_.numSites(),
+                        formatAndJoin(options_.params_.siteChargeValues_, " ", StringFormatter("%g"))
+                                .c_str(),
+                        formatAndJoin(options_.params_.siteSpinValues_, " ", StringFormatter("%d")).c_str());
     }
 
     linkFrontiers_ = options_.params_.linkFrontier_;
@@ -1296,6 +1320,35 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
 }
 
 
+void MetatomicForceProvider::logSiteAssignment(const std::vector<std::vector<int>>& bySite,
+                                               const std::vector<int>&              siteSizes) const
+{
+    const auto               names = splitString(options_.params_.siteGroups);
+    std::vector<std::string> perRank;
+    for (size_t rank = 0; rank < bySite.size(); ++rank)
+    {
+        int                      numAtoms = 0;
+        std::vector<std::string> rankNames;
+        for (const int site : bySite[rank])
+        {
+            rankNames.push_back(names[site]);
+            numAtoms += siteSizes[site];
+        }
+        perRank.push_back(rankNames.empty() ? formatString("rank %zu: none", rank)
+                                            : formatString("rank %zu: %s (%d model atoms)",
+                                                           rank,
+                                                           joinStrings(rankNames, " ").c_str(),
+                                                           numAtoms));
+    }
+    GMX_LOG(logger_.info)
+            .asParagraph()
+            .appendTextFormatted(
+                    "Metatomic: %d ML sites on %zu ranks, each evaluated whole by one rank; %s",
+                    options_.params_.numSites(),
+                    bySite.size(),
+                    joinStrings(perRank, "; ").c_str());
+}
+
 void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, ForceProviderOutput* outputs)
 {
     MetatomicTimer totalTimer("calculateForces", mpiComm_);
@@ -1497,11 +1550,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         // atom's, and a cap's that of the MM atom it replaces (which joined its ML partner's site).
         const int  numSites  = options_.params_.numSites();
         const bool multiSite = numSites > 1;
-        if (multiSite && (useNewtonNL || data_->nonConservative))
+        if (multiSite && data_->nonConservative)
         {
             GMX_THROW(NotImplementedError(
-                    "metatomic-site-groups with several sites needs a single rank and a "
-                    "conservative model."));
+                    "metatomic-site-groups with several sites needs a conservative model."));
         }
         std::vector<int>                  siteOfRow;
         std::vector<int32_t>              localRow;
@@ -1518,10 +1570,34 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 siteRows[siteOfRow[row]].push_back(row);
             }
         }
-        // per-site copies of the types and positions, alive until the model has run
-        std::vector<std::vector<int32_t>> siteTypes(siteRows.size());
-        std::vector<std::vector<double>>  sitePositions64(siteRows.size());
-        std::vector<std::vector<float>>   sitePositions32(siteRows.size());
+        // The sites this rank evaluates, one system each. Serially, all of them. With domain
+        // decomposition every rank holds every site (gatherAllMtaAtoms), and evaluates its share.
+        std::vector<int> evaluatedSites(multiSite ? numSites : 1);
+        std::iota(evaluatedSites.begin(), evaluatedSites.end(), 0);
+        if (multiSite && useNewtonNL)
+        {
+            std::vector<int> siteSizes;
+            for (const auto& rows : siteRows)
+            {
+                siteSizes.push_back(static_cast<int>(rows.size()));
+            }
+            const auto bySite = assignSitesToRanks(siteSizes, mpiComm_.size());
+            evaluatedSites    = bySite[mpiComm_.rank()];
+            if (!siteAssignmentLogged_)
+            {
+                logSiteAssignment(bySite, siteSizes);
+                siteAssignmentLogged_ = true;
+            }
+        }
+        std::vector<std::vector<int32_t>> systemRows;
+        for (const int site : evaluatedSites)
+        {
+            systemRows.push_back(siteRows[site]);
+        }
+        // per-system copies of the types and positions, alive until the model has run
+        std::vector<std::vector<int32_t>> siteTypes(systemRows.size());
+        std::vector<std::vector<double>>  sitePositions64(systemRows.size());
+        std::vector<std::vector<float>>   sitePositions32(systemRows.size());
         std::vector<metatomic::System>    systems;
         if (!multiSite)
         {
@@ -1534,9 +1610,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
         else
         {
-            for (int s = 0; s < numSites; ++s)
+            for (size_t s = 0; s < systemRows.size(); ++s)
             {
-                const auto&   rows = siteRows[s];
+                const auto&   rows = systemRows[s];
                 const int64_t n    = static_cast<int64_t>(rows.size());
                 void*         pos  = nullptr;
                 const auto    copy = [&](auto* all, auto& out)
@@ -1603,7 +1679,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 }
                 else
                 {
-                    for (const int32_t row : siteRows[s])
+                    for (const int32_t row : systemRows[s])
                     {
                         systemCharges.push_back(charges[row]);
                     }
@@ -1648,8 +1724,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                                           : metatomic::unit_conversion_factor("e", input.unit());
             for (size_t s = 0; s < systems.size(); ++s)
             {
-                const double value = spin ? options_.params_.siteSpinValues_[s]
-                                          : toUnit * options_.params_.siteChargeValues_[s];
+                const int     site  = evaluatedSites[s];
+                const double  value = spin ? options_.params_.siteSpinValues_[site]
+                                           : toUnit * options_.params_.siteChargeValues_[site];
                 const int32_t zero  = 0;
                 const auto    shape = std::vector<uintptr_t>{ 1, 1 };
                 std::unique_ptr<metatensor::DataArrayBase> values;
@@ -1800,9 +1877,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                                           nlVectorsBuffer_.begin() + 3 * k,
                                           nlVectorsBuffer_.begin() + 3 * k + 3);
                 }
-                for (int s = 0; s < numSites; ++s)
+                for (size_t s = 0; s < systems.size(); ++s)
                 {
-                    addBlock(systems[s], siteSamples[s], siteVectors[s]);
+                    addBlock(systems[s], siteSamples[evaluatedSites[s]], siteVectors[evaluatedSites[s]]);
                 }
             }
         }
@@ -1810,9 +1887,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         // With domain decomposition, each rank returns its home atoms plus the
         // caps whose embedded atom is home; a home MM row whose caps all belong
-        // to non-home embedded atoms is left to the rank owning them.
+        // to non-home embedded atoms is left to the rank owning them. With
+        // several sites, each rank returns whole sites instead.
         std::optional<metatensor::Labels> selected;
-        if (useNewtonNL && links.empty())
+        if (!multiSite && useNewtonNL && links.empty())
         {
             if (data_->selectedCount != numHomeMta_)
             {
@@ -1830,7 +1908,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
             selected = data_->selectedAtoms;
         }
-        else if (useNewtonNL)
+        else if (!multiSite && useNewtonNL)
         {
             std::vector<char> keep(nModel, 0);
             std::fill(keep.begin(), keep.begin() + numHomeMta_, 1);
@@ -1861,20 +1939,25 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             data_->selectedCount = -1; // the cached home-only selection is stale
         }
 
+        // A rank without sites has nothing to evaluate, but still joins the force exchange.
         MetatomicTimer forwardTimer("execute_model", mpiComm_);
         std::vector<metatensor::TensorMap> modelOutputs;
-        try
+        if (!systems.empty())
         {
-            modelOutputs = metatomic::execute_model(
-                    *data_->model, systems, selected, data_->requested, data_->checkConsistency);
-        }
-        catch (const std::exception& e)
-        {
-            GMX_THROW(APIError("[Metatomic] Model evaluation failed: " + std::string(e.what())));
+            try
+            {
+                modelOutputs = metatomic::execute_model(
+                        *data_->model, systems, selected, data_->requested, data_->checkConsistency);
+            }
+            catch (const std::exception& e)
+            {
+                GMX_THROW(APIError("[Metatomic] Model evaluation failed: " + std::string(e.what())));
+            }
         }
         forwardTimer.stop();
+        const bool evaluated = !modelOutputs.empty();
 
-        if (data_->uqIndex.has_value())
+        if (evaluated && data_->uqIndex.has_value())
         {
             auto&      uqMap   = modelOutputs[data_->uqIndex.value()];
             const auto nBlocks = uqMap.keys().count();
@@ -1898,12 +1981,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
         }
 
-        auto&               energyMap     = modelOutputs[data_->energyIndex];
-        const auto          nEnergyBlocks = energyMap.keys().count();
         std::vector<double> forces(static_cast<size_t>(nModel) * 3, 0.0);
+        const auto nEnergyBlocks = evaluated ? modelOutputs[data_->energyIndex].keys().count() : 0;
         for (size_t blockId = 0; blockId < nEnergyBlocks; ++blockId)
         {
-            auto block = energyMap.block_by_id(blockId);
+            auto block = modelOutputs[data_->energyIndex].block_by_id(blockId);
             energy += modelIsDouble ? sum_block<double>(block) : sum_block<float>(block);
             if (data_->nonConservative)
             {
@@ -1930,17 +2012,19 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             const double forceScale = -1.0 / data_->lengthToNm;
             if (modelIsDouble)
             {
-                add_atom_rows<double>(posGrad, 2, nModel, forceScale, &forces, multiSite ? &siteRows : nullptr);
+                add_atom_rows<double>(
+                        posGrad, 2, nModel, forceScale, &forces, multiSite ? &systemRows : nullptr);
                 add_strain<double>(strainGrad, virialMatrix);
             }
             else
             {
-                add_atom_rows<float>(posGrad, 2, nModel, forceScale, &forces, multiSite ? &siteRows : nullptr);
+                add_atom_rows<float>(
+                        posGrad, 2, nModel, forceScale, &forces, multiSite ? &systemRows : nullptr);
                 add_strain<float>(strainGrad, virialMatrix);
             }
         }
 
-        if (data_->nonConservative)
+        if (evaluated && data_->nonConservative)
         {
             auto&      forceMap = modelOutputs[data_->ncForceIndex.value()];
             const auto nBlocks  = forceMap.keys().count();

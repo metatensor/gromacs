@@ -48,6 +48,7 @@
 #include "gromacs/mdtypes/imdpoptionprovider.h"
 #include "gromacs/topology/atoms.h"
 #include "gromacs/topology/embedded_system_preprocessing.h"
+#include "gromacs/utility/arrayref.h"
 
 // some forward declarations
 struct gmx_mtop_t;
@@ -142,6 +143,13 @@ struct MetatomicParameters
     //! Number of sites
     int numSites() const { return static_cast<int>(siteChargeValues_.size()); }
 };
+
+/*! \brief The ML sites each of \p numRanks ranks evaluates, in increasing order.
+ *
+ * Largest site first, each to the rank with the fewest model atoms so far (the lowest rank on
+ * a tie), so every rank computes the same assignment from the same \p siteSizes.
+ */
+std::vector<std::vector<int>> assignSitesToRanks(ArrayRef<const int> siteSizes, int numRanks);
 
 struct ExclusionDistanceExemptions;
 
