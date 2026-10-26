@@ -80,7 +80,9 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
             include(CheckCXXSourceCompiles)
             # Re-run when reconfiguring: the dependency prefix can change in place.
             unset(GMX_METATOMIC_API_SUPPORTED CACHE)
-            set(CMAKE_REQUIRED_LIBRARIES metatomic::shared)
+            # List metatensor explicitly: the unqualified alias in metatomic's
+            # link interface does not carry its includes into try_compile.
+            set(CMAKE_REQUIRED_LIBRARIES metatomic::shared metatensor::shared)
             # the vendored nlohmann/json target of metatomic-config is not imported, so
             # it does not reach the test project: give its headers, and only compile
             set(CMAKE_REQUIRED_INCLUDES "${METATOMIC_INCLUDE}/metatomic/third-party")
@@ -102,8 +104,11 @@ int main()
         _gmx_check_metatomic_api()
         if(NOT GMX_METATOMIC_API_SUPPORTED)
             set(metatomic_FOUND FALSE)
-            set(_mta_reason "metatomic ${metatomic_VERSION} predates the API this interface uses \
-(requested_pair_lists(outputs), metatomic-core 545d5976): use metatomic-core 07cb8766 or later.")
+            string(CONCAT _mta_reason "metatomic ${metatomic_VERSION} API compile check failed. "
+                "This interface requires requested_pair_lists(outputs) and requested_inputs(outputs) "
+                "(metatomic-core 545d5976 or later; tested with 07cb8766). "
+                "The installed API may be incompatible, or its headers/dependencies may be unavailable. "
+                "See CMakeFiles/CMakeConfigureLog.yaml for the compiler diagnostic.")
             if(GMX_METATOMIC STREQUAL "ON")
                 message(FATAL_ERROR "${_mta_reason}")
             endif()
