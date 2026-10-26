@@ -43,6 +43,9 @@
 
 #include "metatomic_options.h"
 
+#include "config.h"
+
+#include <algorithm>
 #include <set>
 
 #include "gromacs/domdec/localatomset.h"
@@ -60,6 +63,10 @@
 #include "gromacs/utility/mpicomm.h"
 #include "gromacs/utility/strconvert.h"
 #include "gromacs/utility/stringutil.h"
+
+#if GMX_METATOMIC_ACTIVE
+#    include <nlohmann/json.hpp>
+#endif
 
 namespace gmx
 {
@@ -128,6 +135,58 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
 
     // finalize topology
     mtop->finalize();
+}
+//! metatomic-uncertainty-threshold is auto, off, or a non-negative number of kJ/mol.
+void checkUncertaintyThreshold(const std::string& value)
+{
+    if (value == "auto" || value == "off")
+    {
+        return;
+    }
+    try
+    {
+        if (doubleFromString(value.c_str()) >= 0)
+        {
+            return;
+        }
+    }
+    catch (const InvalidInputError&)
+    {
+    }
+    GMX_THROW(InconsistentInputError(formatString(
+            "metatomic-uncertainty-threshold must be auto, off or a non-negative number in kJ/mol, "
+            "not '%s'.",
+            value.c_str())));
+}
+
+//! metatomic-model-options is empty or a JSON object of strings, which metatomic plugins expect.
+void checkModelOptions(const std::string& value)
+{
+#if GMX_METATOMIC_ACTIVE
+    if (value.empty())
+    {
+        return;
+    }
+    bool valid = false;
+    try
+    {
+        const auto json = nlohmann::json::parse(value);
+        valid           = json.is_object()
+                && std::all_of(json.begin(), json.end(), [](const auto& item) { return item.is_string(); });
+    }
+    catch (const nlohmann::json::exception&)
+    {
+    }
+    if (!valid)
+    {
+        GMX_THROW(InconsistentInputError(formatString(
+                "metatomic-model-options must be a JSON object with string values, such as "
+                "{\"cutoff\": \"5.0\"}, not '%s'.",
+                value.c_str())));
+    }
+#else
+    GMX_UNUSED_VALUE(value);
+#endif
 }
 } // namespace
 
@@ -260,6 +319,9 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
     {
         return;
     }
+    // grompp rejects what mdrun would only find when it loads the model
+    checkUncertaintyThreshold(params_.uncertaintyThreshold);
+    checkModelOptions(params_.modelOptions);
 
     auto GroupIndexAdder =
             treeBuilder.addUniformArray<std::int64_t>(METATOMIC_MODULE_NAME + "-" + INPUT_GROUP_TAG);

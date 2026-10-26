@@ -60,6 +60,8 @@
 
 #include "metatomic_forceprovider.h"
 
+#include "config.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -73,7 +75,6 @@
 #include <unordered_set>
 
 #include "gromacs/domdec/localatomset.h"
-#include "gromacs/math/boxmatrix.h"
 #include "gromacs/mdlib/broadcaststructs.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdrunutility/plainpairlistranges.h"
@@ -85,8 +86,10 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
+#include "gromacs/utility/strconvert.h"
 #include "gromacs/utility/stringutil.h"
 
+#include "metatomic_cellshift.h"
 #include "metatomic_timer.h"
 
 #ifdef DIM
@@ -192,14 +195,6 @@ static void pbc_flags(const PbcType* pbcType, std::array<uint8_t, 3>* flags)
     {
         *flags = { 1, 1, 1 };
     }
-}
-
-//! Cartesian shift n_a a + n_b b + n_c c of an integer cell shift (box rows are the box vectors).
-static RVec cellShiftVector(const matrix box, const IVec& cellShift)
-{
-    return { cellShift[XX] * box[XX][XX] + cellShift[YY] * box[YY][XX] + cellShift[ZZ] * box[ZZ][XX],
-             cellShift[YY] * box[YY][YY] + cellShift[ZZ] * box[ZZ][YY],
-             cellShift[ZZ] * box[ZZ][ZZ] };
 }
 
 template<typename T>
@@ -376,7 +371,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     if (const char* env = std::getenv("GMX_METATOMIC_SPARSE_THRESHOLD"))
     {
-        data_->sparseThreshold = std::stoi(env);
+        data_->sparseThreshold = intFromString(env);
         GMX_LOG(logger_.info)
                 .asParagraph()
                 .appendTextFormatted("Metatomic sparse force threshold: %d",
@@ -459,16 +454,37 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 options_.params_.modelPath_.c_str(),
                 data_->energyName.c_str())));
     }
-    if (energyCap->sample_kind() != metatomic::SampleKind::Atom)
+    if (energyCap->sample_kind() != metatomic::SampleKind::Atom && mpiComm_.isParallel())
     {
         GMX_LOG(logger_.warning)
                 .asParagraph()
-                .appendText("Metatomic model does not support per-atom energy output "
-                            "(sample_kind != \"atom\"). Energy decomposition in domain "
-                            "decomposition may be less accurate.");
+                .appendText("Metatomic: the model's energy is per system. With domain "
+                            "decomposition every rank asks for the energy of its home atoms "
+                            "(selected_atoms), and the energies, forces and virials of the ranks "
+                            "are added: a model that does not restrict a per-system energy to the "
+                            "selected atoms is counted once per rank.");
     }
 
     data_->nonConservative = options_.params_.nonConservative;
+    if (!data_->nonConservative)
+    {
+        // metatomic matches requests to outputs by name and sample kind only, and a model may
+        // compute gradients it does not declare; one that cannot fails at the first step.
+        const auto& declared = energyCap->gradients();
+        const auto  declares = [&declared](metatomic::Gradients gradient)
+        { return std::find(declared.begin(), declared.end(), gradient) != declared.end(); };
+        if (!declares(metatomic::Gradients::Positions) || !declares(metatomic::Gradients::Strain))
+        {
+            GMX_LOG(logger_.warning)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "Metatomic: the model's '%s' output does not declare gradients with "
+                            "respect to both positions and strain, which GROMACS requests for "
+                            "the forces and the virial. If the model does not compute them, the "
+                            "first force evaluation fails.",
+                            data_->energyName.c_str());
+        }
+    }
     {
         auto energy = metatomic::Quantity::builder()
                               .name(data_->energyName)
@@ -503,7 +519,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
             }
             else
             {
-                data_->uncertaintyThreshold = std::stod(options_.params_.uncertaintyThreshold);
+                data_->uncertaintyThreshold = doubleFromString(options_.params_.uncertaintyThreshold.c_str());
             }
             GMX_LOG(logger_.info)
                     .asParagraph()
@@ -697,7 +713,6 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 
         // First pass: assign model indices to unique MTA atoms
         std::unordered_map<int32_t, int32_t> mtaIdxToModelIdx;
-        int32_t                              numDuplicatesSkipped = 0;
 
         for (int32_t i = 0; i < numLocalPlusHalo; i++)
         {
@@ -707,12 +722,9 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             {
                 int32_t mtaIdx = it->second;
 
-                if (mtaIdxToModelIdx.count(mtaIdx))
-                {
-                    // Periodic ghost: record mapping but don't create new model atom
-                    numDuplicatesSkipped++;
-                }
-                else
+                // A periodic ghost of an atom seen already gets no model atom of its own;
+                // its local index is mapped in the second pass.
+                if (mtaIdxToModelIdx.count(mtaIdx) == 0)
                 {
                     if (i < numLocal)
                     {
@@ -818,9 +830,6 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 
     GMX_RELEASE_ASSERT(std::count(atomNumbers_.begin(), atomNumbers_.end(), 0) == 0,
                        "Some atom numbers not set.");
-
-    pbc_flags(options_.params_.pbcType_.get(), &data_->pbc);
-
 }
 
 void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
@@ -967,14 +976,11 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
 
     // Step 4: Ring exchange — P-1 rounds of MPI_Sendrecv.
     // Each round: send our pairs to rank+1, receive from rank-1.
+#if GMX_MPI
     const int numRanks = mpiComm_.size();
     const int myRank   = mpiComm_.rank();
     const int sendTo   = (myRank + 1) % numRanks;
     const int recvFrom = (myRank - 1 + numRanks) % numRanks;
-
-    // Compute box inverse once for triclinic-safe shift computation.
-    matrix boxInv;
-    invertBoxMatrix(box, boxInv);
 
     std::vector<int> sendBuf = myPairsBuf;
     std::vector<int> recvBuf;
@@ -1019,21 +1025,10 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
             const int32_t localI = itI->second;
             const int32_t localJ = itJ->second;
 
-            // Triclinic-safe minimum-image shift (matches LAMMPS cell_shifts).
-            // invertBoxMatrix returns lower-triangular inverse, so upper triangle is 0.
-            const double rawDx =
-                    static_cast<double>(positions_[localJ][XX] - positions_[localI][XX]);
-            const double rawDy =
-                    static_cast<double>(positions_[localJ][YY] - positions_[localI][YY]);
-            const double rawDz =
-                    static_cast<double>(positions_[localJ][ZZ] - positions_[localI][ZZ]);
-
-            IVec shift;
-            shift[XX] = static_cast<int>(std::round(
-                    -(boxInv[XX][XX] * rawDx + boxInv[YY][XX] * rawDy + boxInv[ZZ][XX] * rawDz)));
-            shift[YY] = static_cast<int>(std::round(
-                    -(boxInv[YY][YY] * rawDy + boxInv[ZZ][YY] * rawDz)));
-            shift[ZZ] = static_cast<int>(std::round(-(boxInv[ZZ][ZZ] * rawDz)));
+            // Minimum-image shift along the periodic directions only: none along z
+            // with pbc = xy, none at all with pbc = no.
+            const IVec shift = minimumImageCellShift(
+                    box, data_->pbc, positions_[localJ] - positions_[localI]);
 
             backwardPairsMta_.push_back(localI);
             backwardPairsMta_.push_back(localJ);
@@ -1044,7 +1039,11 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
         // Forward received buffer for the next round.
         sendBuf.swap(recvBuf);
     }
-
+#else
+    GMX_UNUSED_VALUE(box);
+    GMX_UNUSED_VALUE(maxRounds);
+    GMX_RELEASE_ASSERT(false, "Parallel metatomic evaluation needs an MPI build");
+#endif
 }
 
 
@@ -1129,11 +1128,15 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
     }
 
     std::vector<double> recvBuf(4 * totalNonHome);
+#if GMX_MPI
     MPI_Gatherv(sendBuf.data(), 4 * numNonHome, MPI_DOUBLE,
                 recvBuf.data(), dcounts.data(), ddispls.data(), MPI_DOUBLE,
                 mpiComm_.mainRank(), mpiComm_.comm());
     MPI_Bcast(recvBuf.data(), 4 * totalNonHome, MPI_DOUBLE,
               mpiComm_.mainRank(), mpiComm_.comm());
+#else
+    GMX_RELEASE_ASSERT(false, "Parallel metatomic evaluation needs an MPI build");
+#endif
 
     // Step 5: Scan received tuples for forces destined for our home atoms.
     for (int t = 0; t < totalNonHome; t++)
