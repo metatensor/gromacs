@@ -118,3 +118,42 @@ pin `a245aed8` no longer exists upstream (`9e1de9a4` has the same
 
 This is the reason the build prints the versions it found: the dependency is a
 branch, and it moved under this module after the module was written.
+
+CI (`.github/workflows/metatomic-capi.yml`) builds metatomic-core at the same
+commit, configures with `GMX_METATOMIC=ON` and runs the unit tests: bump the
+commit there and here together.
+
+## Validating the C API migration
+
+The `metatomic-capi.yml` workflow builds the pinned core with metatensor-core
+0.2.6 on Linux/GCC/OpenMP and macOS/Clang. It replaces the libtorch-only pixi
+workflow. The following commands use an already configured GROMACS build:
+
+```bash
+cmake --build build --target gmx mta_applied_forces-test mdrunutility-test metatomic-test-plugin
+build/bin/mta_applied_forces-test
+build/bin/mdrunutility-test
+python3 admin/ci-scripts/metatomic-cmake-smoke.py
+python3 admin/ci-scripts/metatomic-capi-smoke.py build/bin/gmx build/lib/metatomic-test-plugin.so
+```
+
+The unit tests compare energy, forces and virial with analytic Lennard-Jones
+values, including nm/kJ/mol, Angstrom/eV, triclinic cell shifts, nonperiodic
+and XY systems, and rejection of screw periodicity and unavailable inputs.
+The CMake fixture checks AUTO/ON/OFF, the TORCH alias, incompatible APIs,
+reconfiguration after a dependency change, and preservation of caller settings.
+
+The end-to-end test loads the same analytic model from a shared test plugin,
+runs `grompp` and single-rank `mdrun`, and checks the resulting energy and forces
+in both nm and Angstrom. This tests model-option serialization, dynamic loading,
+setup notifications and the actual GROMACS pair list. The shared plugin is a
+test fixture, not an installed runtime dependency. The LJ plugin shipped with
+the pinned core does not advertise strain gradients, which this conservative
+force provider requires.
+
+These checks cover the CPU, single-rank migration. They do not establish
+correctness for arbitrary production models, accelerator plugins or domain
+decomposition. ONIOM/link atoms, site batching, electrostatic corrections and
+new distributed algorithms belong in follow-up changes after this interface
+has been reviewed. Existing domain-decomposition code remains in the provider;
+the new single-rank smoke test is not evidence of MPI correctness.

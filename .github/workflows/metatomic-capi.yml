@@ -1,0 +1,140 @@
+name: Metatomic C API
+
+# Builds metatomic-core at the pinned commit, configures GROMACS with
+# GMX_METATOMIC=ON so the C API force provider is compiled, and runs the CPU
+# unit tests and a grompp/mdrun smoke test with a shared analytic plugin.
+# This replaces the previous libtorch-only pixi integration workflow.
+
+on:
+  push:
+    branches:
+      - metatomic
+      - metatomic-next
+      - 'metatomic-next/**'
+      - 'codex/metatomic-next/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Keep in sync with src/gromacs/applied_forces/metatomic/docs/dependencies.md
+  METATOMIC_CORE_COMMIT: 07cb8766af9c28fed4e232f911a24ec3b11a3840
+  METATENSOR_CORE_VERSION: 0.2.6
+  GMX_TESTS: >-
+    mta_applied_forces-test mdrunutility-test nbnxm-test topology-test
+    nnpot_applied_forces-test qmmm_applied_forces-test
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  NINJA_STATUS: "[%f/%t %o/sec] "
+
+jobs:
+  unit-tests:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GCC, OpenMP
+            os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+            openmp: "ON"
+          - name: macOS Clang, no OpenMP
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+            openmp: "OFF"
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+
+    steps:
+      - name: Checkout GROMACS
+        uses: actions/checkout@v6
+        with:
+          path: gromacs
+          show-progress: false
+          persist-credentials: false
+
+      - name: Checkout metatomic-core
+        uses: actions/checkout@v6
+        with:
+          repository: metatensor/metatomic
+          ref: ${{ env.METATOMIC_CORE_COMMIT }}
+          path: metatomic
+          show-progress: false
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -q && sudo apt-get install -y -q ninja-build ccache
+          else
+            brew install ninja ccache
+          fi
+          rustup toolchain install stable --profile minimal && rustup default stable
+          cargo --version
+
+      - name: Install metatensor-core
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "metatensor-core==$METATENSOR_CORE_VERSION"
+          echo "METATENSOR_PREFIX=$("$RUNNER_TEMP/venv/bin/python" -c 'import metatensor.utils; print(metatensor.utils.cmake_prefix_path)')" >> "$GITHUB_ENV"
+
+      - name: Cache metatomic-core
+        id: core-cache
+        uses: actions/cache@v5
+        with:
+          path: prefix
+          key: metatomic-core-${{ runner.os }}-${{ env.METATOMIC_CORE_COMMIT }}-metatensor-${{ env.METATENSOR_CORE_VERSION }}
+
+      - name: Build metatomic-core
+        if: steps.core-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S metatomic/metatomic-core -B core-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/prefix" \
+            -DCMAKE_PREFIX_PATH="$METATENSOR_PREFIX"
+          cmake --build core-build
+          cmake --install core-build
+
+      - name: ccache files
+        uses: actions/cache@v5
+        with:
+          path: .ccache
+          key: metatomic-capi-ccache-${{ matrix.os }}-${{ github.sha }}
+          restore-keys: metatomic-capi-ccache-${{ matrix.os }}-
+
+      - name: Configure GROMACS
+        run: |
+          cmake -S gromacs -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DGMX_METATOMIC=ON -DGMX_NNPOT=OFF \
+            -DCMAKE_PREFIX_PATH="$PWD/prefix;$METATENSOR_PREFIX" \
+            -DGMX_GPU=OFF -DGMX_OPENMP=${{ matrix.openmp }} -DGMX_HWLOC=OFF \
+            -DGMX_FFT_LIBRARY=fftpack -DGMX_BUILD_UNITTESTS=ON \
+            -DREGRESSIONTEST_DOWNLOAD=OFF
+
+      - name: Build
+        run: |
+          ccache -z
+          cmake --build build --target gmx metatomic-test-plugin $GMX_TESTS
+          ccache -s
+
+      - name: Run unit tests
+        run: |
+          failed=0
+          for t in $GMX_TESTS; do
+            echo "::group::$t"
+            build/bin/$t || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed
+
+      - name: Test CMake discovery and reconfiguration
+        run: python3 gromacs/admin/ci-scripts/metatomic-cmake-smoke.py
+
+      - name: Test plugin loading through grompp and mdrun
+        run: python3 gromacs/admin/ci-scripts/metatomic-capi-smoke.py build/bin/gmx build/lib/metatomic-test-plugin.so

@@ -41,4 +41,10 @@ target_link_libraries(mta_applied_forces-test PRIVATE applied_forces math pbcuti
 if (GMX_METATOMIC_ACTIVE)
     # the force provider tests register a model plugin of their own
     target_link_libraries(mta_applied_forces-test PRIVATE metatomic::shared)
+    add_library(metatomic-test-plugin MODULE testplugin.cpp)
+    target_link_libraries(metatomic-test-plugin PRIVATE metatomic::shared)
+    # A stable path lets the same smoke-test command run on Linux and macOS.
+    set_target_properties(metatomic-test-plugin PROPERTIES
+        PREFIX "" SUFFIX ".so"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 endif()
