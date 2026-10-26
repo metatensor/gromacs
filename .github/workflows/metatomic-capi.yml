@@ -2,16 +2,15 @@ name: Metatomic C API
 
 # Builds metatomic-core at the pinned commit, configures GROMACS with
 # GMX_METATOMIC=ON so the C API force provider is compiled, and runs the CPU
-# unit tests and a grompp/mdrun smoke test with a shared analytic plugin.
+# unit tests and a grompp/mdrun smoke test with a shared analytic plugin, on one
+# rank and with domain decomposition over two (thread-MPI, and Open MPI).
 # This replaces the previous libtorch-only pixi integration workflow.
 
 on:
+  # Branches under review run through their pull request; a push trigger for
+  # them too would run every job twice per push.
   push:
-    branches:
-      - metatomic
-      - metatomic-next
-      - 'metatomic-next/**'
-      - 'codex/metatomic-next/**'
+    branches: [metatomic]
   pull_request:
   workflow_dispatch:
 
@@ -41,14 +40,27 @@ jobs:
             cc: gcc
             cxx: g++
             openmp: "ON"
+            mpi: thread
           - name: macOS Clang, no OpenMP
             os: macos-latest
             cc: clang
             cxx: clang++
             openmp: "OFF"
+            mpi: thread
+          # compiles the force provider's MPI calls against a real MPI library and
+          # runs the two-rank smoke test through mpirun
+          - name: Linux GCC, Open MPI
+            os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+            openmp: "ON"
+            mpi: library
+            tests: mta_applied_forces-test mdrunutility-test
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      TESTS: ${{ matrix.tests }}
+      GMX: build/bin/${{ matrix.mpi == 'library' && 'gmx_mpi' || 'gmx' }}
 
     steps:
       - name: Checkout GROMACS
@@ -71,6 +83,9 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update -q && sudo apt-get install -y -q ninja-build ccache
+            if [ "${{ matrix.mpi }}" = library ]; then
+              sudo apt-get install -y -q libopenmpi-dev openmpi-bin
+            fi
           else
             brew install ninja ccache
           fi
@@ -103,8 +118,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .ccache
-          key: metatomic-capi-ccache-${{ matrix.os }}-${{ github.sha }}
-          restore-keys: metatomic-capi-ccache-${{ matrix.os }}-
+          key: metatomic-capi-ccache-${{ matrix.os }}-${{ matrix.mpi }}-${{ github.sha }}
+          restore-keys: metatomic-capi-ccache-${{ matrix.os }}-${{ matrix.mpi }}-
 
       - name: Configure GROMACS
         run: |
@@ -114,19 +129,20 @@ jobs:
             -DGMX_METATOMIC=ON -DGMX_NNPOT=OFF \
             -DCMAKE_PREFIX_PATH="$PWD/prefix;$METATENSOR_PREFIX" \
             -DGMX_GPU=OFF -DGMX_OPENMP=${{ matrix.openmp }} -DGMX_HWLOC=OFF \
+            -DGMX_MPI=${{ matrix.mpi == 'library' && 'ON' || 'OFF' }} \
             -DGMX_FFT_LIBRARY=fftpack -DGMX_BUILD_UNITTESTS=ON \
             -DREGRESSIONTEST_DOWNLOAD=OFF
 
       - name: Build
         run: |
           ccache -z
-          cmake --build build --target gmx metatomic-test-plugin $GMX_TESTS
+          cmake --build build --target gmx metatomic-test-plugin ${TESTS:-$GMX_TESTS}
           ccache -s
 
       - name: Run unit tests
         run: |
           failed=0
-          for t in $GMX_TESTS; do
+          for t in ${TESTS:-$GMX_TESTS}; do
             echo "::group::$t"
             build/bin/$t || failed=1
             echo "::endgroup::"
@@ -137,4 +153,6 @@ jobs:
         run: python3 gromacs/admin/ci-scripts/metatomic-cmake-smoke.py
 
       - name: Test plugin loading through grompp and mdrun
-        run: python3 gromacs/admin/ci-scripts/metatomic-capi-smoke.py build/bin/gmx build/lib/metatomic-test-plugin.so
+        env:
+          GMX_MPIEXEC: ${{ matrix.mpi == 'library' && 'mpirun --oversubscribe -np' || '' }}
+        run: python3 gromacs/admin/ci-scripts/metatomic-capi-smoke.py "$GMX" build/lib/metatomic-test-plugin.so

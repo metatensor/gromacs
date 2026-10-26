@@ -37,9 +37,12 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+
 #include <metatomic.hpp>
+#include <nlohmann/json.hpp>
 namespace gmx::test {
 //! Lennard-Jones parameters in GROMACS units: nm and kJ/mol.
 constexpr double c_sigma   = 0.34;
@@ -51,7 +54,9 @@ constexpr int c_atomicNumber = 18;
 /*! \brief Lennard-Jones pair model with explicit positions and strain gradients.
  *
  * Built with the length and energy units given as model options, so the same
- * physical potential can be declared in nm or in Angstrom.
+ * physical potential can be declared in nm or in Angstrom. With selected atoms
+ * (domain decomposition), the energy is that of the selected atoms: half of each
+ * pair for each selected end, as metatomic-core's Lennard-Jones plugin does.
  */
 class PairModel final : public metatomic::BaseModel
 {
@@ -114,9 +119,9 @@ public:
                                                      std::optional<metatensor::Labels> selectedAtoms,
                                                      const std::vector<metatomic::Quantity>& /*requestedOutputs*/) override
     {
-        if (systems.size() != 1 || selectedAtoms.has_value())
+        if (systems.size() != 1)
         {
-            throw metatomic::Error("the test model takes one system and no atom selection");
+            throw metatomic::Error("the test model takes one system");
         }
         const auto& system  = systems[0];
         const auto  nAtoms  = system.size();
@@ -139,11 +144,25 @@ public:
             {
                 continue;
             }
+            const auto i      = static_cast<size_t>(samples(pair, 0));
+            const auto j      = static_cast<size_t>(samples(pair, 1));
+            const auto weight = [&]
+            {
+                if (!selectedAtoms.has_value())
+                {
+                    return 1.0;
+                }
+                const auto selected = [&](size_t atom)
+                { return selectedAtoms->position({ 0, static_cast<int32_t>(atom) }).has_value(); };
+                return 0.5 * (selected(i) + selected(j));
+            }();
+            if (weight == 0.0)
+            {
+                continue;
+            }
             const double sr6 = std::pow(sigma / r, 6);
-            energy += 4 * epsilon * (sr6 * sr6 - sr6);
-            const double dEdr = 4 * epsilon * (-12 * sr6 * sr6 + 6 * sr6) / r;
-            const auto   i    = static_cast<size_t>(samples(pair, 0));
-            const auto   j    = static_cast<size_t>(samples(pair, 1));
+            energy += weight * 4 * epsilon * (sr6 * sr6 - sr6);
+            const double dEdr = weight * 4 * epsilon * (-12 * sr6 * sr6 + 6 * sr6) / r;
             for (int a = 0; a < 3; ++a)
             {
                 // d = x_j - x_i + shift
@@ -205,7 +224,7 @@ private:
 };
 
 //! Plugin callback creating a PairModel from `{"length_unit": ..., "energy_unit": ...}`.
-mta_status_t loadPairModel(const char* loadFrom, const char* optionsJson, mta_model_t* model)
+inline mta_status_t loadPairModel(const char* loadFrom, const char* optionsJson, mta_model_t* model)
 {
     if (std::string(loadFrom) != "gromacs-test-pair-model")
     {
