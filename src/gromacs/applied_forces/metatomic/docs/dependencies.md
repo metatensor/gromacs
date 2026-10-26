@@ -126,8 +126,9 @@ commit there and here together.
 ## Validating the C API migration
 
 The `metatomic-capi.yml` workflow builds the pinned core with metatensor-core
-0.2.6 on Linux/GCC/OpenMP and macOS/Clang. It replaces the libtorch-only pixi
-workflow. The following commands use an already configured GROMACS build:
+0.2.6 on Linux/GCC/OpenMP and macOS/Clang with thread-MPI, and on Linux with
+Open MPI. It replaces the libtorch-only pixi workflow. The following commands
+use an already configured GROMACS build:
 
 ```bash
 cmake --build build --target gmx mta_applied_forces-test mdrunutility-test metatomic-test-plugin
@@ -135,25 +136,33 @@ build/bin/mta_applied_forces-test
 build/bin/mdrunutility-test
 python3 admin/ci-scripts/metatomic-cmake-smoke.py
 python3 admin/ci-scripts/metatomic-capi-smoke.py build/bin/gmx build/lib/metatomic-test-plugin.so
+# with a library-MPI build (gmx_mpi), through the MPI launcher:
+GMX_MPIEXEC="mpirun -np" python3 admin/ci-scripts/metatomic-capi-smoke.py build/bin/gmx_mpi build/lib/metatomic-test-plugin.so
 ```
 
 The unit tests compare energy, forces and virial with analytic Lennard-Jones
 values, including nm/kJ/mol, Angstrom/eV, triclinic cell shifts, nonperiodic
-and XY systems, and rejection of screw periodicity and unavailable inputs.
-The CMake fixture checks AUTO/ON/OFF, the TORCH alias, incompatible APIs,
+and XY systems, and rejection of screw periodicity and unavailable inputs, and
+check the minimum-image cell shifts along periodic directions only. The CMake
+fixture checks AUTO/ON/OFF, the TORCH alias, incompatible APIs,
 reconfiguration after a dependency change, and preservation of caller settings.
 
 The end-to-end test loads the same analytic model from a shared test plugin,
-runs `grompp` and single-rank `mdrun`, and checks the resulting energy and forces
-in both nm and Angstrom. This tests model-option serialization, dynamic loading,
-setup notifications and the actual GROMACS pair list. The shared plugin is a
-test fixture, not an installed runtime dependency. The LJ plugin shipped with
-the pinned core does not advertise strain gradients, which this conservative
-force provider requires.
+runs `grompp` and `mdrun`, and checks the `Metatomic-Potential` energy and the
+forces: on one rank in nm and in Angstrom, and with domain decomposition over
+two ranks, each atom on its own rank, in a 3D periodic box and in an xy slab
+with walls whose pair is farther apart in z than half the box height (it fails
+if the cross-rank pair is shifted along z). The classical Lennard-Jones
+parameters are zero, so only the model can produce the expected values. This
+tests model-option serialization, dynamic loading, setup notifications, the
+actual GROMACS pair list, and the exchange of atoms, pairs and forces between
+ranks. The shared plugin is a test fixture, not an installed runtime
+dependency; with selected atoms it returns their share of each pair, as
+metatomic-core's own Lennard-Jones plugin does. That plugin does not advertise
+strain gradients, which this conservative force provider requests.
 
-These checks cover the CPU, single-rank migration. They do not establish
-correctness for arbitrary production models, accelerator plugins or domain
-decomposition. ONIOM/link atoms, site batching, electrostatic corrections and
-new distributed algorithms belong in follow-up changes after this interface
-has been reviewed. Existing domain-decomposition code remains in the provider;
-the new single-rank smoke test is not evidence of MPI correctness.
+These checks cover the CPU migration with a pair model. They do not establish
+correctness for arbitrary production models (message passing beyond the pair
+cutoff is only exercised by a pair model here) or accelerator plugins. ONIOM/link
+atoms, site batching, electrostatic corrections and new distributed algorithms
+belong in follow-up changes after this interface has been reviewed.
