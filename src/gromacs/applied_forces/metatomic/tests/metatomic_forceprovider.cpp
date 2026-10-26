@@ -56,6 +56,7 @@
 
 #include <gtest/gtest.h>
 
+#include "gromacs/applied_forces/metatomic/metatomic_cellshift.h"
 #include "gromacs/applied_forces/metatomic/metatomic_forceprovider.h"
 #include "gromacs/applied_forces/metatomic/metatomic_options.h"
 #include "gromacs/domdec/localatomset.h"
@@ -87,6 +88,32 @@ namespace test
 {
 namespace
 {
+
+const matrix c_triclinicBox = { { 3, 0, 0 }, { 1.2, 3, 0 }, { -0.9, 1.1, 3 } };
+
+TEST(MetatomicCellShift, FindsTheMinimumImageInTriclinicBoxes)
+{
+    const RVec small(0.11, -0.07, 0.05);
+    for (const IVec& n : { IVec(0, 0, 0), IVec(1, 0, 0), IVec(-1, 1, 0), IVec(1, -1, 1), IVec(0, 1, -1) })
+    {
+        const RVec d = small + cellShiftVector(c_triclinicBox, n);
+        EXPECT_EQ(minimumImageCellShift(c_triclinicBox, { 1, 1, 1 }, d), IVec(-n[XX], -n[YY], -n[ZZ]));
+    }
+}
+
+TEST(MetatomicCellShift, ShiftsAlongPeriodicDirectionsOnly)
+{
+    const RVec d(0.1, 2.9, 2.9);
+    // pbc = xyz would also shift along c
+    EXPECT_EQ(minimumImageCellShift(c_triclinicBox, { 1, 1, 1 }, d)[ZZ], -1);
+    // pbc = xy: in the plane only, z untouched
+    const IVec inPlane = minimumImageCellShift(c_triclinicBox, { 1, 1, 0 }, d);
+    EXPECT_EQ(inPlane, IVec(0, -1, 0));
+    EXPECT_FLOAT_EQ((d + cellShiftVector(c_triclinicBox, inPlane))[ZZ], d[ZZ]);
+    // pbc = no: never, and a zero box is not divided by
+    const matrix zeroBox = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    EXPECT_EQ(minimumImageCellShift(zeroBox, { 0, 0, 0 }, d), IVec(0, 0, 0));
+}
 
 #if GMX_METATOMIC_ACTIVE
 
