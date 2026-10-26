@@ -27,3 +27,15 @@ which requires a CP2K 2027.1 or higher, whereas the default is
 short-range regularized point-charge coupling 
 ``qmmm-cp2k-dftb-electrostatic-coupling = point-charge``.
 Regular DFT methods are still using GEEP (Gauss) for electrostatics.
+
+The Metatomic interface runs models through the metatomic-core C API
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+The Metatomic force provider no longer links libtorch: models are loaded and
+evaluated through the C API of metatomic-core, so any model a metatomic-core
+plugin can load works, with options given by :mdp:`metatomic-model-options`.
+``-DGMX_METATOMIC=ON`` requires metatomic-core with the API of 545d5976 or
+later (pinned to 07cb8766). With domain decomposition every rank evaluates all
+model atoms and pairs, which message-passing models need, and the plain
+pairlist range is the model's pair-list cutoff plus a buffer, rather than its
+interaction range.
