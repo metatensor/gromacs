@@ -30,17 +30,29 @@ endif()
 ''')
         prefix = root / 'prefix'
         prefix.mkdir()
-        (prefix / 'metatensor-config.cmake').write_text('set(metatensor_VERSION 0.2.6)\n')
+        headers = root / 'metatensor-include'
+        headers.mkdir()
+        # A unique transitive header prevents globally installed metatensor headers
+        # from hiding a missing include directory in the compile probe.
+        (headers / 'gmx_probe_metatensor_dependency.h').write_text('#pragma once\n')
+        (prefix / 'metatensor-config.cmake').write_text('''set(metatensor_VERSION 0.2.6)
+add_library(metatensor::shared INTERFACE IMPORTED)
+set_target_properties(metatensor::shared PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}/../metatensor-include")
+add_library(metatensor ALIAS metatensor::shared)
+''')
         (prefix / 'metatensor-config-version.cmake').write_text(
             'set(PACKAGE_VERSION 0.2.6)\nset(PACKAGE_VERSION_COMPATIBLE TRUE)\n')
         (prefix / 'metatomic-config.cmake').write_text('''set(metatomic_VERSION 0.2.0-dev)
 set(METATOMIC_INCLUDE "${CMAKE_CURRENT_LIST_DIR}")
 add_library(metatomic::shared INTERFACE IMPORTED)
 set_target_properties(metatomic::shared PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}")
+    INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}"
+    INTERFACE_LINK_LIBRARIES metatensor)
 ''')
         header = prefix / 'metatomic.hpp'
-        supported = '''#include <vector>
+        supported = '''#include <gmx_probe_metatensor_dependency.h>
+#include <vector>
 namespace metatomic {
 struct PairListOptions {};
 struct Quantity {};
@@ -60,7 +72,7 @@ struct ExternalModel {
             result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             assert (result.returncode == 0) == success, result.stdout
             if not success:
-                assert 'was not found' in result.stdout or 'predates the API' in result.stdout, result.stdout
+                assert 'was not found' in result.stdout or 'API compile check failed' in result.stdout, result.stdout
             print(f'{name} ({mode}): PASS')
 
         configure('off', 'OFF', 'OFF', missing=True)
