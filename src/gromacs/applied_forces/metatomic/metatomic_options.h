@@ -72,10 +72,12 @@ struct MetatomicParameters
     //! Is the metatomic force provider enabled?
     bool active = false;
 
-    //! path to the exported metatomic model file
+    //! model to load: the path of an exported model file, or what a plugin loads
     std::string modelPath_;
-    //! path to a directory where extensions will be present at MD time
+    //! path of a metatomic plugin library registered before loading the model
     std::string extensionsDirectory;
+    //! JSON object of string options passed to the plugin that loads the model
+    std::string modelOptions;
     //! should metatomic run additional checks on the models inputs & outputs?
     bool checkConsistency = false;
     //! Torch device to use to run the model. If left empty, this is defined

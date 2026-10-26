@@ -75,6 +75,7 @@ static const std::string INPUT_GROUP_TAG = "input-group";
 
 static const std::string MODEL_PATH_TAG           = "model";
 static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
+static const std::string MODEL_OPTIONS_TAG        = "model-options";
 static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
 static const std::string DEVICE_TAG               = "device";
 static const std::string VARIANT_TAG              = "variant";
@@ -141,6 +142,8 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_PATH_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, EXTENSIONS_DIRECTORY_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_OPTIONS_TAG);
     addMdpTransformFromString<bool>(
             rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG);
     addMdpTransformFromString<std::string>(rules, stringIdentityTransform, METATOMIC_MODULE_NAME, DEVICE_TAG);
@@ -166,6 +169,7 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
 
     section.addOption(StringOption(MODEL_PATH_TAG.c_str()).store(&params_.modelPath_));
     section.addOption(StringOption(EXTENSIONS_DIRECTORY_TAG.c_str()).store(&params_.extensionsDirectory));
+    section.addOption(StringOption(MODEL_OPTIONS_TAG.c_str()).store(&params_.modelOptions));
     section.addOption(StringOption(DEVICE_TAG.c_str()).store(&params_.device));
     section.addOption(BooleanOption(CHECK_CONSISTENCY_TAG.c_str()).store(&params_.checkConsistency));
     section.addOption(StringOption(VARIANT_TAG.c_str()).store(&params_.variant));
@@ -195,6 +199,8 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, MODEL_PATH_TAG, params_.modelPath_);
         addMdpOutputValue<std::string>(
                 builder, METATOMIC_MODULE_NAME, EXTENSIONS_DIRECTORY_TAG, params_.extensionsDirectory);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, MODEL_OPTIONS_TAG, params_.modelOptions);
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, DEVICE_TAG, params_.device);
         addMdpOutputValue<bool>(
                 builder, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG, params_.checkConsistency);
