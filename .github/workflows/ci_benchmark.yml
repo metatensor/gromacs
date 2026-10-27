@@ -7,6 +7,10 @@ on:
 
 jobs:
   benchmark:
+    # Off until ported: the pixi_envs environment and create_model.py build the
+    # libtorch interface and a TorchScript model, which the metatomic C API
+    # interface does not load (configure fails without metatomic-core).
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout GROMACS

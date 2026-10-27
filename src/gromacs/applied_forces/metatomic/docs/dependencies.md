@@ -127,8 +127,10 @@ commit there and here together.
 
 The `metatomic-capi.yml` workflow builds the pinned core with metatensor-core
 0.2.6 on Linux/GCC/OpenMP and macOS/Clang with thread-MPI, and on Linux with
-Open MPI. It replaces the libtorch-only pixi workflow. The following commands
-use an already configured GROMACS build:
+Open MPI. It replaces the libtorch-only pixi workflow. The ASV benchmark
+workflow (`ci_benchmark.yml`) still builds the libtorch interface from
+pixi_envs, so it is switched off until it is ported to metatomic-core. The
+following commands use an already configured GROMACS build:
 
 ```bash
 cmake --build build --target gmx mta_applied_forces-test mdrunutility-test metatomic-test-plugin
