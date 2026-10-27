@@ -34,7 +34,7 @@
 /*! \internal \file
  * \brief
  * Stub implementation of the Metatomic Force Provider class.
- * Compiled in case Libtorch/Metatomic backend is not linked.
+ * Compiled when the metatomic C API library is not linked.
  *
  * \author Metatensor developers <https://github.com/metatensor>
  * \ingroup module_applied_forces

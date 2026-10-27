@@ -43,6 +43,9 @@
 
 #include "metatomic_options.h"
 
+#include "config.h"
+
+#include <algorithm>
 #include <set>
 
 #include "gromacs/domdec/localatomset.h"
@@ -61,6 +64,10 @@
 #include "gromacs/utility/strconvert.h"
 #include "gromacs/utility/stringutil.h"
 
+#if GMX_METATOMIC_ACTIVE
+#    include <nlohmann/json.hpp>
+#endif
+
 namespace gmx
 {
 
@@ -75,6 +82,7 @@ static const std::string INPUT_GROUP_TAG = "input-group";
 
 static const std::string MODEL_PATH_TAG           = "model";
 static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
+static const std::string MODEL_OPTIONS_TAG        = "model-options";
 static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
 static const std::string DEVICE_TAG               = "device";
 static const std::string VARIANT_TAG              = "variant";
@@ -128,6 +136,58 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
     // finalize topology
     mtop->finalize();
 }
+//! metatomic-uncertainty-threshold is auto, off, or a non-negative number of kJ/mol.
+void checkUncertaintyThreshold(const std::string& value)
+{
+    if (value == "auto" || value == "off")
+    {
+        return;
+    }
+    try
+    {
+        if (doubleFromString(value.c_str()) >= 0)
+        {
+            return;
+        }
+    }
+    catch (const InvalidInputError&)
+    {
+    }
+    GMX_THROW(InconsistentInputError(formatString(
+            "metatomic-uncertainty-threshold must be auto, off or a non-negative number in kJ/mol, "
+            "not '%s'.",
+            value.c_str())));
+}
+
+//! metatomic-model-options is empty or a JSON object of strings, which metatomic plugins expect.
+void checkModelOptions(const std::string& value)
+{
+#if GMX_METATOMIC_ACTIVE
+    if (value.empty())
+    {
+        return;
+    }
+    bool valid = false;
+    try
+    {
+        const auto json = nlohmann::json::parse(value);
+        valid           = json.is_object()
+                && std::all_of(json.begin(), json.end(), [](const auto& item) { return item.is_string(); });
+    }
+    catch (const nlohmann::json::exception&)
+    {
+    }
+    if (!valid)
+    {
+        GMX_THROW(InconsistentInputError(formatString(
+                "metatomic-model-options must be a JSON object with string values, such as "
+                "{\"cutoff\": \"5.0\"}, not '%s'.",
+                value.c_str())));
+    }
+#else
+    GMX_UNUSED_VALUE(value);
+#endif
+}
 } // namespace
 
 void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
@@ -141,6 +201,8 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_PATH_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, EXTENSIONS_DIRECTORY_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_OPTIONS_TAG);
     addMdpTransformFromString<bool>(
             rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG);
     addMdpTransformFromString<std::string>(rules, stringIdentityTransform, METATOMIC_MODULE_NAME, DEVICE_TAG);
@@ -166,6 +228,7 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
 
     section.addOption(StringOption(MODEL_PATH_TAG.c_str()).store(&params_.modelPath_));
     section.addOption(StringOption(EXTENSIONS_DIRECTORY_TAG.c_str()).store(&params_.extensionsDirectory));
+    section.addOption(StringOption(MODEL_OPTIONS_TAG.c_str()).store(&params_.modelOptions));
     section.addOption(StringOption(DEVICE_TAG.c_str()).store(&params_.device));
     section.addOption(BooleanOption(CHECK_CONSISTENCY_TAG.c_str()).store(&params_.checkConsistency));
     section.addOption(StringOption(VARIANT_TAG.c_str()).store(&params_.variant));
@@ -195,6 +258,8 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, MODEL_PATH_TAG, params_.modelPath_);
         addMdpOutputValue<std::string>(
                 builder, METATOMIC_MODULE_NAME, EXTENSIONS_DIRECTORY_TAG, params_.extensionsDirectory);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, MODEL_OPTIONS_TAG, params_.modelOptions);
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, DEVICE_TAG, params_.device);
         addMdpOutputValue<bool>(
                 builder, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG, params_.checkConsistency);
@@ -254,6 +319,9 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
     {
         return;
     }
+    // grompp rejects what mdrun would only find when it loads the model
+    checkUncertaintyThreshold(params_.uncertaintyThreshold);
+    checkModelOptions(params_.modelOptions);
 
     auto GroupIndexAdder =
             treeBuilder.addUniformArray<std::int64_t>(METATOMIC_MODULE_NAME + "-" + INPUT_GROUP_TAG);

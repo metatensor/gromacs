@@ -3825,6 +3825,94 @@ interface implementation follow :ref:`nnpot`.
    (0.1) [nm] Distance between link atom and the bonded MM atom.
 
 
+.. _mdp-metatomic:
+
+Metatomic simulations
+^^^^^^^^^^^^^^^^^^^^^
+
+The Metatomic interface evaluates an atomistic model through the C API of
+metatomic-core and adds its energy, forces and virial through the
+applied-forces framework. It is available when |Gromacs| was configured with
+``-DGMX_METATOMIC=ON`` (or ``AUTO`` with metatomic-core found). The model sees
+the atoms of :mdp:`metatomic-input-group`, with the cell, the periodic
+boundary conditions and pair lists built from the |Gromacs| pairlist.
+Three-dimensional, two-dimensional and nonperiodic systems are supported;
+screw periodic boundary conditions are rejected.
+:ref:`gmx grompp` removes the classical interactions among these atoms from
+the topology, as for :mdp:`nnpot-input-group`.
+
+.. mdp:: metatomic-active
+
+   (false)
+   Activate the Metatomic interface.
+
+.. mdp:: metatomic-input-group
+
+   (System)
+   Index group of the atoms given to the model.
+
+.. mdp:: metatomic-model
+
+   The model to load: the path of a model file, or the name a plugin loads
+   its model from. The string is passed unchanged to metatomic-core.
+
+.. mdp:: metatomic-extensions
+
+   Path of a metatomic-core plugin library, registered before the model is
+   loaded. Leave empty when a plugin already registered with metatomic-core
+   loads the model.
+
+.. mdp:: metatomic-model-options
+
+   JSON object with string keys and values, passed to the plugin that loads
+   the model, for example ``{"cutoff": "5.0"}``. Empty means no options.
+
+.. mdp:: metatomic-device
+
+   Device the model should run on. |Gromacs| hands the model CPU buffers, so
+   anything other than ``cpu`` is left to the plugin and reported in the log.
+   The environment variable ``GMX_METATOMIC_DEVICE`` overrides it.
+
+.. mdp:: metatomic-check-consistency
+
+   (false)
+   Let metatomic-core check the inputs and outputs of every evaluation against
+   the model's declared capabilities. Slower; meant for debugging a model.
+
+.. mdp:: metatomic-variant
+
+   Variant of the outputs to use, ``energy/<variant>`` instead of ``energy``.
+   Empty or ``no`` uses the default output.
+
+.. mdp:: metatomic-uncertainty-threshold
+
+   (auto)
+   When the model provides a per-atom ``energy_uncertainty`` output, warn about
+   atoms whose uncertainty exceeds this threshold, in kJ/mol. ``auto`` uses
+   0.1 eV, ``off`` disables the check.
+
+.. mdp:: metatomic-variant-energy-uq
+
+   Variant of the ``energy_uncertainty`` output, as :mdp:`metatomic-variant`.
+
+.. mdp:: metatomic-non-conservative
+
+   (false)
+   Take the forces from the model's per-atom ``non_conservative_force``
+   output, and the virial from ``non_conservative_stress`` when the model
+   provides it, instead of the gradients of the energy. Faster for models
+   trained for it, but the forces do not conserve energy.
+
+.. mdp:: metatomic-variant-nc-forces
+
+   Variant of the ``non_conservative_force`` output, as :mdp:`metatomic-variant`.
+
+.. mdp:: metatomic-variant-nc-stress
+
+   Variant of the ``non_conservative_stress`` output. When both variants are
+   given, they must be the same.
+
+
 .. _mdp-fmm:
 
 Fast Multipole Method (FMM) Interface

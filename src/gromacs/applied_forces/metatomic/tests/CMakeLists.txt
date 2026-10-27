@@ -33,8 +33,12 @@
 
 gmx_add_unit_test(MTAAppliedForcesUnitTest mta_applied_forces-test
     CPP_SOURCE_FILES
-        # metatomic_forceprovider.cpp
+        metatomic_forceprovider.cpp
         metatomic_options.cpp
 )
 
-target_link_libraries(mta_applied_forces-test PRIVATE applied_forces math topology)
+target_link_libraries(mta_applied_forces-test PRIVATE applied_forces math pbcutil topology)
+if (GMX_METATOMIC_ACTIVE)
+    # the force provider tests register a model plugin of their own
+    target_link_libraries(mta_applied_forces-test PRIVATE metatomic::shared)
+endif()
