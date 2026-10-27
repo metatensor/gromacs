@@ -118,3 +118,53 @@ pin `a245aed8` no longer exists upstream (`9e1de9a4` has the same
 
 This is the reason the build prints the versions it found: the dependency is a
 branch, and it moved under this module after the module was written.
+
+CI (`.github/workflows/metatomic-capi.yml`) builds metatomic-core at the same
+commit, configures with `GMX_METATOMIC=ON` and runs the unit tests: bump the
+commit there and here together.
+
+## Validating the C API migration
+
+The `metatomic-capi.yml` workflow builds the pinned core with metatensor-core
+0.2.6 on Linux/GCC/OpenMP and macOS/Clang with thread-MPI, and on Linux with
+Open MPI. It replaces the libtorch-only pixi workflow. The ASV benchmark
+workflow (`ci_benchmark.yml`) still builds the libtorch interface from
+pixi_envs, so it is switched off until it is ported to metatomic-core. The
+following commands use an already configured GROMACS build:
+
+```bash
+cmake --build build --target gmx mta_applied_forces-test mdrunutility-test metatomic-test-plugin
+build/bin/mta_applied_forces-test
+build/bin/mdrunutility-test
+python3 admin/ci-scripts/metatomic-cmake-smoke.py
+python3 admin/ci-scripts/metatomic-capi-smoke.py build/bin/gmx build/lib/metatomic-test-plugin.so
+# with a library-MPI build (gmx_mpi), through the MPI launcher:
+GMX_MPIEXEC="mpirun -np" python3 admin/ci-scripts/metatomic-capi-smoke.py build/bin/gmx_mpi build/lib/metatomic-test-plugin.so
+```
+
+The unit tests compare energy, forces and virial with analytic Lennard-Jones
+values, including nm/kJ/mol, Angstrom/eV, triclinic cell shifts, nonperiodic
+and XY systems, and rejection of screw periodicity and unavailable inputs, and
+check the minimum-image cell shifts along periodic directions only. The CMake
+fixture checks AUTO/ON/OFF, the TORCH alias, incompatible APIs,
+reconfiguration after a dependency change, and preservation of caller settings.
+
+The end-to-end test loads the same analytic model from a shared test plugin,
+runs `grompp` and `mdrun`, and checks the `Metatomic-Potential` energy and the
+forces: on one rank in nm and in Angstrom, and with domain decomposition over
+two ranks, each atom on its own rank, in a 3D periodic box and in an xy slab
+with walls whose pair is farther apart in z than half the box height (it fails
+if the cross-rank pair is shifted along z). The classical Lennard-Jones
+parameters are zero, so only the model can produce the expected values. This
+tests model-option serialization, dynamic loading, setup notifications, the
+actual GROMACS pair list, and the exchange of atoms, pairs and forces between
+ranks. The shared plugin is a test fixture, not an installed runtime
+dependency; with selected atoms it returns their share of each pair, as
+metatomic-core's own Lennard-Jones plugin does. That plugin does not advertise
+strain gradients, which this conservative force provider requests.
+
+These checks cover the CPU migration with a pair model. They do not establish
+correctness for arbitrary production models (message passing beyond the pair
+cutoff is only exercised by a pair model here) or accelerator plugins. ONIOM/link
+atoms, site batching, electrostatic corrections and new distributed algorithms
+belong in follow-up changes after this interface has been reviewed.
