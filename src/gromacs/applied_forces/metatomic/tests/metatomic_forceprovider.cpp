@@ -341,7 +341,7 @@ public:
     void setModelUnits(const std::string& lengthUnit, const std::string& energyUnit)
     {
         options_.params_.modelOptions =
-                R"({"length_unit": ")" + lengthUnit + R"(", "energy_unit": ")" + energyUnit + R"("})";
+                "length_unit=" + lengthUnit + " energy_unit=" + energyUnit;
     }
 
     /*! \brief Evaluate the pair (0, 1) with metatensor cell shift \p cellShift
@@ -474,7 +474,7 @@ TEST_F(MetatomicForceProviderTest, RejectsScrewPeriodicity)
 
 TEST_F(MetatomicForceProviderTest, RejectsInputsGromacsCannotProvide)
 {
-    options_.params_.modelOptions = R"({"length_unit": "nm", "energy_unit": "kJ/mol", "request_charges": ""})";
+    options_.params_.modelOptions = R"(length_unit=nm energy_unit=kJ/mol request_charges="")";
     EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), APIError);
 }
 

@@ -3866,8 +3866,17 @@ the topology, as for :mdp:`nnpot-input-group`.
 
 .. mdp:: metatomic-model-options
 
-   JSON object with string keys and values, passed to the plugin that loads
-   the model, for example ``{"cutoff": "5.0"}``. Empty means no options.
+   Whitespace-separated ``key=value`` options passed to the model-loading
+   plugin, for example ``sigma=3 epsilon=1.2``. Values are strings, including
+   numeric values. Empty means no options. Keys may contain letters, digits,
+   underscores, hyphens and dots; duplicate keys are rejected.
+
+   Single or double quotes enclose values containing spaces, for example
+   ``label="argon model"``. Use ``key=""`` for an empty value. Inside quotes,
+   a backslash escapes the matching quote or another backslash. Whitespace
+   around ``=`` is allowed. Normal MDP semicolon comments still apply, including
+   inside quoted values. Invalid syntax is rejected during preprocessing.
+   Device selection, when supported, is a plugin option such as ``device=cpu``.
 
 .. mdp:: metatomic-check-consistency
 

@@ -41,6 +41,7 @@
  */
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -66,6 +67,13 @@ class LocalAtomSet;
 class MpiComm;
 
 
+/*! \brief Parse whitespace-separated key=value model-loading options.
+ * Values may be single- or double-quoted. Inside quotes, backslash escapes
+ * the matching quote or another backslash. Duplicate keys are rejected.
+ * \throws InconsistentInputError for malformed options.
+ */
+std::map<std::string, std::string> parseMetatomicModelOptions(const std::string& text);
+
 //!\brief \internal Data structure to store Metatomic input parameters
 struct MetatomicParameters
 {
@@ -76,7 +84,7 @@ struct MetatomicParameters
     std::string modelPath_;
     //! path of a metatomic plugin library registered before loading the model
     std::string pluginPath;
-    //! JSON object of string options passed to the plugin that loads the model
+    //! Whitespace-separated key=value options passed to the model-loading plugin
     std::string modelOptions;
     //! should metatomic run additional checks on the models inputs & outputs?
     bool checkConsistency = false;

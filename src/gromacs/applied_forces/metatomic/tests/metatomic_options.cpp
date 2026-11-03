@@ -219,15 +219,38 @@ TEST_F(MetatomicOptionsTest, GromppChecksUncertaintyThresholdAndModelOptions)
     }
     metatomicOptions.params_.uncertaintyThreshold = "auto";
 
-    metatomicOptions.params_.modelOptions = R"({"cutoff": "5.0"})";
+    metatomicOptions.params_.modelOptions = "cutoff=5.0";
     EXPECT_NO_THROW(write());
-#if GMX_METATOMIC_ACTIVE
-    for (const char* options : { R"({"cutoff": 5.0})", R"(["cutoff"])", R"({"cutoff": "5.0")" })
+    for (const char* options : { "cutoff", "=5", "cutoff=", "cutoff=5 cutoff=6", "cutoff=\"5" })
     {
         metatomicOptions.params_.modelOptions = options;
         EXPECT_THROW_GMX(write(), InconsistentInputError) << options;
     }
-#endif
+}
+
+TEST(MetatomicModelOptionsTest, ParsesStringsAndQuotedValues)
+{
+    const auto options = parseMetatomicModelOptions(
+            R"(sigma=3 epsilon = 1.2 device=cpu label="argon model" empty='' path='a=b' quote="a\"b" slash="a\\b")");
+    EXPECT_EQ(options.at("sigma"), "3");
+    EXPECT_EQ(options.at("epsilon"), "1.2");
+    EXPECT_EQ(options.at("device"), "cpu");
+    EXPECT_EQ(options.at("label"), "argon model");
+    EXPECT_EQ(options.at("empty"), "");
+    EXPECT_EQ(options.at("path"), "a=b");
+    EXPECT_EQ(options.at("quote"), "a\"b");
+    EXPECT_EQ(options.at("slash"), "a\\b");
+    EXPECT_TRUE(parseMetatomicModelOptions(" \t").empty());
+}
+
+TEST(MetatomicModelOptionsTest, RejectsMalformedOptions)
+{
+    for (const char* text : { "key", "=value", "key=", "key=one key=two", "key='open",
+                              "key=\"open", "key='value'tail", "key=un'quoted", "key='a\\q'",
+                              "bad/key=value", R"({"key":"value"})" })
+    {
+        EXPECT_THROW_GMX(parseMetatomicModelOptions(text), InconsistentInputError) << text;
+    }
 }
 
 TEST_F(MetatomicOptionsTest, InternalsToKvtAndBack)
@@ -246,6 +269,9 @@ TEST_F(MetatomicOptionsTest, InternalsToKvtAndBack)
     WarningHandler warninp(true, 0);
     metatomicOptions.setWarningHandler(&warninp);
 
+    metatomicOptions.params_.modelOptions = R"(sigma=3 label="argon model" empty='')";
+    const auto expectedOptions = parseMetatomicModelOptions(metatomicOptions.params_.modelOptions);
+
     // Copy internal parameters
     const MetatomicParameters& params           = metatomicOptions.parameters();
     auto                       mtaIndicesBefore = params.mtaIndices_;
@@ -256,7 +282,13 @@ TEST_F(MetatomicOptionsTest, InternalsToKvtAndBack)
     EXPECT_NO_THROW(metatomicOptions.writeParamsToKvt(builder.rootObject()));
     const auto inputTree = builder.build();
 
+    // The parsed values, including empty strings, are carried by the tpr KVT.
+    const auto& stored = inputTree["metatomic-model-loading-options"].asObject();
+    EXPECT_EQ(stored["label"].cast<std::string>(), "argon model");
+    EXPECT_EQ(stored["empty"].cast<std::string>(), "");
+    metatomicOptions.params_.modelOptions.clear();
     EXPECT_NO_THROW(metatomicOptions.readParamsFromKvt(inputTree));
+    EXPECT_EQ(parseMetatomicModelOptions(metatomicOptions.params_.modelOptions), expectedOptions);
 
     // Check Internal parameters taken back from KVT
     const MetatomicParameters& params2 = metatomicOptions.parameters();

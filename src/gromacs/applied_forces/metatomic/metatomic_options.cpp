@@ -46,7 +46,10 @@
 #include "config.h"
 
 #include <algorithm>
+#include <cctype>
+#include <iomanip>
 #include <set>
+#include <sstream>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/fileio/warninp.h"
@@ -64,9 +67,6 @@
 #include "gromacs/utility/strconvert.h"
 #include "gromacs/utility/stringutil.h"
 
-#if GMX_METATOMIC_ACTIVE
-#    include <nlohmann/json.hpp>
-#endif
 
 namespace gmx
 {
@@ -158,36 +158,96 @@ void checkUncertaintyThreshold(const std::string& value)
             value.c_str())));
 }
 
-//! metatomic-model-options is empty or a JSON object of strings, which metatomic plugins expect.
-void checkModelOptions(const std::string& value)
+[[noreturn]] void modelOptionsError(const char* reason)
 {
-#if GMX_METATOMIC_ACTIVE
-    if (value.empty())
-    {
-        return;
-    }
-    bool valid = false;
-    try
-    {
-        const auto json = nlohmann::json::parse(value);
-        valid           = json.is_object()
-                && std::all_of(json.begin(), json.end(), [](const auto& item) { return item.is_string(); });
-    }
-    catch (const nlohmann::json::exception&)
-    {
-    }
-    if (!valid)
-    {
-        GMX_THROW(InconsistentInputError(formatString(
-                "metatomic-model-options must be a JSON object with string values, such as "
-                "{\"cutoff\": \"5.0\"}, not '%s'.",
-                value.c_str())));
-    }
-#else
-    GMX_UNUSED_VALUE(value);
-#endif
+    GMX_THROW(InconsistentInputError(std::string("Invalid metatomic-model-options: ") + reason));
 }
 } // namespace
+
+std::map<std::string, std::string> parseMetatomicModelOptions(const std::string& text)
+{
+    std::map<std::string, std::string> options;
+    size_t position = 0;
+    const auto isSpace = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    const auto skipSpace = [&]()
+    {
+        while (position < text.size() && isSpace(text[position]))
+        {
+            ++position;
+        }
+    };
+    skipSpace();
+    while (position < text.size())
+    {
+        const size_t start = position;
+        while (position < text.size())
+        {
+            const unsigned char c = static_cast<unsigned char>(text[position]);
+            if (!std::isalnum(c) && c != '_' && c != '-' && c != '.')
+            {
+                break;
+            }
+            ++position;
+        }
+        const std::string key = text.substr(start, position - start);
+        skipSpace();
+        if (key.empty() || position == text.size() || text[position] != '=')
+        {
+            modelOptionsError("expected key=value with an alphanumeric, underscore, hyphen or dot key.");
+        }
+        ++position;
+        skipSpace();
+        if (position == text.size())
+        {
+            modelOptionsError("missing value; use an empty quoted string for an empty value.");
+        }
+        std::string value;
+        if (text[position] == '\'' || text[position] == '"')
+        {
+            const char quote = text[position++];
+            while (position < text.size() && text[position] != quote)
+            {
+                char c = text[position++];
+                if (c == '\\')
+                {
+                    if (position == text.size()
+                        || (text[position] != quote && text[position] != '\\'))
+                    {
+                        modelOptionsError("inside quotes, escape only the matching quote or a backslash.");
+                    }
+                    c = text[position++];
+                }
+                value += c;
+            }
+            if (position == text.size())
+            {
+                modelOptionsError("unterminated quoted value.");
+            }
+            ++position;
+            if (position < text.size() && !isSpace(text[position]))
+            {
+                modelOptionsError("expected whitespace after a quoted value.");
+            }
+        }
+        else
+        {
+            while (position < text.size() && !isSpace(text[position]))
+            {
+                if (text[position] == '\'' || text[position] == '"')
+                {
+                    modelOptionsError("quotes must enclose the entire value.");
+                }
+                value += text[position++];
+            }
+        }
+        if (!options.emplace(key, value).second)
+        {
+            modelOptionsError("duplicate option key.");
+        }
+        skipSpace();
+    }
+    return options;
+}
 
 void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
 {
@@ -317,7 +377,12 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
     }
     // grompp rejects what mdrun would only find when it loads the model
     checkUncertaintyThreshold(params_.uncertaintyThreshold);
-    checkModelOptions(params_.modelOptions);
+    const auto modelOptions = parseMetatomicModelOptions(params_.modelOptions);
+    auto modelOptionsObject = treeBuilder.addObject("metatomic-model-loading-options");
+    for (const auto& [key, value] : modelOptions)
+    {
+        modelOptionsObject.addValue(key, value);
+    }
 
     auto GroupIndexAdder =
             treeBuilder.addUniformArray<std::int64_t>(METATOMIC_MODULE_NAME + "-" + INPUT_GROUP_TAG);
@@ -348,6 +413,17 @@ void MetatomicOptions::readParamsFromKvt(const KeyValueTreeObject& tree)
                    std::end(kvtIndexArray),
                    std::begin(params_.mtaIndices_),
                    [](const KeyValueTreeValue& val) { return val.cast<std::int64_t>(); });
+
+    if (!tree.keyExists("metatomic-model-loading-options"))
+    {
+        GMX_THROW(InconsistentInputError("Cannot find metatomic model-loading options in the tpr file."));
+    }
+    std::ostringstream options;
+    for (const auto& property : tree["metatomic-model-loading-options"].asObject().properties())
+    {
+        options << property.key() << '=' << std::quoted(property.value().cast<std::string>()) << ' ';
+    }
+    params_.modelOptions = options.str();
 }
 
 

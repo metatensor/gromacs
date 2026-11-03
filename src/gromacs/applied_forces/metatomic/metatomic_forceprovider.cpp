@@ -393,7 +393,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         std::optional<std::string> modelOptions;
         if (!options_.params_.modelOptions.empty())
         {
-            modelOptions = options_.params_.modelOptions;
+            modelOptions = nlohmann::json(parseMetatomicModelOptions(options_.params_.modelOptions)).dump();
         }
         data_->model = std::make_unique<metatomic::ExternalModel>(
                 metatomic::load_model(options_.params_.modelPath_, modelOptions));
