@@ -62,7 +62,6 @@
 #include "gromacs/analysisdata/paralleloptions.h"
 #include "gromacs/fileio/oenv.h"
 #include "gromacs/fileio/trxio.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/options/basicoptions.h"
 #include "gromacs/options/filenameoption.h"
 #include "gromacs/options/ioptionscontainer.h"
@@ -79,6 +78,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/exceptions.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/stringutil.h"
 #include "gromacs/utility/vectypes.h"
@@ -666,7 +666,7 @@ void Msd::analyzeFrame(int gmx_unused                frameNumber,
                        t_pbc*                        pbc,
                        TrajectoryAnalysisModuleData* pdata)
 {
-    const real time = frame.time;
+    const double time = frame.time;
     // Need to populate dt on frame 2;
     if (!dt_.has_value() && !times_.empty())
     {

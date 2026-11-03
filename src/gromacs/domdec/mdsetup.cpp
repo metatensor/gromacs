@@ -45,7 +45,6 @@
 #include "gromacs/ewald/pme_pp.h"
 #include "gromacs/listed_forces/listed_forces.h"
 #include "gromacs/mdlib/constr.h"
-#include "gromacs/mdlib/mdatoms.h"
 #include "gromacs/mdlib/vsite.h"
 #include "gromacs/mdlib/wholemoleculetransform.h"
 #include "gromacs/mdtypes/commrec.h"
@@ -54,7 +53,7 @@
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/interaction_const.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
+#include "gromacs/mdtypes/mdatoms.h"
 #include "gromacs/mdtypes/state_propagator_data_gpu.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/topology/idef.h"
@@ -78,26 +77,28 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
                                gmx_localtop_t*           top,
                                t_forcerec*               fr,
                                ForceBuffers*             force,
-                               MDAtoms*                  mdAtoms,
+                               const real                massLambda,
+                               MDAtoms*                  mdAtomsModifiable,
                                Constraints*              constr,
                                VirtualSitesHandler*      vsite,
                                shellfc_t*                shellfc,
                                StatePropagatorDataGpu*   stateGpu,
                                gmx_wallcycle*            wcycle)
 {
-    int numAtomIndex;
-    int numHomeAtoms;
-    int numTotalAtoms;
+    int                 numHomeAtoms;
+    int                 numTotalAtoms;
+    ArrayRef<const int> globalAtomIndices;
 
     if (dd)
     {
-        numAtomIndex  = dd_natoms_mdatoms(*dd);
-        numHomeAtoms  = dd_numHomeAtoms(*dd);
-        numTotalAtoms = dd_natoms_mdatoms(*dd);
+        numHomeAtoms      = dd_numHomeAtoms(*dd);
+        numTotalAtoms     = dd_natoms_mdatoms(*dd);
+        globalAtomIndices = dd->globalAtomIndices;
+        GMX_RELEASE_ASSERT(numTotalAtoms == globalAtomIndices.ssize(),
+                           "Total atoms should match size of global atom indices\n");
     }
     else
     {
-        numAtomIndex  = -1;
         numHomeAtoms  = top_global.natoms;
         numTotalAtoms = top_global.natoms;
     }
@@ -107,14 +108,11 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
         force->resize(numTotalAtoms);
     }
 
-    ArrayRef<const int> globalAtomIndices;
-    if (dd)
-    {
-        globalAtomIndices = dd->globalAtomIndices;
-    }
-    atoms2md(top_global, inputrec, numAtomIndex, globalAtomIndices, numHomeAtoms, mdAtoms);
+    mdAtomsModifiable->updateAfterPartition(numTotalAtoms, globalAtomIndices, numHomeAtoms, massLambda);
 
-    t_mdatoms* mdatoms = mdAtoms->mdatoms();
+    // No changes to mdAtoms after here
+    const MDAtoms& mdAtoms = *mdAtomsModifiable;
+
     if (dd == nullptr)
     {
         gmx_mtop_generate_local_top(top_global, top, inputrec.efep != FreeEnergyPerturbationType::No);
@@ -127,7 +125,7 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
 
     if (vsite)
     {
-        vsite->setVirtualSites(top->idef.il, mdatoms->nr, mdatoms->homenr, mdatoms->ptype);
+        vsite->setVirtualSites(top->idef.il, numTotalAtoms, mdAtoms.numHomeAtoms, mdAtoms.ptype);
     }
 
     /* Note that with DD only flexible constraints, not shells, are supported
@@ -138,13 +136,13 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
      */
     if (dd == nullptr && shellfc)
     {
-        make_local_shells(dd, *mdatoms, shellfc);
+        make_local_shells(dd, mdAtoms, shellfc);
     }
 
     // TODO: warning/error if posresCom and posresComB do not have the same size
     for (auto& listedForces : fr->listedForces)
     {
-        listedForces.setup(top->idef, fr->natoms_force, fr->listedForcesGpu != nullptr, mdatoms->cVCM);
+        listedForces.setup(top->idef, fr->natoms_force, fr->listedForcesGpu != nullptr, mdAtoms.cVCM);
     }
 
     if (usingPme(fr->ic->coulomb.type) || usingLJPme(fr->ic->vdw.type))
@@ -154,7 +152,7 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
             // This handles the PP+PME rank case where fr->pmedata is valid.
             // For PME-only ranks, gmx_pmeonly() has its own call to gmx_pme_reinit_atoms().
             const int numPmeAtoms = numHomeAtoms - fr->n_tpi;
-            gmx_pme_reinit_atoms(fr->pmedata.get(), numPmeAtoms, mdatoms->chargeA, mdatoms->chargeB);
+            gmx_pme_reinit_atoms(fr->pmedata.get(), numPmeAtoms, mdAtoms.chargeA, mdAtoms.chargeB);
         }
         else
         {
@@ -163,14 +161,14 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
             // Send the charges and/or c6/sigmas to the PME-only rank
             // and prepare for PP-rank operations.
             fr->pmePpComm->sendParameters(dd_numHomeAtoms(*dd),
-                                          mdatoms->nChargePerturbed != 0,
-                                          mdatoms->nTypePerturbed != 0,
-                                          mdatoms->chargeA,
-                                          mdatoms->chargeB,
-                                          mdatoms->sqrt_c6A,
-                                          mdatoms->sqrt_c6B,
-                                          mdatoms->sigmaA,
-                                          mdatoms->sigmaB,
+                                          mdAtoms.nChargePerturbed != 0,
+                                          mdAtoms.nTypePerturbed != 0,
+                                          mdAtoms.chargeA,
+                                          mdAtoms.chargeB,
+                                          mdAtoms.sqrt_c6A,
+                                          mdAtoms.sqrt_c6B,
+                                          mdAtoms.sigmaA,
+                                          mdAtoms.sigmaB,
                                           dd_pme_maxshift_x(*dd),
                                           dd_pme_maxshift_y(*dd));
         }
@@ -182,8 +180,9 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
     if (needStateGpu(simulationWork))
     {
         // Does global communication and symmetric reallocation with NVSHMEM
-        stateGpu->reinit(mdatoms->homenr,
-                         simulationWork.havePpDomainDecomposition ? dd_numAtomsZones(*dd) : mdatoms->homenr);
+        stateGpu->reinit(mdAtoms.numHomeAtoms,
+                         simulationWork.havePpDomainDecomposition ? dd_numAtomsZones(*dd)
+                                                                  : mdAtoms.numHomeAtoms);
     }
 
     // Now that the number of halo-exchange pulses is determined and
@@ -218,14 +217,8 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
 
     if (constr)
     {
-        constr->setConstraints(top,
-                               mdatoms->nr,
-                               mdatoms->homenr,
-                               mdatoms->massT,
-                               mdatoms->invmass,
-                               mdatoms->nMassPerturbed != 0,
-                               mdatoms->lambda,
-                               mdatoms->cFREEZE);
+        constr->setConstraints(
+                top, numTotalAtoms, mdAtoms.numHomeAtoms, mdAtoms.massT, mdAtoms.invmass, massLambda, mdAtoms.cFREEZE);
     }
 }
 

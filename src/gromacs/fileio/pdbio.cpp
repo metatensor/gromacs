@@ -47,7 +47,6 @@
 #include <string>
 
 #include "gromacs/fileio/gmxfio.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdtypes/md_enums.h"
@@ -64,6 +63,7 @@
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -492,10 +492,24 @@ void write_pdbfile_indexed(FILE*          out,
 
     if (nullptr != gc)
     {
-        /* Write conect records */
-        for (int i = 0; (i < gc->nconect); i++)
+        // Write CONECT records, checking whether both atoms exist in
+        // the index.
+        for (int c = 0; (c < gc->nconect); c++)
         {
-            fprintf(out, "CONECT%5d%5d\n", gc->conect[i].ai + 1, gc->conect[i].aj + 1);
+            int  iAtom      = gc->conect[c].ai;
+            int  jAtom      = gc->conect[c].aj;
+            bool foundIAtom = false, foundJAtom = false;
+            for (int i = 0; i < nindex; ++i)
+            {
+                foundIAtom = foundIAtom || (index[i] == iAtom);
+                foundJAtom = foundJAtom || (index[i] == jAtom);
+            }
+            if (foundIAtom && foundJAtom)
+            {
+                // Both i and j atom are in the index, so print
+                // the CONECT record.
+                fprintf(out, "CONECT%5d%5d\n", iAtom + 1, jAtom + 1);
+            }
         }
     }
 }
@@ -862,6 +876,7 @@ void gmx_conect_done(gmx_conect conect)
     gmx_conect_t* gc = conect;
 
     sfree(gc->conect);
+    sfree(gc);
 }
 
 gmx_bool gmx_conect_exist(gmx_conect conect, int ai, int aj)
@@ -1095,7 +1110,8 @@ void gmx_pdb_read_conf(const std::filesystem::path& infile,
     gmx_fio_fclose(in);
 }
 
-gmx_conect gmx_conect_generate(const t_topology* top)
+// DEPRECATED
+gmx_conect gmx_conect_generate(const t_idef& idef)
 {
     int        i;
     gmx_conect gc;
@@ -1107,9 +1123,41 @@ gmx_conect gmx_conect_generate(const t_topology* top)
     {
         if (IS_CHEMBOND(f))
         {
-            for (i = 0; (i < top->idef.il[f].nr); i += interaction_function[f].nratoms + 1)
+            for (i = 0; (i < idef.il[f].nr); i += interaction_function[f].nratoms + 1)
             {
-                gmx_conect_add(gc, top->idef.il[f].iatoms[i + 1], top->idef.il[f].iatoms[i + 2]);
+                gmx_conect_add(gc, idef.il[f].iatoms[i + 1], idef.il[f].iatoms[i + 2]);
+            }
+        }
+    }
+    return gc;
+}
+
+gmx_conect gmx_conect_generate(const gmx_mtop_t& mtop)
+{
+    gmx_conect gc = gmx_conect_init();
+
+    int indexOfFirstAtomInMolecule = 0;
+    // Loop over the molecule blocks
+    for (const gmx_molblock_t& molblock : mtop.molblock)
+    {
+        const gmx_moltype_t& moltype = mtop.moltype[molblock.type];
+        // Loop over each molecule in the block
+        for (int mol = 0; mol < molblock.nmol; mol++, indexOfFirstAtomInMolecule += moltype.atoms.nr)
+        {
+            // Find each "chemical bond"
+            for (const auto functionType : gmx::EnumerationWrapper<InteractionFunction>{})
+            {
+                if (IS_CHEMBOND(functionType))
+                {
+                    // Record a connection between its two atoms
+                    const InteractionList& ilist = moltype.ilist[functionType];
+                    for (int i = 1; i < ilist.size(); i += NRAL(functionType) + 1)
+                    {
+                        gmx_conect_add(gc,
+                                       indexOfFirstAtomInMolecule + ilist.iatoms[i],
+                                       indexOfFirstAtomInMolecule + ilist.iatoms[i + 1]);
+                    }
+                }
             }
         }
     }

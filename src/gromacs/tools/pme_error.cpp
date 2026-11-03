@@ -57,7 +57,6 @@
 #include "gromacs/fileio/filetypes.h"
 #include "gromacs/fileio/tpxio.h"
 #include "gromacs/gmxlib/network.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/mdlib/broadcaststructs.h"
 #include "gromacs/mdtypes/inputrec.h"
@@ -73,6 +72,7 @@
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/mpicomm.h"
 #include "gromacs/utility/pleasecite.h"
@@ -1129,9 +1129,9 @@ int gmx_pme_error(int argc, char* argv[])
     int            seed     = 0;
 
 
-    static t_filenm fnm[] = { { efTPR, "-s", nullptr, ffREAD },
-                              { efOUT, "-o", "error", ffWRITE },
-                              { efTPR, "-so", "tuned", ffOPTWR } };
+    t_filenm fnm[] = { { efTPR, "-s", nullptr, ffREAD },
+                       { efOUT, "-o", "error", ffWRITE },
+                       { efTPR, "-so", "tuned", ffOPTWR } };
 
     gmx_output_env_t* oenv = nullptr;
 

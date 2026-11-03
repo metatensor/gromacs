@@ -62,7 +62,6 @@
 #include "gromacs/gpu_utils/capabilities.h"
 #include "gromacs/hardware/device_management.h"
 #include "gromacs/math/paddedvector.h"
-#include "gromacs/mdtypes/mdatom.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/stringutil.h"
 #include "gromacs/utility/vec.h"
@@ -80,6 +79,7 @@
 #if GMX_GPU && !GMX_GPU_OPENCL
 #    include "gromacs/gpu_utils/devicebuffer.h"
 #    include "gromacs/gpu_utils/gputraits.h"
+#    include "gromacs/gpu_utils/hostallocator.h"
 #    include "gromacs/mdlib/leapfrog_gpu.h"
 #    include "gromacs/mdlib/stat.h"
 #endif
@@ -113,11 +113,10 @@ void integrateLeapFrogCpu(LeapFrogTestData* testData, int numSteps)
     {
         testData->update_->update_coords(testData->inputRecord_,
                                          step,
-                                         testData->mdAtoms_.homenr,
-                                         testData->mdAtoms_.havePartiallyFrozenAtoms,
-                                         testData->mdAtoms_.ptype,
-                                         testData->mdAtoms_.invmass,
-                                         testData->mdAtoms_.invMassPerDim,
+                                         testData->numAtoms_,
+                                         {},
+                                         testData->inverseMasses_,
+                                         testData->inverseMassesPerDim_,
                                          &testData->state_,
                                          testData->f_,
                                          &testData->forceCalculationData_,
@@ -126,12 +125,8 @@ void integrateLeapFrogCpu(LeapFrogTestData* testData, int numSteps)
                                          etrtNONE,
                                          nullptr,
                                          false);
-        testData->update_->finish_update(testData->inputRecord_,
-                                         testData->mdAtoms_.havePartiallyFrozenAtoms,
-                                         testData->mdAtoms_.homenr,
-                                         &testData->state_,
-                                         nullptr,
-                                         false);
+        testData->update_->finish_update(
+                testData->inputRecord_, testData->numAtoms_, &testData->state_, nullptr, false);
     }
     const auto xp = makeArrayRef(*testData->update_->xp()).subArray(0, testData->numAtoms_);
     for (int i = 0; i < testData->numAtoms_; i++)
@@ -174,7 +169,39 @@ void integrateLeapFrogGpu(const DeviceContext& deviceContext,
     auto integrator =
             std::make_unique<LeapFrogGpu>(deviceContext, deviceStream, testData->numTCoupleGroups_);
 
-    integrator->set(numAtoms, testData->inverseMasses_, testData->mdAtoms_.cTC);
+    testData->inverseMasses_ = PaddedHostVector<real>(
+            testData->inverseMasses_,
+            HostAllocationPolicy{ deviceContext, PinningPolicy::PinnedIfSupported });
+    testData->cTC_ = HostVector<unsigned short>(
+            testData->cTC_, HostAllocationPolicy{ deviceContext, PinningPolicy::PinnedIfSupported });
+
+    {
+        SCOPED_TRACE("Preliminary call to set() to cover resizing edge cases");
+        // Use one atom more, so the call under test shrinks an object that holds data
+        const int              largerNumAtoms = testData->numAtoms_ + 1;
+        PaddedHostVector<real> inverseMasses(
+                HostAllocationPolicy{ deviceContext, PinningPolicy::PinnedIfSupported });
+        HostVector<unsigned short> cTC(
+                HostAllocationPolicy{ deviceContext, PinningPolicy::PinnedIfSupported });
+        inverseMasses.resizeWithPadding(largerNumAtoms);
+        for (int i = 0; i < largerNumAtoms; i++)
+        {
+            inverseMasses[i] = 1.0 / (3.0 + i);
+        }
+        // Like mdatoms, only fill cTC when there is more than one group
+        if (testData->numTCoupleGroups_ > 1)
+        {
+            cTC.resize(largerNumAtoms);
+            for (int i = 0; i < largerNumAtoms; i++)
+            {
+                cTC[i] = i % testData->numTCoupleGroups_;
+            }
+        }
+        integrator->set(largerNumAtoms, inverseMasses, cTC);
+        deviceStream.synchronize();
+    }
+
+    integrator->set(numAtoms, testData->inverseMasses_, testData->cTC_);
 
     bool doTempCouple = testData->numTCoupleGroups_ > 0;
     for (int step = 0; step < numSteps; step++)

@@ -146,13 +146,16 @@ public:
      * \param[in,out]  d_v            Device buffer with velocities.
      * \param[in]      d_f            Device buffer with forces.
      * \param[in] idef                System topology
-     * \param[in] md                  Atoms data.
+     * \param[in] mdAtoms             Atoms data.
      */
     void set(DeviceBuffer<Float3>          d_x,
              DeviceBuffer<Float3>          d_v,
              DeviceBuffer<Float3>          d_f,
              const InteractionDefinitions& idef,
-             const t_mdatoms&              md);
+             const MDAtoms&                mdAtoms);
+
+    //! Record that the host has waited for all work in the update stream
+    void markStreamSynchronized();
 
     /*! \brief
      * Update PBC data.
@@ -219,6 +222,10 @@ private:
 
     //! The event to indicate when the update of coordinates is complete
     GpuEventSynchronizer xUpdatedOnDeviceEvent_;
+
+    //! Whether the stream was synchronized since the last set() call, so set() may be called
+    bool streamSynchronizedSinceSet_ = true;
+
     //! The wallclock counter
     gmx_wallcycle* wcycle_ = nullptr;
 };

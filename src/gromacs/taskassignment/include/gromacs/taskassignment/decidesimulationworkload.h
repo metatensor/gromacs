@@ -55,7 +55,6 @@ namespace gmx
 {
 struct edsam;
 }
-struct t_mdatoms;
 
 namespace gmx
 {
@@ -80,6 +79,7 @@ class MDLogger;
  * \param[in] haveFillerParticlesInLocalState  Whether filler particles are part of the local state.
  * \param[in] havePpDomainDecomposition        Whether PP domain decomposition is used in this run.
  * \param[in] haveSeparatePmeRank              Whether separate PME rank(s) are used in this run.
+ * \param[in] haveVirtualSites                 Whether the system has virtual sites.
  * \param[in] useGpuForNonbonded               Whether we have short-range nonbonded interaction
  *                                             calculations on GPU(s).
  * \param[in] useGpuForNonbondedFE             Whether we have nonbonded free-energy interaction
@@ -105,6 +105,7 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
                                             bool       haveFillerParticlesInLocalState,
                                             bool       havePpDomainDecomposition,
                                             bool       haveSeparatePmeRank,
+                                            bool       haveVirtualSites,
                                             bool       useGpuForNonbonded,
                                             bool       useGpuForNonbondedFE,
                                             PmeRunMode pmeRunMode,
@@ -121,19 +122,19 @@ SimulationWorkload createSimulationWorkload(const gmx::MDLogger& mdlog,
  * this function anytime a change in listed forces assignment after repartitioning
  * can be expected.
  *
- * \param[in] inputrec           The input record
- * \param[in] fr                 The force record
- * \param[in] pull_work          Pull data
- * \param[in] ed                 Essential dynamics data
- * \param[in] mdatoms            Atom parameter data
- * \param[in] simulationWork     Simulation workload flags
+ * \param[in] inputrec               The input record
+ * \param[in] fr                     The force record
+ * \param[in] pull_work              Pull data
+ * \param[in] ed                     Essential dynamics data
+ * \param[in] hasPerturbedParticles  Whether any particles undergo free-energy perturbation
+ * \param[in] simulationWork         Simulation workload flags
  *
  */
 DomainLifetimeWorkload setupDomainLifetimeWorkload(const t_inputrec&         inputrec,
                                                    const t_forcerec&         fr,
                                                    const pull_t*             pull_work,
                                                    const edsam*              ed,
-                                                   const t_mdatoms&          mdatoms,
+                                                   bool                      hasPerturbedParticles,
                                                    const SimulationWorkload& simulationWork);
 
 /*! \brief Set up force flag struct from the force bitmask.

@@ -89,6 +89,28 @@ if(NOT GMX_NNPOT STREQUAL "OFF")
                                 "compiled with the cxx11 ABI, which is required for building GROMACS.")
         endif()
 
+        # A LibTorch built with XPU support (Intel GPUs, PyTorch >= 2.5) exports the torch_xpu target
+        set(GMX_TORCH_XPU OFF)
+        if(TARGET torch_xpu)
+            set(GMX_TORCH_XPU ON)
+        endif()
+        if(GMX_GPU_SYCL AND GMX_SYCL_DPCPP AND GMX_DPCPP_HAVE_INTEL_TARGET AND NOT GMX_TORCH_XPU AND NOT FIND_TORCH_QUIETLY)
+            message(WARNING "GROMACS is built for Intel GPUs with SYCL, but the LibTorch found has no XPU "
+                            "support, so neural network potential inference will run on the CPU. Use a "
+                            "LibTorch with XPU support (PyTorch >= 2.5) to run the model on the GPU.")
+        endif()
+
+        # The LibTorch headers of PyTorch 2.14 and later require C++20. The targets that include
+        # them are built with GMX_TORCH_CXX_STANDARD, the rest of GROMACS keeps the configured one.
+        set(GMX_TORCH_CXX_STANDARD ${CMAKE_CXX_STANDARD})
+        if(Torch_VERSION VERSION_GREATER_EQUAL 2.14 AND CMAKE_CXX_STANDARD LESS 20)
+            set(GMX_TORCH_CXX_STANDARD 20)
+            if(NOT FIND_TORCH_QUIETLY)
+                message(STATUS "LibTorch ${Torch_VERSION} requires C++20: the sources that include "
+                               "LibTorch are built with C++20, the rest of GROMACS with C++${CMAKE_CXX_STANDARD}.")
+            endif()
+        endif()
+
         set(GMX_TORCH ON)
 
         # Ensure the torch library directory is in RPATH so that libtorch.so,

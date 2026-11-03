@@ -54,7 +54,6 @@
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/math/boxmatrix.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/topology/index.h"
@@ -63,6 +62,7 @@
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -107,31 +107,31 @@ int gmx_vanhove(int argc, char* argv[])
         "Note that with the [TT]-dt[tt] option the memory usage and calculation",
         "time can be reduced."
     };
-    static int  fmmax = 0, ftmax = 0, nlev = 81, nr = 1, fshift = 0;
-    static real sbin = 0, rmax = 2, rbin = 0.01, mmax = 0, rint = 0;
-    t_pargs     pa[] = {
+    int     fmmax = 0, ftmax = 0, nlev = 81, nr = 1, fshift = 0;
+    real    sbin = 0, rmax = 2, rbin = 0.01, mmax = 0, rint = 0;
+    t_pargs pa[] = {
         { "-sqrt",
-              FALSE,
-              etREAL,
-              { &sbin },
-              "Use [SQRT]t[sqrt] on the matrix axis which binspacing # in [SQRT]ps[sqrt]" },
+          FALSE,
+          etREAL,
+          { &sbin },
+          "Use [SQRT]t[sqrt] on the matrix axis which binspacing # in [SQRT]ps[sqrt]" },
         { "-fm", FALSE, etINT, { &fmmax }, "Number of frames in the matrix, 0 is plot all" },
         { "-rmax", FALSE, etREAL, { &rmax }, "Maximum r in the matrix (nm)" },
         { "-rbin", FALSE, etREAL, { &rbin }, "Binwidth in the matrix and for [TT]-or[tt] (nm)" },
         { "-mmax",
-              FALSE,
-              etREAL,
-              { &mmax },
-              "Maximum density in the matrix, 0 is calculate (1/nm)" },
+          FALSE,
+          etREAL,
+          { &mmax },
+          "Maximum density in the matrix, 0 is calculate (1/nm)" },
         { "-nlevels", FALSE, etINT, { &nlev }, "Number of levels in the matrix" },
         { "-nr", FALSE, etINT, { &nr }, "Number of curves for the [TT]-or[tt] output" },
         { "-fr", FALSE, etINT, { &fshift }, "Frame spacing for the [TT]-or[tt] output" },
         { "-rt", FALSE, etREAL, { &rint }, "Integration limit for the [TT]-ot[tt] output (nm)" },
         { "-ft",
-              FALSE,
-              etINT,
-              { &ftmax },
-              "Number of frames in the [TT]-ot[tt] output, 0 is plot all" }
+          FALSE,
+          etINT,
+          { &ftmax },
+          "Number of frames in the [TT]-ot[tt] output, 0 is plot all" }
     };
 #define NPA asize(pa)
 
@@ -154,7 +154,9 @@ int gmx_vanhove(int argc, char* argv[])
     int*                     index;
     char*                    grpname;
     int                      nfr, f, ff, i, m, mat_nx = 0, nbin = 0, bin, mbin, fbin;
-    real *                   time, t, invbin = 0, rmax2 = 0, rint2 = 0, d2;
+    double*                  time;
+    double                   t;
+    real                     invbin = 0, rmax2 = 0, rint2 = 0, d2;
     real                     invsbin = 0, matmax, normfac, dt, *tickx, *ticky;
     std::vector<std::string> legend;
     real**                   mat = nullptr;

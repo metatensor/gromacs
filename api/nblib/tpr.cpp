@@ -53,14 +53,13 @@
 #include "gromacs/listed_forces/listed_forces.h"
 #include "gromacs/math/paddedvector.h"
 #include "gromacs/mdlib/forcerec.h"
-#include "gromacs/mdlib/mdatoms.h"
 #include "gromacs/mdrun/mdmodules.h"
 #include "gromacs/mdtypes/commrec.h"
 #include "gromacs/mdtypes/forcerec.h"
 #include "gromacs/mdtypes/iforceprovider.h"
 #include "gromacs/mdtypes/imdmodule.h"
 #include "gromacs/mdtypes/inputrec.h"
-#include "gromacs/mdtypes/mdatom.h"
+#include "gromacs/mdtypes/mdatoms.h"
 #include "gromacs/mdtypes/output_control.h"
 #include "gromacs/mdtypes/simulation_workload.h"
 #include "gromacs/mdtypes/state.h"
@@ -132,24 +131,21 @@ TprReader::TprReader(std::string filename)
     exclusionListRanges_   = std::vector<int>(localtop.excls.listRangesView().begin(),
                                             localtop.excls.listRangesView().end());
 
-    int                           ntopatoms = molecularTopology.natoms;
-    std::unique_ptr<gmx::MDAtoms> mdAtoms =
-            gmx::makeMDAtoms(nullptr, molecularTopology, inputRecord, false, nullptr);
-    atoms2md(molecularTopology, inputRecord, -1, {}, ntopatoms, mdAtoms.get());
+    int          ntopatoms = molecularTopology.natoms;
+    gmx::MDAtoms mdAtoms(molecularTopology, inputRecord, false, false, nullptr);
     const double initMassLambda =
             (inputRecord.efep == FreeEnergyPerturbationType::No
                      ? 0.0
                      : inputRecord.fepvals->initialLambda(FreeEnergyPerturbationCouplingType::Mass));
-    update_mdatoms(mdAtoms->mdatoms(), initMassLambda);
-    auto numParticles = mdAtoms->mdatoms()->nr;
-    charges_.resize(numParticles);
-    particleTypeIdOfAllParticles_.resize(numParticles);
-    inverseMasses_.resize(numParticles);
-    for (int i = 0; i < numParticles; i++)
+    mdAtoms.updateAfterPartition(ntopatoms, {}, ntopatoms, initMassLambda);
+    charges_.resize(ntopatoms);
+    particleTypeIdOfAllParticles_.resize(ntopatoms);
+    inverseMasses_.resize(ntopatoms);
+    for (int i = 0; i < ntopatoms; i++)
     {
-        charges_[i]                      = mdAtoms->mdatoms()->chargeA[i];
-        particleTypeIdOfAllParticles_[i] = mdAtoms->mdatoms()->typeA[i];
-        inverseMasses_[i]                = mdAtoms->mdatoms()->invmass[i];
+        charges_[i]                      = mdAtoms.chargeA[i];
+        particleTypeIdOfAllParticles_[i] = mdAtoms.typeA[i];
+        inverseMasses_[i]                = mdAtoms.invmass[i];
     }
     particleInteractionFlags_ = forceRecord.atomInfo;
 
@@ -164,9 +160,7 @@ TprReader::TprReader(std::string filename)
     velocities_.assign(globalState.v.begin(), globalState.v.end());
 
     // Copy listed interactions data
-    int listedInteractionCount = gmx_mtop_interaction_count(molecularTopology, IF_BOND)
-                                 + gmx_mtop_interaction_count(molecularTopology, IF_PAIR)
-                                 + gmx_mtop_interaction_count(molecularTopology, IF_DIHEDRAL);
+    int listedInteractionCount = gmx_mtop_interaction_count(molecularTopology, sc_ifcBondedForce);
     if (listedInteractionCount != 0)
     {
         InteractionDefinitions interactionDefinitions = localtop.idef;

@@ -60,7 +60,6 @@
 #include "gromacs/fileio/tpxio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/md_enums.h"
@@ -77,6 +76,7 @@
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxomp.h"
 #include "gromacs/utility/path.h"
@@ -1545,6 +1545,7 @@ static void read_wham_in(const char* fn, char*** filenamesRet, int* nfilesRet, t
         }
         nread++;
     }
+    gmx_ffclose(fp);
     *filenamesRet = filename;
     *nfilesRet    = nread;
 }
@@ -2823,6 +2824,7 @@ static void readPullCoordSelection(t_UmbrellaOptions* opt, char** fnTpr, int nTp
         }
         iline++;
     }
+    gmx_ffclose(fp);
     opt->nCoordsel = iline;
     if (nTpr != opt->nCoordsel)
     {

@@ -50,7 +50,6 @@
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/gmxana/gstat.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/pbcutil/pbc.h"
@@ -61,6 +60,7 @@
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
 #include "gromacs/utility/vec.h"
@@ -197,8 +197,8 @@ int gmx_velacc(int argc, char* argv[])
                            "and that the time interval between data collection points is",
                            "much shorter than the time scale of the autocorrelation." };
 
-    static gmx_bool bMass = FALSE, bMol = FALSE, bRecip = TRUE;
-    t_pargs         pa[] = {
+    gmx_bool bMass = FALSE, bMol = FALSE, bRecip = TRUE;
+    t_pargs  pa[] = {
         { "-m", FALSE, etBOOL, { &bMass }, "Calculate the momentum autocorrelation function" },
         { "-recip", FALSE, etBOOL, { &bRecip }, "Use cm^-1 on X-axis instead of 1/ps for spectra." },
         { "-mol", FALSE, etBOOL, { &bMol }, "Calculate the velocity acf of molecules" }

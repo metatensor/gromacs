@@ -50,7 +50,6 @@
 #include "gromacs/fileio/timecontrol.h"
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/pbcutil/pbc.h"
@@ -60,6 +59,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -106,11 +106,11 @@ int gmx_densmap(int argc, char* argv[])
         "from zero to the maximum density, you can set the maximum",
         "with the option [TT]-dmax[tt]."
     };
-    static int         n1 = 0, n2 = 0;
-    static real        xmin = -1, xmax = -1, bin = 0.02, dmin = 0, dmax = 0, amax = 0, rmax = 0;
-    static gmx_bool    bMirror = FALSE, bSums = FALSE;
-    static const char* eaver[] = { nullptr, "z", "y", "x", nullptr };
-    static const char* eunit[] = { nullptr, "nm-3", "nm-2", "count", nullptr };
+    int         n1 = 0, n2 = 0;
+    real        xmin = -1, xmax = -1, bin = 0.02, dmin = 0, dmax = 0, amax = 0, rmax = 0;
+    gmx_bool    bMirror = FALSE, bSums = FALSE;
+    const char* eaver[] = { nullptr, "z", "y", "x", nullptr };
+    const char* eunit[] = { nullptr, "nm-3", "nm-2", "count", nullptr };
 
     t_pargs pa[] = {
         { "-bin", FALSE, etREAL, { &bin }, "Grid size (nm)" },
@@ -134,7 +134,8 @@ int gmx_densmap(int argc, char* argv[])
     PbcType           pbcType = PbcType::Unset;
     rvec *            x, xcom[2], direction, center, dx;
     matrix            box;
-    real              t, m, mtot;
+    double            t;
+    real              m, mtot;
     t_pbc             pbc;
     int               cav = 0, c1 = 0, c2 = 0;
     char **           grpname, buf[STRLEN];

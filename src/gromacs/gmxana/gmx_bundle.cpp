@@ -50,7 +50,6 @@
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/pbcutil/rmpbc.h"
 #include "gromacs/topology/atoms.h"
@@ -60,6 +59,7 @@
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -227,26 +227,26 @@ int gmx_bundle(int argc, char* argv[])
         "command line option [TT]-nmrpdb[tt], and type [TT]set axis true[tt] to",
         "display the reference axis."
     };
-    static int      n    = 0;
-    static gmx_bool bZ   = FALSE;
-    t_pargs         pa[] = { { "-na", FALSE, etINT, { &n }, "Number of axes" },
-                             { "-z",
-                               FALSE,
-                               etBOOL,
-                               { &bZ },
-                               "Use the [IT]z[it]-axis as reference instead of the average axis" } };
-    FILE *          flen, *fdist, *fz, *ftilt, *ftiltr, *ftiltl;
-    FILE *          fkink = nullptr, *fkinkr = nullptr, *fkinkl = nullptr;
-    t_trxstatus*    status;
-    t_trxstatus*    fpdb;
-    t_topology      top;
-    PbcType         pbcType;
-    rvec*           xtop;
-    matrix          box;
-    t_trxframe      fr;
-    t_atoms         outatoms;
-    real            t, comp;
-    char*           grpname[MAX_ENDS];
+    int          n    = 0;
+    gmx_bool     bZ   = FALSE;
+    t_pargs      pa[] = { { "-na", FALSE, etINT, { &n }, "Number of axes" },
+                          { "-z",
+                            FALSE,
+                            etBOOL,
+                            { &bZ },
+                            "Use the [IT]z[it]-axis as reference instead of the average axis" } };
+    FILE *       flen, *fdist, *fz, *ftilt, *ftiltr, *ftiltl;
+    FILE *       fkink = nullptr, *fkinkr = nullptr, *fkinkl = nullptr;
+    t_trxstatus* status;
+    t_trxstatus* fpdb;
+    t_topology   top;
+    PbcType      pbcType;
+    rvec*        xtop;
+    matrix       box;
+    t_trxframe   fr;
+    t_atoms      outatoms;
+    real         t, comp;
+    char*        grpname[MAX_ENDS];
     /* FIXME: The constness should not be cast away */
     char *            anm = const_cast<char*>("CA"), *rnm = const_cast<char*>("GLY");
     int               i, gnx[MAX_ENDS];

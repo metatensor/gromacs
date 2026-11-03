@@ -49,7 +49,6 @@
 #include "gromacs/gmxpreprocess/grompp_impl.h"
 #include "gromacs/gmxpreprocess/topio.h"
 #include "gromacs/gmxpreprocess/toputil.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdtypes/md_enums.h"
@@ -60,6 +59,7 @@
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/smalloc.h"
 #include "gromacs/utility/vec.h"
@@ -421,12 +421,12 @@ static int assign_param(InteractionFunction  ftype,
             break;
         case InteractionFunction::VirtualSite1:
         case InteractionFunction::VirtualSite2:
-        case InteractionFunction::VirtualSite2FlexibleDistance:
+        case InteractionFunction::VirtualSite2FixedDistance:
         case InteractionFunction::VirtualSite3:
-        case InteractionFunction::VirtualSite3FlexibleDistance:
+        case InteractionFunction::VirtualSite3FixedDistance:
         case InteractionFunction::VirtualSite3Outside:
-        case InteractionFunction::VirtualSite4FlexibleDistance:
-        case InteractionFunction::VirtualSite4FlexibleDistanceNormalization:
+        case InteractionFunction::VirtualSite4FixedDistance:
+        case InteractionFunction::VirtualSite4FixedDistanceNormalization:
             newparam->vsite.a = old[0];
             newparam->vsite.b = old[1];
             newparam->vsite.c = old[2];
@@ -434,7 +434,7 @@ static int assign_param(InteractionFunction  ftype,
             newparam->vsite.e = old[4];
             newparam->vsite.f = old[5];
             break;
-        case InteractionFunction::VirtualSite3FlexibleAngleDistance:
+        case InteractionFunction::VirtualSite3FixedAngleDistance:
             newparam->vsite.a = old[1] * std::cos(c_deg2Rad * old[0]);
             newparam->vsite.b = old[1] * std::sin(c_deg2Rad * old[0]);
             newparam->vsite.c = old[2];
@@ -551,10 +551,11 @@ static void enter_function(const InteractionsOfType* p,
 
 bool shouldConvertInteractionType(InteractionFunction ftype)
 {
-    const unsigned long flags = interaction_function[ftype].flags;
+    const unsigned long flags = interaction_function[ftype].categories;
     return ((ftype != InteractionFunction::LennardJonesShortRange)
             && (ftype != InteractionFunction::BuckinghamShortRange)
-            && ((flags & IF_BOND) != 0u || (flags & IF_VSITE) != 0u || (flags & IF_CONSTRAINT) != 0u));
+            && ((flags & sc_ifcBondedForce) != 0u || (flags & sc_ifcVirtualSite) != 0u
+                || (flags & sc_ifcConstraint) != 0u));
 }
 
 void convertInteractionsOfType(int atnr,
@@ -632,13 +633,13 @@ void convertInteractionsOfType(int atnr,
 
             if (!interactions[i].interactionTypes.empty())
             {
-                const unsigned long flags = interaction_function[i].flags;
+                const unsigned long flags = interaction_function[i].categories;
                 /* For intermolecular interactions we (currently)
                  * only support potentials.
                  * Constraints and virtual sites would be possible,
                  * but require a lot of extra (bug-prone) code.
                  */
-                if (!(flags & IF_BOND))
+                if (!(flags & sc_ifcBondedForce))
                 {
                     gmx_fatal(FARGS,
                               "The intermolecular_interaction section may only contain bonded "
@@ -651,7 +652,7 @@ void convertInteractionsOfType(int atnr,
                               "intermolecular_interaction section, you can put them in the "
                               "moleculetype section");
                 }
-                else if (flags & IF_CHEMBOND)
+                else if (flags & sc_ifcChemicalBond)
                 {
                     gmx_fatal(FARGS,
                               "The intermolecular_interaction can not contain chemically bonding "

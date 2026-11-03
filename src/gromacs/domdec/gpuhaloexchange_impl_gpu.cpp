@@ -68,9 +68,9 @@
 #include "gromacs/gpu_utils/device_context.h"
 #include "gromacs/gpu_utils/devicebuffer.h"
 #include "gromacs/gpu_utils/gpueventsynchronizer.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/commrec.h"
 #include "gromacs/timing/wallcycle.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxmpi.h"
 #include "gromacs/utility/vectypes.h"
 
@@ -723,9 +723,11 @@ GpuHaloExchangeNvshmemHelper::GpuHaloExchangeNvshmemHelper(const gmx_domdec_t&  
     wcycle_(nullptr)
 {
 #if GMX_NVSHMEM
-    bool     thisIsPmeOnlyRank = peerRank.has_value();
-    MPI_Comm mpiCommPpGroup    = thisIsPmeOnlyRank ? MPI_COMM_NULL : mpi_comm_mygroup;
-    fusedPpHaloExchange_       = std::make_unique<gmx::FusedGpuHaloExchange>(
+    /* A PME-only rank has no PP halo of its own, so it must not take part in the
+     * PP-group collective that builds the rank->PE map in the constructor. */
+    const bool     thisIsPmeOnlyRank = peerRank.has_value();
+    const MPI_Comm mpiCommPpGroup    = thisIsPmeOnlyRank ? MPI_COMM_NULL : mpi_comm_mygroup;
+    fusedPpHaloExchange_             = std::make_unique<gmx::FusedGpuHaloExchange>(
             haloStream, context_, mpiCommPpGroup, mpi_comm_mysim_world);
 #else
     GMX_UNUSED_VALUE(haloStream);

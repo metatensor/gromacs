@@ -40,7 +40,6 @@
 
 #include <vector>
 
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdtypes/commrec.h"
@@ -55,6 +54,7 @@
 #include "gromacs/topology/topology.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/listoflists.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/vec.h"
@@ -210,7 +210,7 @@ void count_bonded_distances(const gmx_mtop_t& mtop, const t_inputrec& ir, double
         {
             int nbonds;
 
-            if (interaction_function[ftype].flags & IF_BOND)
+            if (interaction_function[ftype].categories & sc_ifcBondedForce)
             {
                 double nd_c, nd_simd;
 

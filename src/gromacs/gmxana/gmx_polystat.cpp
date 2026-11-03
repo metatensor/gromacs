@@ -146,8 +146,8 @@ int gmx_polystat(int argc, char* argv[])
         "the average cos reaches a value of 1/e. This point is determined",
         "by a linear interpolation of [LOG]<cos>[log]."
     };
-    static gmx_bool bMW = TRUE, bPC = FALSE;
-    t_pargs         pa[] = {
+    gmx_bool bMW = TRUE, bPC = FALSE;
+    t_pargs  pa[] = {
         { "-mw", FALSE, etBOOL, { &bMW }, "Use the mass weighting for radii of gyration" },
         { "-pc", FALSE, etBOOL, { &bPC }, "Plot average eigenvalues" }
     };
@@ -165,7 +165,7 @@ int gmx_polystat(int argc, char* argv[])
     int                        isize, *index, nmol, *molind, mol, nat_min = 0, nat_max = 0;
     char*                      grpname;
     t_trxstatus*               status;
-    real                       t;
+    double                     t;
     rvec *                     x, *bond = nullptr;
     matrix                     box;
     int                        natoms, i, j, frame, ind0, ind1, a, d, d2, ord[DIM] = { 0 };

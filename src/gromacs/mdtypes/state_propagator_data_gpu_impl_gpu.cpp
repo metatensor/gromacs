@@ -51,11 +51,11 @@
 #    include "gromacs/gpu_utils/device_stream_manager.h"
 #    include "gromacs/gpu_utils/devicebuffer.h"
 #    include "gromacs/gpu_utils/gpueventsynchronizer.h"
-#    include "gromacs/math/functions.h"
 #    include "gromacs/math/utilities.h"
 #    include "gromacs/mdtypes/state_propagator_data_gpu.h"
 #    include "gromacs/timing/wallcycle.h"
 #    include "gromacs/utility/classhelpers.h"
+#    include "gromacs/utility/functions.h"
 #    include "gromacs/utility/mpicomm.h"
 #    include "gromacs/utility/vectypes.h"
 
@@ -621,10 +621,9 @@ void StatePropagatorDataGpu::Impl::clearForcesOnGpu(AtomLocality atomLocality, G
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
 }
 
-GpuEventSynchronizer* StatePropagatorDataGpu::Impl::getLocalForcesReadyOnDeviceEvent(StepWorkload stepWork,
-                                                                                     SimulationWorkload simulationWork)
+GpuEventSynchronizer* StatePropagatorDataGpu::Impl::getLocalForcesReadyOnDeviceEvent(const StepWorkload& stepWork)
 {
-    if (stepWork.useGpuFBufferOps && !simulationWork.useCpuPmePpCommunication)
+    if (!stepWork.copyFinalFToGpu)
     {
         return &fReducedOnDevice_[AtomLocality::Local];
     }
@@ -838,10 +837,9 @@ void StatePropagatorDataGpu::clearForcesOnGpu(AtomLocality atomLocality, GpuEven
     return impl_->clearForcesOnGpu(atomLocality, dependency);
 }
 
-GpuEventSynchronizer* StatePropagatorDataGpu::getLocalForcesReadyOnDeviceEvent(StepWorkload stepWork,
-                                                                               SimulationWorkload simulationWork)
+GpuEventSynchronizer* StatePropagatorDataGpu::getLocalForcesReadyOnDeviceEvent(const StepWorkload& stepWork)
 {
-    return impl_->getLocalForcesReadyOnDeviceEvent(stepWork, simulationWork);
+    return impl_->getLocalForcesReadyOnDeviceEvent(stepWork);
 }
 
 GpuEventSynchronizer* StatePropagatorDataGpu::fReducedOnDevice(AtomLocality atomLocality)

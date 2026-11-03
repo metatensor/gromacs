@@ -34,7 +34,7 @@
 # Set up the module library
 add_library(mdtypes INTERFACE)
 
-file(GLOB MDTYPES_SOURCES
+set(MDTYPES_SOURCES
     awh_history.cpp
     checkpointdata.cpp
     commrec.cpp
@@ -46,7 +46,7 @@ file(GLOB MDTYPES_SOURCES
     inputrec.cpp
     interaction_const.cpp
     md_enums.cpp
-    mpicomm.cpp
+    mdatoms.cpp
     multipletimestepping.cpp
     observableshistory.cpp
     observablesreducer.cpp
@@ -110,4 +110,5 @@ if (BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
+list(TRANSFORM MDTYPES_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 set(LIBGROMACS_SOURCES ${LIBGROMACS_SOURCES} ${MDTYPES_SOURCES} PARENT_SCOPE)

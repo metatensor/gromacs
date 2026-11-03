@@ -2762,3 +2762,33 @@ structures into cryoelectron microscopy maps using biased molecular dynamics sim
 .. raw:: html
 
    </div>
+
+.. raw:: html
+
+   <div id="refMorozov2026">
+
+.. _refMorozov2026:
+
+:sup:`201` D. Morozov, C. Blau, O. Schütt, V. Mironov, A. Proeme, H. Judge,
+T. D. Kühne, B. Hess, and G. Groenhof, "Seamless QM/MM Simulations via a
+GROMACS-CP2K Interface", *Journal of Chemical Information and Modeling* (2026).
+`doi:10.1021/acs.jcim.6c02073 <https://doi.org/10.1021/acs.jcim.6c02073>`_.
+
+.. raw:: html
+
+   </div>
+
+.. raw:: html
+
+   <div id="refCorner2015">
+
+.. _refCorner2015:
+
+:sup:`202` J. Comer, J. C. Gumbart, J. Hénin, T. Lelièvre, A. Pohorille, C. Chipot,
+"The Adaptive Biasing Force Method: Everything You Always Wanted To Know but Were Afraid To Ask",
+*J. Phys. Chem. B* (2015).
+`doi:10.1021/jp506633n <https://doi.org/10.1021/jp506633n>`_.
+
+.. raw:: html
+
+   </div>

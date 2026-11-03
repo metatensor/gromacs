@@ -61,7 +61,6 @@
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/linearalgebra/eigensolver.h"
 #include "gromacs/math/do_fit.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/pbcutil/rmpbc.h"
 #include "gromacs/random/threefry.h"
@@ -74,6 +73,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/path.h"
@@ -195,7 +195,7 @@ static rvec** read_whole_trj(const char*             fn,
 {
     rvec **      xx, *x;
     matrix       box;
-    real         t;
+    double       t;
     int          i, j, max_nf;
     int          natom;
     t_trxstatus* status;
@@ -236,6 +236,7 @@ static rvec** read_whole_trj(const char*             fn,
         }
         i++;
     } while (read_next_x(oenv, status, &t, x, box));
+    close_trx(status);
     fprintf(stderr, "Allocated %zu bytes for frames\n", (max_nf * isize * sizeof(**xx)));
     fprintf(stderr, "Read %d frames from trajectory %s\n", clusterIndex, fn);
     *nframe = clusterIndex;
@@ -902,10 +903,9 @@ int gmx_cluster(int argc, char* argv[])
     char     buf[STRLEN], buf1[80];
     gmx_bool bAnalyze, bUseRmsdCut, bJP_RMSD = FALSE, bReadMat, bReadTraj, bPBC = TRUE;
 
-    int                method, ncluster = 0;
-    static const char* methodname[] = { nullptr,       "linkage",         "jarvis-patrick",
-                                        "monte-carlo", "diagonalization", "gromos",
-                                        nullptr };
+    int         method, ncluster = 0;
+    const char* methodname[] = { nullptr,           "linkage", "jarvis-patrick", "monte-carlo",
+                                 "diagonalization", "gromos",  nullptr };
     enum
     {
         m_null,
@@ -917,16 +917,16 @@ int gmx_cluster(int argc, char* argv[])
         m_nr
     };
     /* Set colors for plotting: white = zero RMS, black = maximum */
-    static t_rgb rlo_top = { 1.0, 1.0, 1.0 };
-    static t_rgb rhi_top = { 0.0, 0.0, 0.0 };
-    static t_rgb rlo_bot = { 1.0, 1.0, 1.0 };
-    static t_rgb rhi_bot = { 0.0, 0.0, 1.0 };
-    static int   nlevels = 40, skip = 1;
-    static real  scalemax = -1.0, rmsdcut = 0.1, rmsmin = 0.0;
-    gmx_bool     bRMSdist = FALSE, bBinary = FALSE, bAverage = FALSE, bFit = TRUE;
-    static int   niter = 10000, nrandom = 0, seed = 0, write_ncl = 0, write_nst = 1, minstruct = 1;
-    static real  kT = 1e-3;
-    static int   M = 10, P = 3;
+    t_rgb    rlo_top = { 1.0, 1.0, 1.0 };
+    t_rgb    rhi_top = { 0.0, 0.0, 0.0 };
+    t_rgb    rlo_bot = { 1.0, 1.0, 1.0 };
+    t_rgb    rhi_bot = { 0.0, 0.0, 1.0 };
+    int      nlevels = 40, skip = 1;
+    real     scalemax = -1.0, rmsdcut = 0.1, rmsmin = 0.0;
+    gmx_bool bRMSdist = FALSE, bBinary = FALSE, bAverage = FALSE, bFit = TRUE;
+    int      niter = 10000, nrandom = 0, seed = 0, write_ncl = 0, write_nst = 1, minstruct = 1;
+    real     kT = 1e-3;
+    int      M = 10, P = 3;
     gmx_output_env_t* oenv;
     gmx_rmpbc_t       gpbc = nullptr;
     gmx::TimeControl  timeControl;
@@ -1059,11 +1059,7 @@ int gmx_cluster(int argc, char* argv[])
     }
     if (trx_out_fn && !bReadTraj)
     {
-        fprintf(stderr,
-                "\nWarning: "
-                "cannot write cluster structures without reading trajectory\n"
-                "         ignoring option -cl %s\n",
-                trx_out_fn);
+        gmx_fatal(FARGS, "An input trajectory file (-f) is required to generate -cl %s", trx_out_fn);
     }
 
     method = 1;

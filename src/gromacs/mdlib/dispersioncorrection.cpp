@@ -43,7 +43,6 @@
 #include <string>
 #include <vector>
 
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdlib/forcerec.h"
@@ -61,6 +60,7 @@
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/listoflists.h"
 #include "gromacs/utility/logger.h"
@@ -87,9 +87,11 @@ DispersionCorrection::TopologyParams::TopologyParams(const gmx_mtop_t& mtop,
                                                      const t_inputrec& inputrec,
                                                      const bool        useBuckingham)
 {
-    const int ntp = mtop.ffparams.atnr;
+    const int  ntp           = mtop.ffparams.atnr;
+    const bool addFillerType = false;
 
-    std::vector<real> nbfp = makeNonBondedParameterLists(ntp, false, mtop.ffparams.iparams, useBuckingham);
+    std::vector<real> nbfp =
+            makeNonBondedParameterLists(ntp, addFillerType, mtop.ffparams.iparams, useBuckingham);
 
     /* For LJ-PME, we want to correct for the difference between the
      * actual C6 values and the C6 values used by the LJ-PME based on
@@ -97,7 +99,7 @@ DispersionCorrection::TopologyParams::TopologyParams(const gmx_mtop_t& mtop,
     if (usingLJPme(inputrec.vdwtype))
     {
         std::vector<real> nbfp_comb = makeLJPmeC6GridCorrectionParameters(
-                ntp, mtop.ffparams.iparams, inputrec.ljpme_combination_rule);
+                ntp, addFillerType, mtop.ffparams.iparams, inputrec.ljpme_combination_rule);
 
         for (int tpi = 0; tpi < ntp; ++tpi)
         {

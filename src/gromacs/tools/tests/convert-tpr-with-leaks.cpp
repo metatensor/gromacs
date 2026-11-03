@@ -81,14 +81,14 @@ TEST_F(ConvertTprTest, selectIndexTest)
     TestFileManager             fileManager;
     const std::filesystem::path outTprFilename = fileManager.getTemporaryFilePath("extended.tpr");
     const std::string           command[]      = {
-        "convert-tpr", "-s", tprFileHandle.tprName(), "-o", outTprFilename.string()
+        "convert-tpr", "-s", tprFileHandle.tprName().string(), "-o", outTprFilename.string()
     };
     CommandLine cmdline(command);
 
     StdioTestHelper stdioHelper(&fileManager);
     stdioHelper.redirectStringToStdin("Protein-H\n");
 
-    gmx::test::CommandLineTestHelper::runModuleFactory(&gmx::ConvertTprInfo::create, &cmdline);
+    CommandLineTestHelper::runModuleFactory(&ConvertTprInfo::create, &cmdline);
 
     {
         gmx_mtop_t top_after;
@@ -111,14 +111,14 @@ TEST_F(ConvertTprNoVelocityTest, selectIndexTestWithoutVelocity)
     TestFileManager             fileManager;
     const std::filesystem::path outTprFilename = fileManager.getTemporaryFilePath("extended.tpr");
     const std::string           command[]      = {
-        "convert-tpr", "-s", tprFileHandle.tprName(), "-o", outTprFilename.string()
+        "convert-tpr", "-s", tprFileHandle.tprName().string(), "-o", outTprFilename.string()
     };
     CommandLine cmdline(command);
 
     StdioTestHelper stdioHelper(&fileManager);
     stdioHelper.redirectStringToStdin("Protein-H\n");
 
-    gmx::test::CommandLineTestHelper::runModuleFactory(&gmx::ConvertTprInfo::create, &cmdline);
+    CommandLineTestHelper::runModuleFactory(&ConvertTprInfo::create, &cmdline);
 
     {
         gmx_mtop_t top_after;

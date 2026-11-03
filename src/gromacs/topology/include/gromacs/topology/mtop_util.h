@@ -84,8 +84,9 @@ int gmx_mtop_nres(const gmx_mtop_t& mtop);
 /* Returns the total number of interactions in the system of type ftype */
 int gmx_mtop_ftype_count(const gmx_mtop_t& mtop, InteractionFunction ftype);
 
-/* Returns the total number of interactions in the system with all interaction flags that are set in \p if_flags set */
-int gmx_mtop_interaction_count(const gmx_mtop_t& mtop, int unsigned if_flags);
+/*! \brief Returns the total number of interactions in the system
+ * with all interaction categories in \p if_categories set */
+int gmx_mtop_interaction_count(const gmx_mtop_t& mtop, InteractionFunctionCategoryFlags if_categories);
 
 //! Returns the number of flexible constraints in the \c ilist and \c iparams.
 int countFlexibleConstraints(const gmx::EnumerationArray<InteractionFunction, InteractionList>& ilist,
@@ -99,6 +100,12 @@ gmx::EnumerationArray<ParticleType, int> gmx_mtop_particletype_count(const gmx_m
 
 /* Returns a single t_atoms struct for the whole system */
 t_atoms gmx_mtop_global_atoms(const gmx_mtop_t& mtop);
+
+/*! \brief Creates and returns a deprecated t_block struct with molecule indices
+ *
+ * \param[in] mtop  The global topology
+ */
+t_block gmx_mtop_molecules_t_block(const gmx_mtop_t& mtop);
 
 /*! \brief
  * Populate a 'local' topology for the whole system.
@@ -131,6 +138,12 @@ gmx::RangePartitioning gmx_mtop_molecules(const gmx_mtop_t& mtop);
  * \returns Vector of ranges for all residues.
  */
 std::vector<gmx::Range<int>> atomRangeOfEachResidue(const gmx_moltype_t& moltype);
+
+/*! \brief Converts a gmx_mtop_t struct to flat InteractionDefinitions
+ *
+ * This is like a constructor, but is here to avoid coupling
+ * the implementations. */
+InteractionDefinitions gmx_mtop_to_InteractionDefinitions(const gmx_mtop_t& mtop);
 
 /* Converts a gmx_mtop_t struct to t_topology.
  *

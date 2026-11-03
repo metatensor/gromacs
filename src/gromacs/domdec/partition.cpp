@@ -75,10 +75,8 @@
 #include "gromacs/gmxlib/network.h"
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/imd/imd.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdlib/forcerec.h"
 #include "gromacs/mdlib/gmx_omp_nthreads.h"
-#include "gromacs/mdlib/mdatoms.h"
 #include "gromacs/mdlib/updategroupscog.h"
 #include "gromacs/mdlib/vsite.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
@@ -87,7 +85,7 @@
 #include "gromacs/mdtypes/forcerec.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
+#include "gromacs/mdtypes/mdatoms.h"
 #include "gromacs/mdtypes/state.h"
 #include "gromacs/nbnxm/nbnxm.h"
 #include "gromacs/pulling/pull.h"
@@ -100,6 +98,7 @@
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/listoflists.h"
 #include "gromacs/utility/logger.h"
@@ -2611,10 +2610,11 @@ void print_dd_statistics(gmx_domdec_t* dd, const t_inputrec& inputrec, FILE* fpl
         {
             print_dd_load_av(fplog, dd);
         }
-        else if (dd->comm->ddSettings.recordLoadDisabledByUpdateOnGpu && fplog)
+        else if (dd->comm->ddSettings.recordLoadDisabledByHaloOnGpu && fplog)
         {
             fprintf(fplog,
-                    "\nCould not measure load imbalance because update was performed on GPU\n");
+                    "\nCould not measure load imbalance because halo exchange was performed on "
+                    "GPU\n");
         }
     }
 }
@@ -3202,10 +3202,11 @@ void dd_partition_system(FILE*                     fplog,
                         comm->atomRanges.end(DDAtomRanges::Type::Constraints),
                         nat_f_novirsum);
 
-    /* Update atom data for mdatoms and several algorithms */
+    /* Update atom data for mdAtoms and several algorithms */
     wallcycle_sub_stop(wcycle, WallCycleSubCounter::DDTopOther);
+    const real massLambda = state_local->lambda[FreeEnergyPerturbationCouplingType::Mass];
     mdAlgorithmsSetupAtomData(
-            simulationWork, dd, inputrec, top_global, top_local, fr, f, mdAtoms, constr, vsite, nullptr, stateGpu, wcycle);
+            simulationWork, dd, inputrec, top_global, top_local, fr, f, massLambda, mdAtoms, constr, vsite, nullptr, stateGpu, wcycle);
     wallcycle_sub_start_nocount(wcycle, WallCycleSubCounter::DDTopOther);
 
     if (dd->atomSets != nullptr)
@@ -3290,8 +3291,8 @@ void dd_partition_system(FILE*                     fplog,
     MDModulesAtomsRedistributedSignal mdModulesAtomsRedistributedSignal(
             state_local->box,
             makeConstArrayRef(state_local->x).subArray(0, comm->atomRanges.numHomeAtoms()),
-            makeConstArrayRef(mdAtoms->mdatoms()->chargeA).subArray(0, comm->atomRanges.numHomeAtoms()),
-            makeConstArrayRef(mdAtoms->mdatoms()->massT).subArray(0, comm->atomRanges.numHomeAtoms()),
+            makeConstArrayRef(mdAtoms->chargeA).subArray(0, comm->atomRanges.numHomeAtoms()),
+            makeConstArrayRef(mdAtoms->massT).subArray(0, comm->atomRanges.numHomeAtoms()),
             makeConstArrayRef(dd->globalAtomIndices).subArray(0, comm->atomRanges.end(DDAtomRanges::Type::Zones)));
     mdModulesNotifiers.simulationRunNotifier_.notify(mdModulesAtomsRedistributedSignal);
 

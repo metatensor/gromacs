@@ -142,6 +142,7 @@ numerical_deriv(int nx, real x[], const real y[], const real fity[], real combin
 
     tmpfp        = gmx_ffopen("integral_smth.xvg", "w");
     integralSmth = print_and_integrate(tmpfp, nx, x[1] - x[0], combined, nullptr, 1);
+    gmx_ffclose(tmpfp);
     printf("SMOOTH integral = %10.5e\n", integralSmth);
 
     dy[0] = (combined[1] - combined[0]) / (x[1] - x[0]);
@@ -296,21 +297,21 @@ int gmx_dielectric(int argc, char* argv[])
     std::array<std::string, 5> legend = {
         "Correlation", "Std. Dev.", "Fit", "Combined", "Derivative"
     };
-    static int  fix = 0, bX = 1, nsmooth = 3;
-    static real tendInt = 5.0, tbegin = 5.0, tend = 500.0;
-    static real A = 0.5, tau1 = 10.0, tau2 = 1.0, eps0 = 80, epsRF = 78.5, tail = 500.0;
-    real        lambda;
-    t_pargs     pa[] = {
+    int     fix = 0, bX = 1, nsmooth = 3;
+    real    tendInt = 5.0, tbegin = 5.0, tend = 500.0;
+    real    A = 0.5, tau1 = 10.0, tau2 = 1.0, eps0 = 80, epsRF = 78.5, tail = 500.0;
+    real    lambda;
+    t_pargs pa[] = {
         { "-x1",
-              FALSE,
-              etBOOL,
-              { &bX },
-              "use first column as [IT]x[it]-axis rather than first data set" },
+          FALSE,
+          etBOOL,
+          { &bX },
+          "use first column as [IT]x[it]-axis rather than first data set" },
         { "-eint",
-              FALSE,
-              etREAL,
-              { &tendInt },
-              "Time to end the integration of the data and start to use the fit" },
+          FALSE,
+          etREAL,
+          { &tendInt },
+          "Time to end the integration of the data and start to use the fit" },
         { "-bfit", FALSE, etREAL, { &tbegin }, "Begin time of fit" },
         { "-efit", FALSE, etREAL, { &tend }, "End time of fit" },
         { "-tail", FALSE, etREAL, { &tail }, "Length of function including data and tail from fit" },
@@ -319,16 +320,16 @@ int gmx_dielectric(int argc, char* argv[])
         { "-tau2", FALSE, etREAL, { &tau2 }, "Start value for fit parameter [GRK]tau[grk]2" },
         { "-eps0", FALSE, etREAL, { &eps0 }, "[GRK]epsilon[grk]0 of your liquid" },
         { "-epsRF",
-              FALSE,
-              etREAL,
-              { &epsRF },
-              "[GRK]epsilon[grk] of the reaction field used in your simulation. A value of 0 means "
-                  "infinity." },
+          FALSE,
+          etREAL,
+          { &epsRF },
+          "[GRK]epsilon[grk] of the reaction field used in your simulation. A value of 0 means "
+          "infinity." },
         { "-fix",
-              FALSE,
-              etINT,
-              { &fix },
-              "Fix parameters at their start values, A (2), tau1 (1), or tau2 (4)" },
+          FALSE,
+          etINT,
+          { &fix },
+          "Fix parameters at their start values, A (2), tau1 (1), or tau2 (4)" },
         { "-ffn", FALSE, etENUM, { s_ffn }, "Fit function" },
         { "-nsmooth", FALSE, etINT, { &nsmooth }, "Number of points for smoothing" }
     };

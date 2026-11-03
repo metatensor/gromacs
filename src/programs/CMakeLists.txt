@@ -31,7 +31,10 @@
 # To help us fund GROMACS development, we humbly ask that you cite
 # the research papers on the package. Check out https://www.gromacs.org.
 
-file(GLOB MDRUN_SOURCES mdrun/*.cpp)
+set(MDRUN_SOURCES
+    mdrun/mdrun.cpp
+    mdrun/nonbonded_bench.cpp
+    )
 # make an "object library" that we can re-use for multiple targets
 add_library(mdrun_objlib OBJECT ${MDRUN_SOURCES})
 gmx_target_compile_options(mdrun_objlib)
@@ -54,7 +57,7 @@ if(GMX_FAHCORE)
     add_library(fahcore $<TARGET_OBJECTS:mdrun_objlib>)
     target_link_libraries(fahcore PRIVATE ${GMX_COMMON_LIBRARIES} legacy_api)
 else()
-    file(GLOB GMX_MAIN_SOURCES gmx.cpp legacymodules.cpp)
+    set(GMX_MAIN_SOURCES gmx.cpp legacymodules.cpp)
     add_library(gmx_objlib OBJECT ${GMX_MAIN_SOURCES})
     target_link_libraries(gmx_objlib PRIVATE common legacy_api)
     # TODO: Remove `legacy_modules` once specific modules are explicitly linked.

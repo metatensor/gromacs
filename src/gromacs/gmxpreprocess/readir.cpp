@@ -56,7 +56,6 @@
 #include "gromacs/fileio/warninp.h"
 #include "gromacs/gmxlib/network.h"
 #include "gromacs/gmxpreprocess/toputil.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdlib/calc_verletbuf.h"
@@ -93,6 +92,7 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/filestream.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/ikeyvaluetreeerror.h"
 #include "gromacs/utility/keyvaluetree.h"
@@ -1791,10 +1791,27 @@ void check_ir(const char* mdparin, MDModules* mdModules, t_inputrec* ir, t_gromp
         wi->addError("cos-acceleration is only supported by integrator = md");
     }
 
-    // do checks on the initialization of the flow profile with deform
-    if (ir_haveBoxDeformation(*ir) && !opts->deformInitFlow)
+    // do checks on the initialization of the flow profile with deform,
+    // integrators without dynamics have no velocities and thus no flow profile
+    if (ir_haveBoxDeformation(*ir) && opts->deformInitFlow && !EI_DYNAMICS(ir->eI))
     {
-        if (opts->bGenVel)
+        wi->addNote(gmx::formatString(
+                "deform-init-flow is ignored with integrator %s, as it does not use velocities",
+                enumValueToString(ir->eI)));
+    }
+    if (ir_haveBoxDeformation(*ir) && !opts->deformInitFlow && EI_DYNAMICS(ir->eI))
+    {
+        if (ir->eI == IntegrationAlgorithm::BD)
+        {
+            // BD does not use the initial velocities, so there is no flow profile to initialize
+            if (opts->bGenVel)
+            {
+                wi->addWarning(
+                        "With integrator bd, the initial velocities are not used, so generated "
+                        "velocities and deform-init-flow have no effect with box deformation");
+            }
+        }
+        else if (opts->bGenVel)
         {
             wi->addError(
                     "When the box is deformed and velocities are generated, the flow profile "

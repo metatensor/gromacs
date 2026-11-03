@@ -74,7 +74,6 @@
 #include "gromacs/mdtypes/group.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
 #include "gromacs/mdtypes/state.h"
 #include "gromacs/topology/forcefieldparameters.h"
 #include "gromacs/topology/idef.h"
@@ -385,7 +384,7 @@ public:
         // TODO This object will always return zero as RMSD value.
         //      It is more relevant to have non-zero value for testing.
         constraints_ = makeConstraints(
-                mtop_, inputrec_, nullptr, false, false, nullptr, mpiComm_, dd_, false, nullptr, nullptr, nullptr, false, nullptr);
+                mtop_, inputrec_, nullptr, false, false, nullptr, mpiComm_, dd_, false, false, nullptr, nullptr, nullptr, false, nullptr);
     }
 
     /*! \brief Helper function to generate synthetic data to output

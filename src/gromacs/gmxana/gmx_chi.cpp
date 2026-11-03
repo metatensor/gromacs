@@ -60,7 +60,6 @@
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/gmxana/gstat.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/topology/atoms.h"
 #include "gromacs/topology/symtab.h"
@@ -71,6 +70,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -1344,14 +1344,14 @@ int gmx_chi(int argc, char* argv[])
     };
 
     /* defaults */
-    static int         r0 = 1, rN = -1, ndeg = 1, maxchi = 2;
-    static gmx_bool    bAll = FALSE;
-    static gmx_bool    bPhi = FALSE, bPsi = FALSE, bOmega = FALSE;
-    static real        bfac_init = -1.0, bfac_max = 0;
-    static const char* maxchistr[] = { nullptr, "0", "1", "2", "3", "4", "5", "6", nullptr };
-    static gmx_bool    bRama = FALSE, bShift = FALSE, bViol = FALSE, bRamOmega = FALSE;
-    static gmx_bool bNormHisto = TRUE, bChiProduct = FALSE, bHChi = FALSE, bRAD = FALSE, bPBC = TRUE;
-    static real core_frac = 0.5;
+    int         r0 = 1, rN = -1, ndeg = 1, maxchi = 2;
+    gmx_bool    bAll = FALSE;
+    gmx_bool    bPhi = FALSE, bPsi = FALSE, bOmega = FALSE;
+    real        bfac_init = -1.0, bfac_max = 0;
+    const char* maxchistr[] = { nullptr, "0", "1", "2", "3", "4", "5", "6", nullptr };
+    gmx_bool    bRama = FALSE, bShift = FALSE, bViol = FALSE, bRamOmega = FALSE;
+    gmx_bool    bNormHisto = TRUE, bChiProduct = FALSE, bHChi = FALSE, bRAD = FALSE, bPBC = TRUE;
+    real        core_frac = 0.5;
     t_pargs     pa[]      = {
         { "-r0", FALSE, etINT, { &r0 }, "starting residue" },
         { "-rN", FALSE, etINT, { &rN }, "last residue" },

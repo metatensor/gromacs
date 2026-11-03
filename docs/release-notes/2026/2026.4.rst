@@ -2,10 +2,10 @@
 GROMACS 2026.4 release notes
 ----------------------------
 
-This version was released on TODO, 2026. These release notes
+This version was released on October 2nd, 2026. These release notes
 document the changes that have taken place in |Gromacs| since the
 previous 2026.3 version, to fix known issues. It also incorporates all
-fixes made in version 2025.4 and earlier, which you can find described
+fixes made in version 2025.5 and earlier, which you can find described
 in the :ref:`release-notes`.
 
 .. Note to developers!
@@ -49,11 +49,63 @@ which is unlikely to affect performance noticeably.
 
 :issue:`5688`
 
-Removed incorrect load imbalance reporting with update GPU
-""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+Fixed incorrect forces with (experimental) non-bonded free-energy on GPU with sc-power=2
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+:issue:`5693`
+
+
+Removed incorrect load imbalance reporting with halo communication on GPU
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+When halo communication is offloaded to the GPU, load imbalance cannot be
+measured via host timers and the reported imbalance values were meaningless.
+
 
 :issue:`5700`
 
+PME and Ewald with 3DC correction or finite epsilon surface now add virial contribution
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+The contribution to the virial was missing for these cases. This contribution is nearly
+always very small.
+
+:issue:`5694`
+
+Fixed freeze when using NVSHMEM with PME decomposition
+""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+When NVSHMEM was used with multiple PME ranks, and ``-ddorder interleave`` was used,
+the simulation would deadlock on the first step.
+
+:issue:`5641`
+
+Fixed incorrect output forces with staged PP-PME communication
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+With GPUs, separate PME rank, staged PP-PME communications, and force-output
+used on non-virial steps, the written forces were lacking the PME contribution.
+
+Fix empty domain handling in PP-PME GPU communication
+"""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+Inconsistencies in the handling of empty domains in PP-PME coordinate
+communications could have led to deadlocks and missing synchronizations.
+Happened with both threadMPI and GPU-aware MPI
+
+:issue:`5132`
+
+Fix race condition with stale shift vectors in GPU non-local nonbonded kernel
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+With domain decomposition, GPU nonbonded interactions, GPU coordinate
+buffer operations and a changing box (e.g., pressure coupling), the
+non-local nonbonded kernel could use the shift vectors from the previous
+step, leading to incorrect forces between local and non-local atoms
+interacting across a periodic boundary. The effect is expected to be minor
+in well-equilibrated systems.
+
+:issue:`5724`
 
 Fixes for ``gmx`` tools
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -74,6 +126,24 @@ precision of the time stamps. This avoids picking of incorrect frames when
 times are large and intervals are small.
 
 :issue:`5219`
+
+Reported AWH friction was off by a factor kT^2
+""""""""""""""""""""""""""""""""""""""""""""""
+
+The ``gmx awh`` tool now applies the correct conversion of elements
+of the metric tensor to friction output. Friction values obtained with
+older versions of the tool can be corrected by dividing by kT^2.
+
+:issue:`5702`
+
+Fix wrong cell shifts in NNPot pair list input
+""""""""""""""""""""""""""""""""""""""""""""""
+
+For NNP models that request the |Gromacs| pair list as input, the cell shifts were
+were incorrectly computed, leading to wrong energies and forces on triclinic simulation
+boxes.
+
+:issue:`5705`
 
 Fixes that affect portability
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -109,7 +179,7 @@ Updated DOI to the preprint describing AMBER14SB and AMBER19SB conversion and va
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 AMBER14SB and AMBER19SB force field :ref:`itp` files contained a placeholder
-link the preprint describing the conversion and validation steps. Now that the
+link to the preprint describing the conversion and validation steps. Now that the
 preprint is uploaded on ChemRxiv, the placeholder was replaced with the DOI of
 the preprint, `doi:10.26434/chemrxiv.15006112/v1 <https://doi.org/10.26434/chemrxiv.15006112/v1>`_.
 
@@ -124,3 +194,17 @@ The default timer-based DLB was not affected.
 
 :issue:`5698`
 
+Fix CSV output of ``gmx nonbonded-benchmark``
+"""""""""""""""""""""""""""""""""""""""""""""
+
+Previously, the CSV file (``-o`` option) did not contain the results
+unless ``-time`` was also specified.
+
+Fixes to the Colvars library
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This release contains the following bugfixes from the`Colvars repository
+<https://github.com/Colvars/colvars>`_:
+
+* fix: correctly implement the wrap function for orientation_angle (`Colvars PR 943
+  <https://github.com/Colvars/colvars/pull/943>`_)

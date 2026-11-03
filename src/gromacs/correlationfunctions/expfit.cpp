@@ -53,8 +53,8 @@
 
 #include "gromacs/correlationfunctions/integrate.h"
 #include "gromacs/fileio/xvgr.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -106,14 +106,8 @@ int effnNparams(int effn)
 
 const char* effnDescription(int effn)
 {
-    if ((0 <= effn) && (effn < effnNR))
-    {
-        return longs_ffn[effn];
-    }
-    else
-    {
-        return nullptr;
-    }
+    GMX_RELEASE_ASSERT((0 <= effn) && (effn < effnNR), "Invalid fitting function index");
+    return longs_ffn[effn];
 }
 
 int sffn2effn(const char** sffn)

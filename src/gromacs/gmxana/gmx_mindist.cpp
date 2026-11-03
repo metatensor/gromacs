@@ -54,7 +54,6 @@
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/pbcutil/rmpbc.h"
@@ -67,6 +66,7 @@
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -164,7 +164,7 @@ static void periodic_mindist_plot(const char*             trxfn,
     FILE*                      out;
     std::array<std::string, 5> leg = { "min per.", "max int.", "box1", "box2", "box3" };
     t_trxstatus*               status;
-    real                       t;
+    double                     t;
     rvec*                      x;
     matrix                     box;
     int                        natoms, ind_min[2] = { 0, 0 }, ind_mini = 0, ind_minj = 0;
@@ -225,6 +225,7 @@ static void periodic_mindist_plot(const char*             trxfn,
                 norm(box[2]));
         bFirst = FALSE;
     } while (read_next_x(oenv, status, &t, x, box));
+    close_trx(status);
 
     if (nullptr != top)
     {
@@ -395,7 +396,8 @@ static void dist_plot(const char*             fn,
     t_trxstatus*             trxout;
     char                     buf[256];
     std::vector<std::string> leg;
-    real                     t, dmin, dmax, **mindres = nullptr, **maxdres = nullptr;
+    double                   t;
+    real                     dmin, dmax, **mindres = nullptr, **maxdres = nullptr;
     int                      nmin, nmax;
     t_trxstatus*             status;
     int                      i = -1, j, k;

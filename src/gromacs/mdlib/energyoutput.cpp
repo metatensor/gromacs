@@ -63,7 +63,6 @@
 #include "gromacs/gmxlib/network.h"
 #include "gromacs/listed_forces/disre.h"
 #include "gromacs/listed_forces/orires.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/mdlib/constr.h"
 #include "gromacs/mdlib/ebin.h"
@@ -89,6 +88,7 @@
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/fixedcapacityvector.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/stringutil.h"
 #include "gromacs/utility/vec.h"
@@ -210,7 +210,7 @@ EnergyOutput::EnergyOutput(ener_file*                fp_ene,
     for (const auto i : gmx::EnumerationWrapper<InteractionFunction>{})
     {
         bEner_[i] = (gmx_mtop_ftype_count(mtop, i) > 0)
-                    && ((interaction_function[i].flags & IF_VSITE) == 0);
+                    && ((interaction_function[i].categories & sc_ifcVirtualSite) == 0);
     }
 
     if (!isRerun)

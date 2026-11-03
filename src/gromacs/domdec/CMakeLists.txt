@@ -33,13 +33,44 @@
 
 # Set up the module library
 add_library(domdec INTERFACE)
-file(GLOB DOMDEC_SOURCES *.cpp)
-list(FILTER DOMDEC_SOURCES EXCLUDE REGEX ".*/gpuhaloexchange_impl_gpu[a-z_]*\.cpp$")
-list(FILTER DOMDEC_SOURCES EXCLUDE REGEX ".*/gpuhaloexchange_impl.cpp$")
-list(FILTER DOMDEC_SOURCES EXCLUDE REGEX ".*/fused_gpuhaloexchange.cpp$")
+set(DOMDEC_SOURCES
+    atomdistribution.cpp
+    box.cpp
+    cellsizes.cpp
+    collect.cpp
+    computemultibodycutoffs.cpp
+    distribute.cpp
+    dlb.cpp
+    dlbtiming.cpp
+    domainpaircomm.cpp
+    domdec.cpp
+    domdec_constraints.cpp
+    domdec_network.cpp
+    domdec_setup.cpp
+    domdec_specatomcomm.cpp
+    domdec_vsite.cpp
+    domdec_zones.cpp
+    dump.cpp
+    ga2la.cpp
+    haloexchange.cpp
+    haloexchangesetup.cpp
+    localatomset.cpp
+    localatomsetdata.cpp
+    localatomsetmanager.cpp
+    localtopology.cpp
+    localtopologychecker.cpp
+    makebondedlinks.cpp
+    mdsetup.cpp
+    nsgrid.cpp
+    partition.cpp
+    redistribute.cpp
+    reversetopology.cpp
+    utility.cpp
+    )
+list(TRANSFORM DOMDEC_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 
 if(GMX_GPU_SYCL)
-    file(GLOB DOMDEC_GPU_SOURCES gpuhaloexchange_impl_gpu.cpp gpuhaloexchange_impl_gpu_sycl.cpp)
+    set(DOMDEC_GPU_SOURCES gpuhaloexchange_impl_gpu.cpp gpuhaloexchange_impl_gpu_sycl.cpp)
     _gmx_add_files_to_property(SYCL_SOURCES gpuhaloexchange_impl_gpu.cpp gpuhaloexchange_impl_gpu_sycl.cpp)
 elseif(GMX_GPU_CUDA)
     if(GMX_NVSHMEM)
@@ -49,15 +80,15 @@ elseif(GMX_GPU_CUDA)
     else()
         set(DOMDEC_GPU_SOURCES gpuhaloexchange_impl_gpu.cpp gpuhaloexchange_impl_gpu.cu)
     endif()
-    file(GLOB DOMDEC_GPU_SOURCES ${DOMDEC_GPU_SOURCES})
     _gmx_add_files_to_property(CUDA_SOURCES gpuhaloexchange_impl_gpu.cpp)
 elseif(GMX_GPU_HIP)
-  file(GLOB DOMDEC_GPU_SOURCES gpuhaloexchange_impl_gpu.cpp gpuhaloexchange_impl_gpu_hip.cpp)
+  set(DOMDEC_GPU_SOURCES gpuhaloexchange_impl_gpu.cpp gpuhaloexchange_impl_gpu_hip.cpp)
   _gmx_add_files_to_property(HIP_SOURCES gpuhaloexchange_impl_gpu.cpp gpuhaloexchange_impl_gpu_hip.cpp)
 else()
-  file(GLOB DOMDEC_GPU_SOURCES gpuhaloexchange_impl.cpp)
+  set(DOMDEC_GPU_SOURCES gpuhaloexchange_impl.cpp)
 endif()
 
+list(TRANSFORM DOMDEC_GPU_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 set(LIBGROMACS_SOURCES ${LIBGROMACS_SOURCES} ${DOMDEC_SOURCES} ${DOMDEC_GPU_SOURCES} PARENT_SCOPE)
 
 # Source files have the following dependencies on library infrastructure.

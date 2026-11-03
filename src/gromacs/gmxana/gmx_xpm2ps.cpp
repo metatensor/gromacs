@@ -57,7 +57,6 @@
 #include "gromacs/fileio/warninp.h"
 #include "gromacs/fileio/writeps.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
@@ -65,6 +64,7 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/filestream.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -1469,9 +1469,9 @@ int gmx_xpm2ps(int argc, char* argv[])
     const char*       fn2;
     int               i, etitle, elegend, ediag, erainbow, ecombine;
     gmx_bool          bTitle, bTitleOnce, bDiag, bFirstDiag, bGrad;
-    static gmx_bool   bFrame = TRUE, bZeroLine = FALSE, bYonce = FALSE;
-    static real       size = 400, boxx = 0, boxy = 0, cmin = 0, cmax = 0;
-    static rvec       grad = { 0, 0, 0 };
+    gmx_bool          bFrame = TRUE, bZeroLine = FALSE, bYonce = FALSE;
+    real              size = 400, boxx = 0, boxy = 0, cmin = 0, cmax = 0;
+    rvec              grad = { 0, 0, 0 };
     enum
     {
         etSel,
@@ -1504,7 +1504,7 @@ int gmx_xpm2ps(int argc, char* argv[])
     const char* rainbow[] = { nullptr, "no", "blue", "red", nullptr };
     /* MUST correspond to enum ecXxx as defined at top of file */
     const char* combine[] = { nullptr, "halves", "add", "sub", "mult", "div", nullptr };
-    static int  skip = 1, mapoffset = 0;
+    int         skip = 1, mapoffset = 0;
     t_pargs     pa[] = {
         { "-frame", FALSE, etBOOL, { &bFrame }, "Display frame, ticks, labels, title and legend" },
         { "-title", FALSE, etENUM, { title }, "Show title at" },
@@ -1609,10 +1609,9 @@ int gmx_xpm2ps(int argc, char* argv[])
     {
         if (ecombine != ecHalves)
         {
-            fprintf(stderr,
-                    "WARNING: arithmetic matrix combination selected (-combine), "
-                    "but no second matrix (-f2) supplied\n"
-                    "         no matrix combination will be performed\n");
+            gmx_fatal(FARGS,
+                      "Arithmetic matrix combination selected (-combine), "
+                      "but no second matrix (-f2) supplied.\n");
         }
         ecombine = 0;
     }
@@ -1657,11 +1656,10 @@ int gmx_xpm2ps(int argc, char* argv[])
         epsfile = ftp2fn_null(efEPS, NFILE, fnm);
         if (epsfile)
         {
-            fprintf(stderr,
-                    "WARNING: can only write result of arithmetic combination "
-                    "of two matrices to .xpm file\n"
-                    "         file %s will not be written\n",
-                    epsfile);
+            gmx_fatal(FARGS,
+                      "Can only write result of arithmetic combination "
+                      "of two matrices to .xpm file, but %s is .eps.",
+                      epsfile);
         }
         write_combined_matrix(ecombine,
                               opt2fn("-xpm", NFILE, fnm),

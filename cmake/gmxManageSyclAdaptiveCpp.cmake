@@ -31,6 +31,7 @@
 # To help us fund GROMACS development, we humbly ask that you cite
 # the research papers on the package. Check out https://www.gromacs.org.
 
+include(CheckCompilerFlag)
 include(gmxFindFlagsForSource)
 
 # Return all current CMake variables with name starting with "acpp" (case-insensitive).
@@ -71,7 +72,7 @@ set(ACPP_EXTRA_ARGS "-Wno-unknown-cuda-version -Wno-unknown-attributes ${SYCL_CX
 # -ffast-math for performance
 set(ACPP_EXTRA_COMPILE_OPTIONS -ffast-math)
 
-check_cxx_compiler_flag("-fgpu-flush-denormals-to-zero" HAS_GPU_FLUSH_DENORMALS_TO_ZERO)
+check_compiler_flag(CXX "-fgpu-flush-denormals-to-zero" HAS_GPU_FLUSH_DENORMALS_TO_ZERO)
 if(${HAS_GPU_FLUSH_DENORMALS_TO_ZERO})
     list(APPEND ACPP_EXTRA_COMPILE_OPTIONS -fgpu-flush-denormals-to-zero)
 endif()
@@ -85,14 +86,14 @@ endif()
 
 # We want to inline aggressively where the compiler supports this flag.
 # Likely not needed on AMD, since AdaptiveCpp by default sets AMD-specific flags to force inlining, but no harm either.
-check_cxx_compiler_flag("-fgpu-inline-threshold=1" HAS_GPU_INLINE_THRESHOLD)
+check_compiler_flag(CXX "-fgpu-inline-threshold=1" HAS_GPU_INLINE_THRESHOLD)
 if(${HAS_GPU_INLINE_THRESHOLD})
     list(APPEND ACPP_EXTRA_COMPILE_OPTIONS -fgpu-inline-threshold=99999)
 endif()
 
 # We cannot use local_accessor::get_multi_ptr with ACpp (https://github.com/AdaptiveCpp/AdaptiveCpp/issues/1230),
 # but `get_pointer` is already marked deprecated since ACpp 24.06
-check_cxx_compiler_flag("-Wno-deprecated-declarations" CXXFLAGS_NO_DEPRECATED_DECLARATIONS)
+check_compiler_flag(CXX "-Wno-deprecated-declarations" CXXFLAGS_NO_DEPRECATED_DECLARATIONS)
 if(${CXXFLAGS_NO_DEPRECATED_DECLARATIONS})
     list(APPEND ACPP_EXTRA_COMPILE_OPTIONS -Wno-deprecated-declarations)
 endif()
@@ -131,7 +132,11 @@ if (NOT DEFINED GMX_ACPP_COMPILATION_WORKS OR _rerun_acpp_try_compile_tests)
     if (NOT ADAPTIVECPP_FIND_QUIETLY_AFTER_FIRST_RUN)
         message(STATUS "Checking for valid AdaptiveCpp compiler")
     endif()
-    try_compile(GMX_ACPP_COMPILATION_WORKS "${CMAKE_BINARY_DIR}/CMakeTmpAdaptiveCppTest" "${CMAKE_SOURCE_DIR}/cmake/AdaptiveCppTest/" "AdaptiveCppTest"
+    try_compile(GMX_ACPP_COMPILATION_WORKS
+        PROJECT AdaptiveCppTest
+        SOURCE_DIR "${CMAKE_SOURCE_DIR}/cmake/AdaptiveCppTest"
+        BINARY_DIR "${CMAKE_BINARY_DIR}/CMakeTmpAdaptiveCppTest"
+        LOG_DESCRIPTION "Checking for a valid AdaptiveCpp compiler"
         OUTPUT_VARIABLE _ACPP_COMPILATION_OUTPUT
         CMAKE_FLAGS ${_ALL_ACPP_CMAKE_FLAGS} -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
     file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/CMakeTmpAdaptiveCppTest")

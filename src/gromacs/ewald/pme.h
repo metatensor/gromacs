@@ -324,17 +324,6 @@ void gmx_pme_reinit_atoms(gmx_pme_t*                pme,
 
 /* A block of PME GPU functions */
 
-/*! \brief Checks whether the GROMACS build allows to run PME on GPU.
- * TODO: this partly duplicates an internal PME assert function
- * pme_gpu_check_restrictions(), except that works with a
- * formed gmx_pme_t structure. Should that one go away/work with inputrec?
- *
- * \param[out] error   If non-null, the error message when PME is not supported on GPU.
- *
- * \returns true if PME can run on GPU on this build, false otherwise.
- */
-bool pme_gpu_supports_build(std::string* error);
-
 /*! \brief Checks whether the input system allows to run PME on GPU.
  * TODO: this partly duplicates an internal PME assert function
  * pme_gpu_check_restrictions(), except that works with a
@@ -533,16 +522,19 @@ GPU_FUNC_QUALIFIER void pme_gpu_wait_and_reduce(gmx_pme_t* GPU_FUNC_ARGUMENT(pme
 
 /*! \brief Do house-keeping at the end of a PME GPU step.
  *
- * Clears the internal grid and energy/virial buffers; it is not safe to start
- * the PME computation without calling this.
+ * Clears the internal grid and, when used, the energy/virial buffers; it is not safe
+ * to start the PME computation without calling this.
  * Note that unlike in the nbnxm module, the force buffer does not need clearing.
  *
  * \param[in,out] pmeGpu                     The PME GPU data structure.
  * \param[in] gpuGraphWithSeparatePmeRank    Whether MD GPU Graph with separate PME rank is in use.
+ * \param[in] computedEnergyAndVirial        Whether energy and virial were computed,
+ *                                           so their buffers need clearing.
  * \param[in] wcycle                         The wallclock counter.
  */
 GPU_FUNC_QUALIFIER void pme_gpu_finish_step(PmeGpu* GPU_FUNC_ARGUMENT(pmeGpu),
                                             bool    GPU_FUNC_ARGUMENT(gpuGraphWithSeparatePmeRank),
+                                            bool    GPU_FUNC_ARGUMENT(computedEnergyAndVirial),
                                             gmx_wallcycle* GPU_FUNC_ARGUMENT(wcycle)) GPU_FUNC_TERM;
 
 /*! \brief Set pointer to device copy of coordinate data.

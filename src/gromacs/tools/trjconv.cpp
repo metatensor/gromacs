@@ -65,13 +65,13 @@
 #include "gromacs/fileio/xtcio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/math/do_fit.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/pbcutil/pbcmethods.h"
 #include "gromacs/pbcutil/rmpbc.h"
 #include "gromacs/topology/atoms.h"
 #include "gromacs/topology/index.h"
+#include "gromacs/topology/mtop_util.h"
 #include "gromacs/topology/topology.h"
 #include "gromacs/trajectory/trajectoryframe.h"
 #include "gromacs/utility/arrayref.h"
@@ -79,6 +79,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -197,42 +198,6 @@ static void do_trunc(const char* fn, real t0)
             gmx_trr_close(in);
         }
     }
-}
-
-/*! \brief Read a full molecular topology if useful and available.
- *
- * If the input trajectory file is not in TNG format, and the output
- * file is in TNG format, then we want to try to read a full topology
- * (if available), so that we can write molecule information to the
- * output file. The full topology provides better molecule information
- * than is available from the normal t_topology data used by GROMACS
- * tools.
- *
- * Also, the t_topology is only read under (different) particular
- * conditions. If both apply, then a .tpr file might be read
- * twice. Trying to fix this redundancy while trjconv is still an
- * all-purpose tool does not seem worthwhile.
- *
- * Because of the way gmx_prepare_tng_writing is implemented, the case
- * where the input TNG file has no molecule information will never
- * lead to an output TNG file having molecule information. Since
- * molecule information will generally be present if the input TNG
- * file was written by a GROMACS tool, this seems like reasonable
- * behaviour. */
-static std::unique_ptr<gmx_mtop_t> read_mtop_for_tng(const char* tps_file,
-                                                     const char* input_file,
-                                                     const char* output_file)
-{
-    std::unique_ptr<gmx_mtop_t> mtop;
-
-    if (fn2bTPX(tps_file) && efTNG != fn2ftp(input_file) && efTNG == fn2ftp(output_file))
-    {
-        int temp_natoms = -1;
-        mtop            = std::make_unique<gmx_mtop_t>();
-        read_tpx(tps_file, nullptr, nullptr, &temp_natoms, nullptr, nullptr, mtop.get());
-    }
-
-    return mtop;
 }
 
 //! Do a deep copy of \c input and store in (pre-allocated) \c copy
@@ -601,10 +566,8 @@ int gmx_trjconv(int argc, char* argv[])
     rvec *       xp    = nullptr, x_shift, hbox;
     real*        w_rls = nullptr;
     int          m, i, d, frame, outframe, natoms, nout, ncent, newstep = 0, model_nr;
-    t_topology*  top     = nullptr;
     gmx_conect   gc      = nullptr;
     PbcType      pbcType = PbcType::Unset;
-    t_atoms *    atoms   = nullptr, useatoms;
     matrix       top_box;
     int *        index = nullptr, *cindex = nullptr;
     char*        grpnm = nullptr;
@@ -634,7 +597,7 @@ int gmx_trjconv(int argc, char* argv[])
     const char*  outf_ext  = nullptr;
     char         top_title[256], timestr[32], stepstr[32], filemode[5];
     gmx_output_env_t* oenv;
-    gmx::TimeControl  timeControl;
+    TimeControl       timeControl;
 
     t_filenm fnm[] = { { efTRX, "-f", nullptr, ffREAD },     { efTRO, "-o", nullptr, ffWRITE },
                        { efTPS, nullptr, nullptr, ffOPTRD }, { efNDX, nullptr, nullptr, ffOPTRD },
@@ -763,9 +726,9 @@ int gmx_trjconv(int argc, char* argv[])
         if (bVels)
         {
             /* check if velocities are possible in input and output files */
-            bVels = (ftp == efTRR || ftp == efGRO || ftp == efG96 || ftp == efTNG)
+            bVels = (ftp == efTRR || ftp == efGRO || ftp == efG96 || ftp == efTNG || ftp == efH5MD)
                     && (ftpin == efTRR || ftpin == efGRO || ftpin == efG96 || ftpin == efTNG
-                        || ftpin == efCPT);
+                        || ftpin == efH5MD || ftpin == efCPT);
         }
         if (bSeparate || bSplit)
         {
@@ -792,8 +755,6 @@ int gmx_trjconv(int argc, char* argv[])
             gmx_fatal(FARGS, "Argument for -skip (%d) needs to be greater or equal to 1.", skip_nr);
         }
 
-        std::unique_ptr<gmx_mtop_t> mtop = read_mtop_for_tng(top_file, in_file, out_file);
-
         /* Determine whether to read a topology */
         bTPS = (ftp2bSet(efTPS, NFILE, fnm) || bRmPBC || bReset || bPBCcomMol || bCluster
                 || (ftp == efGRO) || (ftp == efPDB) || bCONECT);
@@ -801,21 +762,71 @@ int gmx_trjconv(int argc, char* argv[])
         /* Determine if when can read index groups */
         bIndex = (bIndex || bTPS);
 
+        // If topology data is needed it will be always read as a molecular
+        // topology (mtop). If legacy topology structs are required (bTPS),
+        // they are constructed from this.
+        bool                        haveFullTopology = false;
+        std::unique_ptr<gmx_mtop_t> mtop;
+
+        // If we are converting from TNG to TNG we prefer to copy topology
+        // data from the existing file. If not, we try to read it from
+        // an input topology file.
+        const bool tngOutputRequiresMolecularTopology =
+                fn2ftp(out_file) == efTNG && fn2ftp(in_file) != efTNG;
+
+        const bool molecularTopologyRequired = bTPS || tngOutputRequiresMolecularTopology;
+        if (molecularTopologyRequired)
+        {
+            mtop = std::make_unique<gmx_mtop_t>();
+            readConfAndTopology(
+                    top_file, &haveFullTopology, mtop.get(), &pbcType, bTPS ? &xp : nullptr, nullptr, top_box);
+        }
+
+        // Legacy topology data structs, will only be filled if needed (bTPS = true)
+        std::unique_ptr<t_atoms>                atoms;
+        std::unique_ptr<t_block>                block;
+        std::unique_ptr<InteractionDefinitions> interactionDefinitions;
         if (bTPS)
         {
-            if (bCONECT && (!gmx_fexist(top_file) || !fn2bTPX(top_file)))
+            if (bCONECT && !haveFullTopology)
             {
                 gmx_fatal(FARGS, "Option -conect requires a .tpr file for the -s option");
             }
-            if ((bCluster || bPBCcomMol) && (!gmx_fexist(top_file) || !fn2bTPX(top_file)))
+            if ((bCluster || bPBCcomMol) && !haveFullTopology)
             {
                 gmx_fatal(FARGS, "Option -pbc %s requires a .tpr file for the -s option", pbc_opt[pbc_enum]);
             }
-            snew(top, 1);
-            read_tps_conf(top_file, top, &pbcType, &xp, nullptr, top_box, bReset || bPBCcomRes);
-            std::strncpy(top_title, *top->name, 255);
+
+            const bool requireMasses = bReset || bPBCcomRes;
+            if (requireMasses)
+            {
+                bool haveMass = true;
+                for (gmx_moltype_t& moltype : mtop->moltype)
+                {
+                    if (!moltype.atoms.haveMass)
+                    {
+                        // Try to read masses from database, print missing masses
+                        atomsSetMassesBasedOnNames(&moltype.atoms, true);
+                    }
+                    haveMass = haveMass && moltype.atoms.haveMass;
+                }
+                if (!haveMass)
+                {
+                    gmx_fatal(FARGS,
+                              "Masses were requested, but for some atom(s) masses could not "
+                              "be found in the database. Use a tpr file as input, if possible, "
+                              "or add these atoms to the mass database.");
+                }
+            }
+
+            // Initiate and fill all legacy topology data structs
+            atoms = std::make_unique<t_atoms>(gmx_mtop_global_atoms(*mtop));
+            block = std::make_unique<t_block>(gmx_mtop_molecules_t_block(*mtop));
+            interactionDefinitions =
+                    std::make_unique<InteractionDefinitions>(gmx_mtop_to_InteractionDefinitions(*mtop));
+
+            std::strncpy(top_title, *mtop->name, 255);
             top_title[255] = '\0';
-            atoms          = &top->atoms;
 
             /* top_title is only used for gro and pdb,
              * the header in such a file is top_title, followed by
@@ -835,11 +846,11 @@ int gmx_trjconv(int argc, char* argv[])
 
             if (bCONECT)
             {
-                gc = gmx_conect_generate(top);
+                gc = gmx_conect_generate(*mtop);
             }
             if (bRmPBC)
             {
-                gpbc = gmx_rmpbc_init(&top->idef, pbcType, top->atoms.nr);
+                gpbc = gmx_rmpbc_init(*interactionDefinitions, pbcType, mtop->natoms);
             }
         }
 
@@ -862,7 +873,7 @@ int gmx_trjconv(int argc, char* argv[])
         if (bReset)
         {
             printf("Select group for %s fit\n", bFit ? "least squares" : "translational");
-            get_index(atoms, ftp2fn_null(efNDX, NFILE, fnm), 1, &ifit, &ind_fit, &gn_fit);
+            get_index(atoms.get(), ftp2fn_null(efNDX, NFILE, fnm), 1, &ifit, &ind_fit, &gn_fit);
 
             if (bFit)
             {
@@ -879,7 +890,7 @@ int gmx_trjconv(int argc, char* argv[])
         else if (bCluster)
         {
             printf("Select group for clustering\n");
-            get_index(atoms, ftp2fn_null(efNDX, NFILE, fnm), 1, &ifit, &ind_fit, &gn_fit);
+            get_index(atoms.get(), ftp2fn_null(efNDX, NFILE, fnm), 1, &ifit, &ind_fit, &gn_fit);
         }
 
         if (bIndex)
@@ -887,10 +898,10 @@ int gmx_trjconv(int argc, char* argv[])
             if (bCenter)
             {
                 printf("Select group for centering\n");
-                get_index(atoms, ftp2fn_null(efNDX, NFILE, fnm), 1, &ncent, &cindex, &grpnm);
+                get_index(atoms.get(), ftp2fn_null(efNDX, NFILE, fnm), 1, &ncent, &cindex, &grpnm);
             }
             printf("Select group for output\n");
-            get_index(atoms, ftp2fn_null(efNDX, NFILE, fnm), 1, &nout, &index, &grpnm);
+            get_index(atoms.get(), ftp2fn_null(efNDX, NFILE, fnm), 1, &nout, &index, &grpnm);
         }
         else
         {
@@ -932,7 +943,7 @@ int gmx_trjconv(int argc, char* argv[])
                store original location (to put structure back) */
             if (bRmPBC)
             {
-                gmx_rmpbc_apply(gpbc, top->atoms.nr, top_box, xp);
+                gmx_rmpbc_apply(gpbc, mtop->natoms, top_box, xp);
             }
             copy_rvec(xp[index[0]], x_shift);
             reset_x_ndim(nfitdim, ifit, ind_fit, atoms->nr, nullptr, xp, w_rls);
@@ -957,27 +968,33 @@ int gmx_trjconv(int argc, char* argv[])
             drop1 = 0;
         }
 
-        /* Make atoms struct for output in GRO or PDB files */
+        // Make atoms struct for output of the selection into GRO,
+        // G96, or PDB files.
+        std::optional<t_atoms> useatoms;
         if ((ftp == efGRO) || ((ftp == efG96) && bTPS) || (ftp == efPDB))
         {
             /* get memory for stuff to go in .pdb file, and initialize
              * the pdbinfo structure part if the input has it.
              */
-            init_t_atoms(&useatoms, atoms->nr, atoms->havePdbInfo);
-            sfree(useatoms.resinfo);
-            useatoms.resinfo = atoms->resinfo;
+            useatoms = std::make_optional<t_atoms>();
+            init_t_atoms(&useatoms.value(), atoms->nr, atoms->havePdbInfo);
+            sfree(useatoms->resinfo);
+            useatoms->resinfo = atoms->resinfo;
+            // Reuse the memory from the main atoms struct, be
+            // careful not to free this later!
             for (i = 0; (i < nout); i++)
             {
-                useatoms.atomname[i] = atoms->atomname[index[i]];
-                useatoms.atom[i]     = atoms->atom[index[i]];
+                useatoms->atomname[i] = atoms->atomname[index[i]];
+                useatoms->atom[i]     = atoms->atom[index[i]];
                 if (atoms->havePdbInfo)
                 {
-                    useatoms.pdbinfo[i] = atoms->pdbinfo[index[i]];
+                    useatoms->pdbinfo[i] = atoms->pdbinfo[index[i]];
                 }
-                useatoms.nres = std::max(useatoms.nres, useatoms.atom[i].resind + 1);
+                useatoms->nres = std::max(useatoms->nres, useatoms->atom[i].resind + 1);
             }
-            useatoms.nr = nout;
+            useatoms->nr = nout;
         }
+
         /* select what to read */
         if (ftp == efTRR)
         {
@@ -1074,8 +1091,14 @@ int gmx_trjconv(int argc, char* argv[])
             switch (ftp)
             {
                 case efTNG:
-                    trxout = trjtools_gmx_prepare_tng_writing(
-                            out_file, filemode[0], trxin, {}, nout, mtop.get(), arrayRefFromArray(index, nout), grpnm);
+                    trxout = trjtools_gmx_prepare_tng_writing(out_file,
+                                                              filemode[0],
+                                                              trxin,
+                                                              {},
+                                                              nout,
+                                                              haveFullTopology ? mtop.get() : nullptr,
+                                                              arrayRefFromArray(index, nout),
+                                                              grpnm);
                     break;
                 case efXTC:
                 case efTRR:
@@ -1246,7 +1269,8 @@ int gmx_trjconv(int argc, char* argv[])
                 }
                 else if (bCluster)
                 {
-                    calc_pbc_cluster(ecenter, ifit, top, pbcType, fr.x, ind_fit, fr.box);
+                    calc_pbc_cluster(
+                            ecenter, ifit, block.get(), mtop->natoms, pbcType, fr.x, ind_fit, fr.box);
                 }
 
                 if (bPFit)
@@ -1319,7 +1343,7 @@ int gmx_trjconv(int argc, char* argv[])
                      * but since here we don't have the output frame yet,
                      * we introduce a temporary output frame time variable.
                      */
-                    real frout_time;
+                    double frout_time;
 
                     frout_time = bTDump ? frameToDump->time : fr.time;
 
@@ -1427,7 +1451,7 @@ int gmx_trjconv(int argc, char* argv[])
                         if (bPBCcomMol)
                         {
                             put_molecule_com_in_box(
-                                    unitcell_enum, ecenter, &top->mols, natoms, atoms->atom, pbcType, fr.box, fr.x);
+                                    unitcell_enum, ecenter, block.get(), natoms, atoms->atom, pbcType, fr.box, fr.x);
                         }
                         /* Copy the input trxframe struct to the output trxframe struct */
                         frout        = bTDump ? *frameToDump : fr;
@@ -1547,7 +1571,7 @@ int gmx_trjconv(int argc, char* argv[])
                                     case efGRO:
                                         write_hconf_p(out,
                                                       title.c_str(),
-                                                      &useatoms,
+                                                      &useatoms.value(),
                                                       frout.x,
                                                       frout.bV ? frout.v : nullptr,
                                                       frout.box);
@@ -1567,7 +1591,7 @@ int gmx_trjconv(int argc, char* argv[])
                                         }
                                         write_pdbfile(out,
                                                       title.c_str(),
-                                                      &useatoms,
+                                                      &useatoms.value(),
                                                       frout.x,
                                                       frout.pbcType,
                                                       frout.box,
@@ -1584,7 +1608,7 @@ int gmx_trjconv(int argc, char* argv[])
                                             {
                                                 frout.bAtoms = TRUE;
                                             }
-                                            frout.atoms = &useatoms;
+                                            frout.atoms = &useatoms.value();
                                             frout.bStep = FALSE;
                                             frout.bTime = FALSE;
                                         }
@@ -1682,13 +1706,24 @@ int gmx_trjconv(int argc, char* argv[])
         {
             gmx_ffclose(out);
         }
+
+        if (useatoms.has_value())
+        {
+            // Don't use done_atom, part of useatoms is shared with
+            // atoms.
+            sfree(useatoms->atomname);
+            sfree(useatoms->atom);
+        }
+        if (atoms)
+        {
+            done_atom(atoms.get());
+        }
+        if (block)
+        {
+            done_block(block.get());
+        }
     }
 
-    if (bTPS)
-    {
-        done_top(top);
-        sfree(top);
-    }
     sfree(xp);
     sfree(xmem);
     sfree(vmem);

@@ -127,7 +127,9 @@ static gmx_bool ip_pert(InteractionFunction ftype, const t_iparams* ip)
         case InteractionFunction::LennardJones14:
             bPert = (ip->lj14.c6A != ip->lj14.c6B || ip->lj14.c12A != ip->lj14.c12B);
             break;
-        case InteractionFunction::DihedralEnergyCorrectionMap: bPert = FALSE; break;
+        case InteractionFunction::DihedralEnergyCorrectionMap:
+            bPert = (ip->cmap.cmapA != ip->cmap.cmapB); // perturbed when A/B CMAP grids differ
+            break;
         case InteractionFunction::RestrictedBendingPotential:
             bPert = (ip->harmonic.rA != ip->harmonic.rB) || (ip->harmonic.krA != ip->harmonic.krB);
             break;
@@ -175,7 +177,7 @@ gmx_bool gmx_mtop_bondeds_free_energy(const gmx_mtop_t* mtop)
     for (int i = 0; i < ffparams->numTypes(); i++)
     {
         const InteractionFunction ftype = ffparams->functype[i];
-        if (interaction_function[ftype].flags & IF_BOND)
+        if (interaction_function[ftype].categories & sc_ifcBondedForce)
         {
             if (ip_pert(ftype, &ffparams->iparams[i]))
             {
@@ -211,7 +213,7 @@ void gmx_sort_ilist_fe(InteractionDefinitions* idef, gmx::ArrayRef<const int32_t
 
     for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
     {
-        if (interaction_function[ftype].flags & IF_BOND)
+        if (interaction_function[ftype].categories & sc_ifcBondedForce)
         {
             InteractionList* ilist  = &idef->il[ftype];
             int*             iatoms = ilist->iatoms.data();

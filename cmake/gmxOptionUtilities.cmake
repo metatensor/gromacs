@@ -56,8 +56,8 @@
 # when checking the user-provided value, but is added to all user-visible
 # messages.
 #
-# It appears that ccmake does not use the STRINGS property, but perhaps some
-# day...
+# ccmake has honored the STRINGS property (cycling through the enumerated
+# values) since CMake 3.0.
 #
 function(GMX_OPTION_MULTICHOICE NAME DESCRIPTION DEFAULT)
     # Some processing of the input values
@@ -73,8 +73,7 @@ function(GMX_OPTION_MULTICHOICE NAME DESCRIPTION DEFAULT)
     set(_org_value "${${NAME}}")
     string(TOUPPER "${${NAME}}" ${NAME})
     string(TOUPPER "${_allowed}" _allowed_as_upper)
-    list(FIND _allowed_as_upper "${${NAME}}" _found_index)
-    if (_found_index EQUAL -1)
+    if (NOT "${${NAME}}" IN_LIST _allowed_as_upper)
         message(FATAL_ERROR "Invalid value for ${NAME}: ${_org_value}.  "
                             "Pick one of: ${_allowed_comma_separated}")
     endif()
@@ -104,19 +103,21 @@ endfunction()
 #
 # The conditions is a semicolon-separated list of conditions as specified for
 # CMake if() statements, such as "GMX_FFT_LIBRARY STREQUAL FFTW3",
-# "NOT GMX_MPI" or "GMX_MPI;NOT GMX_DOUBLE".  Note that quotes within the
-# expressions don't work for some reason (even if escaped).
+# "NOT GMX_MPI" or "GMX_MPI;NOT GMX_DOUBLE".  Each condition is evaluated with
+# cmake_language(EVAL CODE ...), so the full if() condition syntax is
+# supported, including quoted strings.
 #
 # The logic is adapted from cmake_dependent_option().
 #
 function(GMX_ADD_CACHE_DEPENDENCY NAME TYPE CONDITIONS FORCED_VALUE)
     set(_available TRUE)
     foreach(_cond ${CONDITIONS})
-        string(REGEX REPLACE " +" ";" _cond_as_list ${_cond})
-        if (${_cond_as_list})
-        else()
-            set(_available FALSE)
-        endif()
+        cmake_language(EVAL CODE "
+            if (${_cond})
+            else()
+                set(_available FALSE)
+            endif()"
+        )
     endforeach()
     if (_available)
         set_property(CACHE ${NAME} PROPERTY TYPE ${TYPE})
@@ -153,28 +154,6 @@ endmacro()
 macro(GMX_DEPENDENT_OPTION NAME DESCRIPTION DEFAULT CONDITIONS)
     gmx_dependent_cache_variable(${NAME} "${DESCRIPTION}" BOOL "${DEFAULT}" "${CONDITIONS}")
 endmacro()
-
-# Sets a boolean variable based on conditions
-#
-# Usage:
-#   gmx_set_boolean(VAR CONDITIONS)
-#
-# Sets VAR to ON if all conditions listed in CONDITIONS are true, otherwise
-# VAR is set OFF.
-#
-# See gmx_add_cache_dependency() on how to specify the conditions.
-#
-function (GMX_SET_BOOLEAN NAME CONDITIONS)
-    set(${NAME} ON)
-    foreach(_cond ${CONDITIONS})
-        string(REGEX REPLACE " +" ";" _cond_as_list ${_cond})
-        if (${_cond_as_list})
-        else()
-            set(${NAME} OFF)
-        endif()
-    endforeach()
-    set(${NAME} ${${NAME}} PARENT_SCOPE)
-endfunction()
 
 # Checks if one or more variables have changed since last call to this function
 #

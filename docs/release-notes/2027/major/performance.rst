@@ -17,3 +17,30 @@ all three dimensions are considered when estimating atom density.
 
 :issue:`5622`
 
+
+Reduced host-side blocking in the GPU update and constraints setup
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+The mass and temperature-coupling group data that the GPU update and
+constraints upload on every neighbour-search step is now held in pinned
+host memory and copied asynchronously, rather than with blocking copies.
+This cuts the host-side cost of the GPU update and constraints setup by
+roughly a factor of 2.6, with the largest benefit for runs with frequent
+pair-list updates.
+
+Improved dual-pairlist pruning interval heuristics
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+For large nstlist values, the pairlist pruning interval is now larger.
+This improves performance, in particular with reaction-field electrostatics.
+
+:issue:`5701`
+
+GROMOS-96 angle interactions are now supported with GPU bonded forces
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+GROMOS-96 cosine-harmonic angle potentials (``F_G96ANGLES``) are now
+computed on the GPU with CUDA, HIP, and SYCL whenever bonded interactions
+are offloaded to the GPU (``-bonded gpu``).
+
+:issue:`5776`

@@ -56,7 +56,6 @@
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xtcio.h"
 #include "gromacs/fileio/xvgr.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/topology/index.h"
 #include "gromacs/trajectory/trajectoryframe.h"
@@ -65,6 +64,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -333,13 +333,13 @@ static void do_demux(ArrayRef<const std::string> inFiles,
                      real                        dt_remd,
                      int                         isize,
                      int                         index[],
-                     real                        dt,
+                     double                      dt,
                      const gmx_output_env_t*     oenv)
 {
     int           k, natoms;
     t_trxstatus **fp_in, **fp_out;
     gmx_bool      bCont, *bSet;
-    real          t, first_time = 0;
+    double        t, first_time = 0;
     t_trxframe*   trx;
 
     snew(fp_in, inFiles.size());
@@ -467,16 +467,16 @@ int gmx_trjcat(int argc, char* argv[])
         "the trajectory does not match that in the [REF].xvg[ref] file then the program",
         "tries to be smart. Beware."
     };
-    static gmx_bool bCat            = FALSE;
-    static gmx_bool bSort           = TRUE;
-    static gmx_bool bKeepLast       = FALSE;
-    static gmx_bool bKeepLastAppend = FALSE;
-    static gmx_bool bOverwrite      = FALSE;
-    static gmx_bool bSetTime        = FALSE;
-    static gmx_bool bDeMux;
-    static double   begin = -1;
-    static double   end   = -1;
-    static double   dt    = 0;
+    gmx_bool bCat            = FALSE;
+    gmx_bool bSort           = TRUE;
+    gmx_bool bKeepLast       = FALSE;
+    gmx_bool bKeepLastAppend = FALSE;
+    gmx_bool bOverwrite      = FALSE;
+    gmx_bool bSetTime        = FALSE;
+    gmx_bool bDeMux          = FALSE;
+    double   begin           = -1;
+    double   end             = -1;
+    double   dt              = 0;
 
     t_pargs pa[] = {
         { "-b", FALSE, etTIME, { &begin }, "First time to use (%t)" },
@@ -505,7 +505,7 @@ int gmx_trjcat(int argc, char* argv[])
     gmx_bool          bNewFile, bIndex, bWrite;
     int*              cont_type;
     real *            readtime, *timest, *settime;
-    real              first_time = 0, lasttime = 0, last_ok_t = -1, timestep;
+    double            first_time = 0, lasttime = 0, last_ok_t = -1, timestep;
     gmx_bool          lastTimeSet = FALSE;
     real              last_frame_time, searchtime;
     int               isize = 0;

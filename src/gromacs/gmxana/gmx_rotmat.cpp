@@ -51,7 +51,6 @@
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/math/do_fit.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/pbcutil/rmpbc.h"
 #include "gromacs/topology/index.h"
 #include "gromacs/topology/topology.h"
@@ -59,6 +58,7 @@
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -83,7 +83,7 @@ static void get_refx(gmx_output_env_t*       oenv,
 {
     int          natoms, nfr_all, nfr, i, j, a, r, c, min_fr;
     t_trxstatus* status;
-    real *       ti, min_t;
+    double *     ti, min_t;
     double       tot_mass, msd, *srmsd, min_srmsd, srmsd_tot;
     rvec *       x, **xi;
     real         xf;
@@ -226,17 +226,17 @@ int gmx_rotmat(int argc, char* argv[])
         "Option [TT]-fitxy[tt] fits in the [IT]x-y[it] plane before determining",
         "the rotation matrix."
     };
-    const char*     reffit[] = { nullptr, "none", "xyz", "xy", nullptr };
-    static int      skip     = 1;
-    static gmx_bool bFitXY = FALSE, bMW = TRUE;
-    t_pargs         pa[] = {
+    const char* reffit[] = { nullptr, "none", "xyz", "xy", nullptr };
+    int         skip     = 1;
+    gmx_bool    bFitXY = FALSE, bMW = TRUE;
+    t_pargs     pa[] = {
         { "-ref", FALSE, etENUM, { reffit }, "Determine the optimal reference structure" },
         { "-skip", FALSE, etINT, { &skip }, "Use every nr-th frame for [TT]-ref[tt]" },
         { "-fitxy",
-                  FALSE,
-                  etBOOL,
-                  { &bFitXY },
-                  "Fit the x/y rotation before determining the rotation" },
+              FALSE,
+              etBOOL,
+              { &bFitXY },
+              "Fit the x/y rotation before determining the rotation" },
         { "-mw", FALSE, etBOOL, { &bMW }, "Use mass weighted fitting" }
     };
     FILE*                      out;
@@ -245,7 +245,7 @@ int gmx_rotmat(int argc, char* argv[])
     PbcType                    pbcType;
     rvec *                     x_ref, *x;
     matrix                     box, R;
-    real                       t;
+    double                     t;
     int                        natoms, i;
     char*                      grpname;
     int                        gnx;

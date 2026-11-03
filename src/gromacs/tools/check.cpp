@@ -55,7 +55,6 @@
 #include "gromacs/fileio/tpxio.h"
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xtcio.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/mdrun/mdmodules.h"
 #include "gromacs/mdtypes/inputrec.h"
@@ -77,6 +76,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -266,7 +266,7 @@ static void chk_bonds(const InteractionDefinitions* idef, PbcType pbcType, rvec*
     set_pbc(&pbc, pbcType, box);
     for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
     {
-        if ((interaction_function[ftype].flags & IF_CHEMBOND) == IF_CHEMBOND)
+        if ((interaction_function[ftype].categories & sc_ifcChemicalBond) == sc_ifcChemicalBond)
         {
             for (k = 0; (k < idef->il[ftype].size());)
             {
@@ -435,6 +435,7 @@ static void chk_trj(const gmx_output_env_t* oenv, const char* fn, const char* tp
     fprintf(stderr, "\n");
 
     close_trx(status);
+    done_frame(&fr);
 
     fprintf(stderr, "\nItem        #frames");
     if (bShowTimestep)
@@ -762,6 +763,7 @@ static void chk_enx(const char* fn)
     }
     fprintf(stderr, ".\n");
 
+    done_ener_file(in);
     free_enxframe(fr);
     sfree(fr);
 }

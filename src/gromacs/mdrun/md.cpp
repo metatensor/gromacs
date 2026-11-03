@@ -80,11 +80,9 @@
 #include "gromacs/gpu_utils/gpu_utils.h"
 #include "gromacs/gpu_utils/hostallocator.h"
 #include "gromacs/imd/imd.h"
-#include "gromacs/listed_forces/listed_forces.h"
 #include "gromacs/listed_forces/listed_forces_gpu.h"
 #include "gromacs/math/arrayrefwithpadding.h"
 #include "gromacs/math/boxmatrix.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/paddedvector.h"
 #include "gromacs/mdlib/checkpointhandler.h"
 #include "gromacs/mdlib/constr.h"
@@ -98,7 +96,6 @@
 #include "gromacs/mdlib/forcerec.h"
 #include "gromacs/mdlib/freeenergyparameters.h"
 #include "gromacs/mdlib/md_support.h"
-#include "gromacs/mdlib/mdatoms.h"
 #include "gromacs/mdlib/mdgraph_gpu.h"
 #include "gromacs/mdlib/mdoutf.h"
 #include "gromacs/mdlib/membed.h"
@@ -134,7 +131,7 @@
 #include "gromacs/mdtypes/interaction_const.h"
 #include "gromacs/mdtypes/locality.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
+#include "gromacs/mdtypes/mdatoms.h"
 #include "gromacs/mdtypes/mdrunoptions.h"
 #include "gromacs/mdtypes/multipletimestepping.h"
 #include "gromacs/mdtypes/observableshistory.h"
@@ -166,6 +163,7 @@
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/matrix.h"
@@ -372,7 +370,6 @@ void LegacySimulator::do_md()
     ForceBuffers            f(simulationWork.useMts,
                    makeHostAllocationPolicy(simulationWork.useGpuFBufferOpsWhenAllowed || useGpuForUpdate,
                                             fr_->deviceStreamManager));
-    const t_mdatoms*        md       = mdAtoms_->mdatoms();
     StatePropagatorDataGpu* stateGpu = fr_->stateGpu;
     if (haveDDAtomOrdering(*cr_))
     {
@@ -403,8 +400,8 @@ void LegacySimulator::do_md()
                             nrnb_,
                             nullptr,
                             FALSE);
-        upd.updateAfterPartition(state_->numAtoms(), md->cFREEZE, md->cTC, md->cACC);
-        fr_->longRangeNonbondeds->updateAfterPartition(*md);
+        upd.updateAfterPartition(state_->numAtoms(), mdAtoms_->cFREEZE, mdAtoms_->cTC, mdAtoms_->cACC);
+        fr_->longRangeNonbondeds->updateAfterPartition(*mdAtoms_);
         if (simulationWork.useGpuHaloExchange)
         {
             // Fix up GPU halo exchange, which was constructed with
@@ -415,11 +412,23 @@ void LegacySimulator::do_md()
     else
     {
         /* Generate and initialize new topology */
-        mdAlgorithmsSetupAtomData(
-                simulationWork, cr_->dd, *ir, topGlobal_, top_, fr_, &f, mdAtoms_, constr_, virtualSites_, shellfc, stateGpu, wallCycleCounters_);
+        mdAlgorithmsSetupAtomData(simulationWork,
+                                  cr_->dd,
+                                  *ir,
+                                  topGlobal_,
+                                  top_,
+                                  fr_,
+                                  &f,
+                                  state_->lambda[FreeEnergyPerturbationCouplingType::Mass],
+                                  mdAtoms_,
+                                  constr_,
+                                  virtualSites_,
+                                  shellfc,
+                                  stateGpu,
+                                  wallCycleCounters_);
 
-        upd.updateAfterPartition(state_->numAtoms(), md->cFREEZE, md->cTC, md->cACC);
-        fr_->longRangeNonbondeds->updateAfterPartition(*md);
+        upd.updateAfterPartition(state_->numAtoms(), mdAtoms_->cFREEZE, mdAtoms_->cTC, mdAtoms_->cACC);
+        fr_->longRangeNonbondeds->updateAfterPartition(*mdAtoms_);
     }
 
     // Now that the state is valid we can set up Parrinello-Rahman
@@ -459,8 +468,7 @@ void LegacySimulator::do_md()
                         || ir->pressureCouplingOptions.epc == PressureCoupling::CRescale,
                 "Only Parrinello-Rahman, Berendsen, and C-rescale pressure coupling are supported "
                 "with the GPU update.\n");
-        GMX_RELEASE_ASSERT(!md->haveVsites,
-                           "Virtual sites are not supported with the GPU update.\n");
+        GMX_RELEASE_ASSERT(!virtualSites_, "Virtual sites are not supported with the GPU update.\n");
         GMX_RELEASE_ASSERT(ed == nullptr,
                            "Essential dynamics is not supported with the GPU update.\n");
         GMX_RELEASE_ASSERT(!ir->bPull || !pull_have_constraint(*ir->pull),
@@ -507,8 +515,6 @@ void LegacySimulator::do_md()
     // the global state to file and potentially for replica exchange.
     // (Global topology should persist.)
 
-    update_mdatoms(mdAtoms_->mdatoms(), state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
-
     if (ir->bExpanded)
     {
         /* Check nstexpanded here, because the grompp check was broken */
@@ -528,7 +534,7 @@ void LegacySimulator::do_md()
 
     preparePrevStepPullCom(ir,
                            pullWork_,
-                           md->massT,
+                           mdAtoms_->massT,
                            state_,
                            stateGlobal_,
                            cr_->commMyGroup,
@@ -559,43 +565,17 @@ void LegacySimulator::do_md()
                 cr_->dd, mdLog_, *ir, state_->box, *fr_->ic, *fr_->nbv, fr_->pmedata.get(), simulationWork);
     }
 
-    if (!ir->bContinuation)
+    if (!ir->bContinuation && constr_)
     {
-        if (state_->hasEntry(StateEntry::V))
-        {
-            auto v = makeArrayRef(state_->v);
-            /* Set the velocities of vsites, shells and frozen atoms to zero */
-            for (int i = 0; i < md->homenr; i++)
-            {
-                if (md->ptype[i] == ParticleType::Shell)
-                {
-                    clear_rvec(v[i]);
-                }
-                else if (!md->cFREEZE.empty())
-                {
-                    for (int m = 0; m < DIM; m++)
-                    {
-                        if (ir->opts.nFreeze[md->cFREEZE[i]][m])
-                        {
-                            v[i][m] = 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (constr_)
-        {
-            /* Constrain the initial coordinates and velocities */
-            do_constrain_first(fpLog_,
-                               constr_,
-                               *ir,
-                               md->homenr,
-                               state_->x.arrayRefWithPadding(),
-                               state_->v.arrayRefWithPadding(),
-                               state_->box,
-                               state_->lambda[FreeEnergyPerturbationCouplingType::Bonded]);
-        }
+        /* Constrain the initial coordinates and velocities */
+        do_constrain_first(fpLog_,
+                           constr_,
+                           *ir,
+                           mdAtoms_->numHomeAtoms,
+                           state_->x.arrayRefWithPadding(),
+                           state_->v.arrayRefWithPadding(),
+                           state_->box,
+                           state_->lambda[FreeEnergyPerturbationCouplingType::Bonded]);
     }
 
     const int nstfep = computeFepPeriod(*ir, replExParams_);
@@ -660,7 +640,7 @@ void LegacySimulator::do_md()
                         makeConstArrayRef(state_->x),
                         makeConstArrayRef(state_->v),
                         state_->box,
-                        md,
+                        *mdAtoms_,
                         nrnb_,
                         &vcm,
                         nullptr,
@@ -685,8 +665,8 @@ void LegacySimulator::do_md()
             auto x = (vcm.mode == ComRemovalAlgorithm::LinearAccelerationCorrection)
                              ? ArrayRef<RVec>{}
                              : makeArrayRef(state_->x);
-            process_and_stopcm_grp(fpLog_, &vcm, *md, x, makeArrayRef(state_->v));
-            inc_nrnb(nrnb_, eNR_STOPCM, md->homenr);
+            process_and_stopcm_grp(fpLog_, &vcm, *mdAtoms_, x, makeArrayRef(state_->v));
+            inc_nrnb(nrnb_, eNR_STOPCM, mdAtoms_->numHomeAtoms);
         }
     }
     if (ir->eI == IntegrationAlgorithm::VVAK)
@@ -705,7 +685,7 @@ void LegacySimulator::do_md()
                         makeConstArrayRef(state_->x),
                         makeConstArrayRef(state_->v),
                         state_->box,
-                        md,
+                        *mdAtoms_,
                         nrnb_,
                         &vcm,
                         nullptr,
@@ -948,6 +928,8 @@ void LegacySimulator::do_md()
             stateGpu->copyCoordinatesFromGpu(state_->x, AtomLocality::Local);
             stateGpu->waitVelocitiesReadyOnHost(AtomLocality::Local);
             stateGpu->waitCoordinatesReadyOnHost(AtomLocality::Local);
+            // The local coordinates are copied in the update stream, so all its earlier work is done
+            integrator->markStreamSynchronized();
         }
 
         // We need to calculate virtual velocities if we are writing them in the current step.
@@ -955,25 +937,22 @@ void LegacySimulator::do_md()
         // The reason why the velocities need to be updated regularly is that the virtual site coordinates
         // are updated using these velocities during integration. Those coordinates are used for, e.g., domain
         // decomposition. Before computing any forces the positions of the virtual sites are recalculated.
-        // This fixes a bug, #4879, which was introduced in MR !979.
+        // This should be improved, see issue #4894.
+        // If the velocities are needed for trajectory output, they are calculated in do_md_trajectory_writing().
         // Note that vsite velocities might not be up-to-date in checkpoint or confout files.
         const int  c_virtualSiteVelocityUpdateInterval = 1000;
         const bool needVirtualVelocitiesThisStep =
-                (virtualSites_ != nullptr)
-                && (do_per_step(step, outputControl.nstvout)
-                    || do_per_step(step, c_virtualSiteVelocityUpdateInterval));
+                (virtualSites_ != nullptr) && do_per_step(step, c_virtualSiteVelocityUpdateInterval);
 
         if (virtualSites_ != nullptr)
         {
             // Virtual sites need to be updated before domain decomposition and forces are calculated
             wallcycle_start(wallCycleCounters_, WallCycleCounter::VsiteConstr);
-            // md-vv calculates virtual velocities once it has full-step real velocities
             virtualSites_->construct(state_->x,
                                      state_->v,
                                      state_->box,
-                                     (!EI_VV(inputRec_->eI) && needVirtualVelocitiesThisStep)
-                                             ? VSiteOperation::PositionsAndVelocities
-                                             : VSiteOperation::Positions);
+                                     (needVirtualVelocitiesThisStep) ? VSiteOperation::PositionsAndVelocities
+                                                                     : VSiteOperation::Positions);
             wallcycle_stop(wallCycleCounters_, WallCycleCounter::VsiteConstr);
         }
 
@@ -1019,8 +998,9 @@ void LegacySimulator::do_md()
                                     nrnb_,
                                     wallCycleCounters_,
                                     do_verbose && !(pmeLoadBal && pmeLoadBal->isPrintingLoad()));
-                upd.updateAfterPartition(state_->numAtoms(), md->cFREEZE, md->cTC, md->cACC);
-                fr_->longRangeNonbondeds->updateAfterPartition(*md);
+                upd.updateAfterPartition(
+                        state_->numAtoms(), mdAtoms_->cFREEZE, mdAtoms_->cTC, mdAtoms_->cACC);
+                fr_->longRangeNonbondeds->updateAfterPartition(*mdAtoms_);
             }
         }
 
@@ -1029,9 +1009,9 @@ void LegacySimulator::do_md()
             EnergyOutput::printHeader(fpLog_, step, t); /* can we improve the information printed here? */
         }
 
-        if (ir->efep != FreeEnergyPerturbationType::No)
+        if (ir->efep == FreeEnergyPerturbationType::SlowGrowth)
         {
-            update_mdatoms(mdAtoms_->mdatoms(), state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
+            mdAtoms_->updateForMassLambda(state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
         }
 
         if (bExchanged)
@@ -1048,7 +1028,7 @@ void LegacySimulator::do_md()
                             makeConstArrayRef(state_->x),
                             makeConstArrayRef(state_->v),
                             state_->box,
-                            md,
+                            *mdAtoms_,
                             nrnb_,
                             &vcm,
                             wallCycleCounters_,
@@ -1118,7 +1098,7 @@ void LegacySimulator::do_md()
                 fr_->listedForcesGpu->updateHaveInteractions(top_->idef);
             }
             runScheduleWork_->domainWork = setupDomainLifetimeWorkload(
-                    *ir, *fr_, pullWork_, ed ? ed->getLegacyED() : nullptr, *md, simulationWork);
+                    *ir, *fr_, pullWork_, ed ? ed->getLegacyED() : nullptr, mdAtoms_->nPerturbed > 0, simulationWork);
         }
 
         const int shellfcFlags = force_flags | (mdrunOptions_.verbose ? GMX_FORCE_ENERGY : 0);
@@ -1209,7 +1189,7 @@ void LegacySimulator::do_md()
                                     &state_->hist,
                                     &f.view(),
                                     force_vir,
-                                    *md,
+                                    *mdAtoms_,
                                     fr_->longRangeNonbondeds.get(),
                                     nrnb_,
                                     wallCycleCounters_,
@@ -1259,7 +1239,7 @@ void LegacySimulator::do_md()
                          &state_->hist,
                          &f.view(),
                          force_vir,
-                         md,
+                         *mdAtoms_,
                          enerd_,
                          state_->lambda,
                          fr_,
@@ -1288,7 +1268,7 @@ void LegacySimulator::do_md()
                                      cr_->commMyGroup,
                                      cr_->dd,
                                      state_,
-                                     mdAtoms_->mdatoms(),
+                                     *mdAtoms_,
                                      &fcdata,
                                      &MassQ,
                                      &vcm,
@@ -1318,13 +1298,6 @@ void LegacySimulator::do_md()
                                      nrnb_,
                                      fpLog_,
                                      wallCycleCounters_);
-                if (virtualSites_ != nullptr && needVirtualVelocitiesThisStep)
-                {
-                    // Positions were calculated earlier
-                    wallcycle_start(wallCycleCounters_, WallCycleCounter::VsiteConstr);
-                    virtualSites_->construct(state_->x, state_->v, state_->box, VSiteOperation::Velocities);
-                    wallcycle_stop(wallCycleCounters_, WallCycleCounter::VsiteConstr);
-                }
             }
 
             /* ########  END FIRST UPDATE STEP  ############## */
@@ -1345,8 +1318,8 @@ void LegacySimulator::do_md()
                                                   state_->dfhist.get(),
                                                   step,
                                                   state_->v.rvec_array(),
-                                                  md->homenr,
-                                                  md->cTC);
+                                                  mdAtoms_->numHomeAtoms,
+                                                  mdAtoms_->cTC);
                 /* history is maintained in state->dfhist, but state_global is what is sent to trajectory and log output */
                 if (isMainRank)
                 {
@@ -1369,18 +1342,12 @@ void LegacySimulator::do_md()
                 stateGpu->copyVelocitiesFromGpu(state_->v, AtomLocality::Local);
                 stateGpu->waitVelocitiesReadyOnHost(AtomLocality::Local);
             }
-            // Copy forces for the output if the forces were reduced on the GPU (not the case on virial steps)
-            // and update is offloaded hence forces are kept on the GPU for update and have not been
-            // already transferred in do_force().
+            // Copy the final forces for the output if they are only on the GPU,
+            // i.e. they were not already copied to the host in do_force().
             // TODO: There should be an improved, explicit mechanism that ensures this copy is only executed
             //       when the forces are ready on the GPU -- the same synchronizer should be used as the one
             //       prior to GPU update.
-            // TODO: When the output flags will be included in step workload, this copy can be combined with the
-            //       copy call in do_force(...).
-            // NOTE: The forces should not be copied here if the vsites are present, since they were modified
-            //       on host after the D2H copy in do_force(...).
-            if (runScheduleWork_->stepWork.useGpuFBufferOps && (simulationWork.useGpuUpdate && !virtualSites_)
-                && do_per_step(step, outputControl.nstfout))
+            if (runScheduleWork_->stepWork.copyFinalFFromGpu)
             {
                 stateGpu->copyForcesFromGpu(f.view().force(), AtomLocality::Local);
                 stateGpu->waitForcesReadyOnHost(AtomLocality::Local);
@@ -1406,6 +1373,7 @@ void LegacySimulator::do_md()
                                      energyOutput,
                                      bGStat ? ekind_ : nullptr,
                                      f.view().force(),
+                                     virtualSites_,
                                      isCheckpointingStep,
                                      bRerunMD,
                                      bLastStep,
@@ -1441,8 +1409,15 @@ void LegacySimulator::do_md()
             if (ETC_ANDERSEN(ir->etc)) /* keep this outside of update_tcouple because of the extra info required to pass */
             {
                 gmx_bool bIfRandomize;
-                bIfRandomize = update_randomize_velocities(
-                        ir, step, cr_->dd, md->homenr, md->cTC, md->invmass, state_->v, &upd, constr_);
+                bIfRandomize = update_randomize_velocities(ir,
+                                                           step,
+                                                           cr_->dd,
+                                                           mdAtoms_->numHomeAtoms,
+                                                           mdAtoms_->cTC,
+                                                           mdAtoms_->invmass,
+                                                           state_->v,
+                                                           &upd,
+                                                           constr_);
                 /* if we have constraints, we have to remove the kinetic energy parallel to the bonds */
                 if (constr_ && bIfRandomize)
                 {
@@ -1470,9 +1445,9 @@ void LegacySimulator::do_md()
                                ekind_,
                                state_,
                                total_vir,
-                               md->homenr,
-                               md->cTC,
-                               md->invmass,
+                               mdAtoms_->numHomeAtoms,
+                               mdAtoms_->cTC,
+                               mdAtoms_->invmass,
                                &MassQ,
                                trotter_seq,
                                TrotterSequence::Three);
@@ -1484,7 +1459,7 @@ void LegacySimulator::do_md()
             }
             else
             {
-                update_tcouple(step, ir, state_, ekind_, &MassQ, md->homenr, md->cTC);
+                update_tcouple(step, ir, state_, ekind_, &MassQ, mdAtoms_->numHomeAtoms, mdAtoms_->cTC);
                 update_pcouple_before_coordinates(mdLog_,
                                                   step,
                                                   ir->pressureCouplingOptions,
@@ -1505,7 +1480,7 @@ void LegacySimulator::do_md()
                                       cr_->commMyGroup,
                                       cr_->dd,
                                       state_,
-                                      mdAtoms_->mdatoms(),
+                                      *mdAtoms_,
                                       &fcdata,
                                       &MassQ,
                                       &vcm,
@@ -1545,7 +1520,7 @@ void LegacySimulator::do_md()
                                         stateGpu->getVelocities(),
                                         stateGpu->getForces(),
                                         top_->idef,
-                                        *md);
+                                        *mdAtoms_);
 
                         // Copy data to the GPU after buffers might have been reinitialized
                         /* The velocity copy is redundant if we had Center-of-Mass motion removed on
@@ -1563,13 +1538,11 @@ void LegacySimulator::do_md()
                         stateGpu->consumeCoordinatesCopiedToDeviceEvent(AtomLocality::Local);
                     }
 
-                    if ((simulationWork.useGpuPme && simulationWork.useCpuPmePpCommunication)
-                        || (!runScheduleWork_->stepWork.useGpuFBufferOps))
+                    if (runScheduleWork_->stepWork.copyFinalFToGpu)
                     {
-                        // The PME forces were received to the host, and reduced on the CPU with the
-                        // rest of the forces computed on the GPU, so the final forces have to be
-                        // copied back to the GPU. Or the buffer ops were not offloaded this step,
-                        // so the forces are on the host and have to be copied
+                        /* The final forces are on the host, either because the buffer ops were
+                         * not offloaded this step or because they were modified on the host
+                         * after the GPU reduction */
                         stateGpu->copyForcesToGpu(f.view().force(), AtomLocality::Local);
                     }
                     const bool doTemperatureScalingGpu =
@@ -1578,8 +1551,7 @@ void LegacySimulator::do_md()
 
                     // This applies Leap-Frog, LINCS and SETTLE in succession
                     integrator->integrate(
-                            stateGpu->getLocalForcesReadyOnDeviceEvent(
-                                    runScheduleWork_->stepWork, runScheduleWork_->simulationWork),
+                            stateGpu->getLocalForcesReadyOnDeviceEvent(runScheduleWork_->stepWork),
                             ir->delta_t,
                             true,
                             bCalcVir,
@@ -1603,10 +1575,9 @@ void LegacySimulator::do_md()
                     if (separateVirialConstraining)
                     {
                         upd.update_for_constraint_virial(*ir,
-                                                         md->homenr,
-                                                         md->havePartiallyFrozenAtoms,
-                                                         md->invmass,
-                                                         md->invMassPerDim,
+                                                         mdAtoms_->numHomeAtoms,
+                                                         mdAtoms_->invmass,
+                                                         mdAtoms_->invMassPerDim,
                                                          *state_,
                                                          f.view().forceWithPadding(),
                                                          *ekind_);
@@ -1634,11 +1605,10 @@ void LegacySimulator::do_md()
                                     : f.view().forceWithPadding();
                     upd.update_coords(*ir,
                                       step,
-                                      md->homenr,
-                                      md->havePartiallyFrozenAtoms,
-                                      md->ptype,
-                                      md->invmass,
-                                      md->invMassPerDim,
+                                      mdAtoms_->numHomeAtoms,
+                                      mdAtoms_->ptype,
+                                      mdAtoms_->invmass,
+                                      mdAtoms_->invMassPerDim,
                                       state_,
                                       forceCombined,
                                       &fcdata,
@@ -1662,9 +1632,9 @@ void LegacySimulator::do_md()
                     upd.update_sd_second_half(*ir,
                                               step,
                                               &dvdl_constr,
-                                              md->homenr,
-                                              md->ptype,
-                                              md->invmass,
+                                              mdAtoms_->numHomeAtoms,
+                                              mdAtoms_->ptype,
+                                              mdAtoms_->invmass,
                                               state_,
                                               cr_->dd,
                                               nrnb_,
@@ -1672,12 +1642,8 @@ void LegacySimulator::do_md()
                                               constr_,
                                               do_log,
                                               do_ene);
-                    upd.finish_update(*ir,
-                                      md->havePartiallyFrozenAtoms,
-                                      md->homenr,
-                                      state_,
-                                      wallCycleCounters_,
-                                      constr_ != nullptr);
+                    upd.finish_update(
+                            *ir, mdAtoms_->numHomeAtoms, state_, wallCycleCounters_, constr_ != nullptr);
                 }
 
                 if (ir->bPull && ir->pull->bSetPbcRefToPrevStepCOM)
@@ -1749,6 +1715,8 @@ void LegacySimulator::do_md()
                 {
                     stateGpu->copyCoordinatesFromGpu(state_->x, AtomLocality::Local);
                     stateGpu->waitCoordinatesReadyOnHost(AtomLocality::Local);
+                    // The local coordinates are copied in the update stream, so all its earlier work is done
+                    integrator->markStreamSynchronized();
                 }
 
                 // Copy velocities back to the host if:
@@ -1794,7 +1762,7 @@ void LegacySimulator::do_md()
                                 makeConstArrayRef(state_->x),
                                 makeConstArrayRef(state_->v),
                                 state_->box,
-                                md,
+                                *mdAtoms_,
                                 nrnb_,
                                 &vcm,
                                 wallCycleCounters_,
@@ -1811,8 +1779,8 @@ void LegacySimulator::do_md()
                 if (!EI_VV(ir->eI) && bStopCM)
                 {
                     process_and_stopcm_grp(
-                            fpLog_, &vcm, *md, makeArrayRef(state_->x), makeArrayRef(state_->v));
-                    inc_nrnb(nrnb_, eNR_STOPCM, md->homenr);
+                            fpLog_, &vcm, *mdAtoms_, makeArrayRef(state_->x), makeArrayRef(state_->v));
+                    inc_nrnb(nrnb_, eNR_STOPCM, mdAtoms_->numHomeAtoms);
 
                     // TODO: The special case of removing CM motion should be dealt more gracefully
                     if (useGpuForUpdate)
@@ -1859,8 +1827,8 @@ void LegacySimulator::do_md()
                                          ir->opts.nFreeze,
                                          ir->deform,
                                          ir->delta_t,
-                                         md->homenr,
-                                         md->cFREEZE,
+                                         mdAtoms_->numHomeAtoms,
+                                         mdAtoms_->cFREEZE,
                                          pres,
                                          force_vir,
                                          shake_vir,
@@ -1950,7 +1918,7 @@ void LegacySimulator::do_md()
                 energyOutput.addDataAtEnergyStep(outputDHDL,
                                                  bCalcEnerStep,
                                                  t,
-                                                 md->tmass,
+                                                 mdAtoms_->tmass,
                                                  enerd_,
                                                  ir->fepvals.get(),
                                                  lastbox,
@@ -2088,8 +2056,8 @@ void LegacySimulator::do_md()
                                 nrnb_,
                                 wallCycleCounters_,
                                 FALSE);
-            upd.updateAfterPartition(state_->numAtoms(), md->cFREEZE, md->cTC, md->cACC);
-            fr_->longRangeNonbondeds->updateAfterPartition(*md);
+            upd.updateAfterPartition(state_->numAtoms(), mdAtoms_->cFREEZE, mdAtoms_->cTC, mdAtoms_->cACC);
+            fr_->longRangeNonbondeds->updateAfterPartition(*mdAtoms_);
             if (runScheduleWork_->stepWork.haveGpuPmeOnThisRank)
             {
                 pme_gpu_prepare_computation(fr_->pmedata.get(),

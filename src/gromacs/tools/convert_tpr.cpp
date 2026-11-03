@@ -53,7 +53,6 @@
 #include "gromacs/fileio/tpxio.h"
 #include "gromacs/fileio/trrio.h"
 #include "gromacs/gmxpreprocess/gen_maxwell_velocities.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/mdtypes/state.h"
@@ -73,6 +72,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/listoflists.h"
 #include "gromacs/utility/logger.h"
@@ -85,7 +85,6 @@
 namespace gmx
 {
 class CommandLineModuleSettings;
-} // namespace gmx
 
 static void rangeCheck(int numberInIndexFile, int maxAtomNumber)
 {
@@ -125,15 +124,15 @@ static std::vector<int> invind(int gnx, int natoms, int index[])
     return inv;
 }
 
-static gmx::ListOfLists<int> reduce_listoflists(gmx::ArrayRef<const int>     invindex,
-                                                const std::vector<bool>&     bKeep,
-                                                const gmx::ListOfLists<int>& src,
-                                                const char*                  name)
+static ListOfLists<int> reduce_listoflists(ArrayRef<const int>      invindex,
+                                           const std::vector<bool>& bKeep,
+                                           const ListOfLists<int>&  src,
+                                           const char*              name)
 {
-    gmx::ListOfLists<int> lists;
+    ListOfLists<int> lists;
 
     std::vector<int> exclusionsForAtom;
-    for (gmx::Index i = 0; i < src.ssize(); i++)
+    for (Index i = 0; i < src.ssize(); i++)
     {
         if (bKeep[i])
         {
@@ -216,7 +215,7 @@ static void reduce_atom(int gnx, const int index[], t_atom atom[], char*** atomn
     sfree(rinfo);
 }
 
-static void reduce_ilist(gmx::ArrayRef<const int> invindex,
+static void reduce_ilist(ArrayRef<const int>      invindex,
                          const std::vector<bool>& bKeep,
                          InteractionList*         il,
                          int                      nratoms,
@@ -268,7 +267,7 @@ static void reduce_topology_x(int gnx, int index[], gmx_mtop_t* mtop, t_state* s
     }
     reduce_atom(gnx, index, atoms.atom, atoms.atomname, &(atoms.nres), atoms.resinfo);
 
-    for (const auto i : gmx::EnumerationWrapper<InteractionFunction>{})
+    for (const auto i : EnumerationWrapper<InteractionFunction>{})
     {
         reduce_ilist(invindex,
                      bKeep,
@@ -283,7 +282,7 @@ static void reduce_topology_x(int gnx, int index[], gmx_mtop_t* mtop, t_state* s
     mtop->moltype[0].name  = mtop->name;
     mtop->moltype[0].atoms = atoms;
     mtop->moltype[0].excls = reduce_listoflists(invindex, bKeep, top.excls, "excls");
-    for (const auto i : gmx::EnumerationWrapper<InteractionFunction>{})
+    for (const auto i : EnumerationWrapper<InteractionFunction>{})
     {
         mtop->moltype[0].ilist[i] = std::move(top.idef.il[i]);
     }
@@ -307,9 +306,6 @@ static void print_runtime_info(t_inputrec* ir)
     printf("  Run end time                  %22g ps  \n\n",
            (ir->init_step + ir->nsteps) * ir->delta_t + ir->init_t);
 }
-
-namespace gmx
-{
 
 namespace
 {
@@ -365,12 +361,8 @@ void ConvertTpr::initOptions(IOptionsContainer* options, ICommandLineOptionsModu
         "tpx file, which is useful when you want to remove the solvent from",
         "your [REF].tpx[ref] file, or when you want to make e.g. a pure C[GRK]alpha[grk] ",
         "[REF].tpx[ref] file.",
-        "Note that you may need to use [TT]-nsteps -1[tt] (or similar) to get",
-        "this to work.",
-        "[BB]WARNING: this [REF].tpx[ref] file is not fully functional[bb].[PAR]",
-        "[BB]3.[bb] by setting the charges of a specified group",
-        "to zero. This is useful when doing free energy estimates",
-        "using the LIE (Linear Interaction Energy) method."
+        "[BB]WARNING: this [REF].tpx[ref] file is not fully functional[bb][PAR]",
+        "[BB]3.[bb] by generating new velocities at a given temperature",
     };
 
     settings->setHelpText(desc);
@@ -456,7 +448,7 @@ int ConvertTpr::run()
         }
         if (velocitySeed_ == -1)
         {
-            velocitySeed_ = static_cast<int>(gmx::makeRandomSeed());
+            velocitySeed_ = static_cast<int>(makeRandomSeed());
             printf("Using random seed %d for generating velocities", velocitySeed_);
         }
         if (!(state.flags() & enumValueToBitMask(StateEntry::V)))
@@ -508,7 +500,7 @@ int ConvertTpr::run()
         else if (extendTimeIsSet_)
         {
             printf("Extending remaining runtime by %g ps\n", extendTime_);
-            ir->nsteps += gmx::roundToInt64(extendTime_ / ir->delta_t);
+            ir->nsteps += roundToInt64(extendTime_ / ir->delta_t);
         }
         else if (runToMaxTimeIsSet_)
         {
@@ -526,7 +518,7 @@ int ConvertTpr::run()
             {
                 printf("Extending remaining runtime to %g ps\n", runToMaxTime_);
             }
-            ir->nsteps = gmx::roundToInt64((runToMaxTime_ - inputTimeAtStartOfRun) / ir->delta_t);
+            ir->nsteps = roundToInt64((runToMaxTime_ - inputTimeAtStartOfRun) / ir->delta_t);
         }
 
         printf("\nOutput file:\n");

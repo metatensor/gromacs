@@ -70,9 +70,7 @@
 #include "gromacs/gmxlib/network.h"
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/gpu_utils/gpu_utils.h"
-#include "gromacs/listed_forces/listed_forces.h"
 #include "gromacs/listed_forces/listed_forces_gpu.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdlib/checkpointhandler.h"
 #include "gromacs/mdlib/constr.h"
@@ -85,7 +83,6 @@
 #include "gromacs/mdlib/forcerec.h"
 #include "gromacs/mdlib/freeenergyparameters.h"
 #include "gromacs/mdlib/md_support.h"
-#include "gromacs/mdlib/mdatoms.h"
 #include "gromacs/mdlib/mdoutf.h"
 #include "gromacs/mdlib/membed.h"
 #include "gromacs/mdlib/resethandler.h"
@@ -112,7 +109,7 @@
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/interaction_const.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
+#include "gromacs/mdtypes/mdatoms.h"
 #include "gromacs/mdtypes/mdrunoptions.h"
 #include "gromacs/mdtypes/multipletimestepping.h"
 #include "gromacs/mdtypes/observableshistory.h"
@@ -139,6 +136,7 @@
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/real.h"
@@ -224,7 +222,7 @@ void LegacySimulator::do_rerun()
                     "e.g. gmx rerun -f.");
 
     if (ir->efep != FreeEnergyPerturbationType::No
-        && (mdAtoms_->mdatoms()->nMassPerturbed > 0 || (constr_ && constr_->havePerturbedConstraints())))
+        && (mdAtoms_->nMassPerturbed > 0 || (constr_ && constr_->havePerturbedConstraints())))
     {
         gmx_fatal(FARGS,
                   "Perturbed masses or constraints are not supported by rerun. "
@@ -381,6 +379,7 @@ void LegacySimulator::do_rerun()
                                   top_,
                                   fr_,
                                   &f,
+                                  state_->lambda[FreeEnergyPerturbationCouplingType::Mass],
                                   mdAtoms_,
                                   constr_,
                                   virtualSites_,
@@ -389,15 +388,12 @@ void LegacySimulator::do_rerun()
                                   wallCycleCounters_);
     }
 
-    auto* mdatoms = mdAtoms_->mdatoms();
-    fr_->longRangeNonbondeds->updateAfterPartition(*mdatoms);
+    fr_->longRangeNonbondeds->updateAfterPartition(*mdAtoms_);
 
     // NOTE: The global state is no longer used at this point.
     // But state_global is still used as temporary storage space for writing
     // the global state to file and potentially for replica exchange.
     // (Global topology should persist.)
-
-    update_mdatoms(mdatoms, state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
 
     if (ir->efep != FreeEnergyPerturbationType::No && ir->fepvals->nstdhdl != 0)
     {
@@ -418,7 +414,7 @@ void LegacySimulator::do_rerun()
                         makeConstArrayRef(state_->x),
                         makeConstArrayRef(state_->v),
                         state_->box,
-                        mdatoms,
+                        *mdAtoms_,
                         nrnb_,
                         vcm,
                         nullptr,
@@ -630,12 +626,12 @@ void LegacySimulator::do_rerun()
             EnergyOutput::printHeader(fpLog_, step, t); /* can we improve the information printed here? */
         }
 
-        if (ir->efep != FreeEnergyPerturbationType::No)
+        if (ir->efep == FreeEnergyPerturbationType::SlowGrowth)
         {
-            update_mdatoms(mdatoms, state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
+            mdAtoms_->updateForMassLambda(state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
         }
 
-        fr_->longRangeNonbondeds->updateAfterPartition(*mdatoms);
+        fr_->longRangeNonbondeds->updateAfterPartition(*mdAtoms_);
 
         force_flags = (GMX_FORCE_STATECHANGED | GMX_FORCE_ALLFORCES
                        | GMX_FORCE_VIRIAL
@@ -654,7 +650,7 @@ void LegacySimulator::do_rerun()
                 fr_->listedForcesGpu->updateHaveInteractions(top_->idef);
             }
             runScheduleWork_->domainWork = setupDomainLifetimeWorkload(
-                    *ir, *fr_, pullWork_, ed, *mdatoms, runScheduleWork_->simulationWork);
+                    *ir, *fr_, pullWork_, ed, mdAtoms_->nPerturbed > 0, runScheduleWork_->simulationWork);
         }
 
 
@@ -690,7 +686,7 @@ void LegacySimulator::do_rerun()
                                 &state_->hist,
                                 &f.view(),
                                 force_vir,
-                                *mdatoms,
+                                *mdAtoms_,
                                 fr_->longRangeNonbondeds.get(),
                                 nrnb_,
                                 wallCycleCounters_,
@@ -731,7 +727,7 @@ void LegacySimulator::do_rerun()
                          &state_->hist,
                          &f.view(),
                          force_vir,
-                         mdatoms,
+                         *mdAtoms_,
                          enerd_,
                          state_->lambda,
                          fr_,
@@ -776,6 +772,7 @@ void LegacySimulator::do_rerun()
                                      energyOutput,
                                      nullptr,
                                      f.view().force(),
+                                     virtualSites_,
                                      isCheckpointingStep,
                                      doRerun,
                                      isLastStep,
@@ -799,7 +796,7 @@ void LegacySimulator::do_rerun()
                             makeConstArrayRef(state_->x),
                             makeConstArrayRef(state_->v),
                             state_->box,
-                            mdatoms,
+                            *mdAtoms_,
                             nrnb_,
                             vcm,
                             wallCycleCounters_,
@@ -829,7 +826,7 @@ void LegacySimulator::do_rerun()
             energyOutput.addDataAtEnergyStep(doFreeEnergyPerturbation,
                                              bCalcEnerStep,
                                              t,
-                                             mdatoms->tmass,
+                                             mdAtoms_->tmass,
                                              enerd_,
                                              ir->fepvals.get(),
                                              state_->box,
@@ -942,7 +939,10 @@ void LegacySimulator::do_rerun()
     if (isMainRank)
     {
         close_trx(status);
+        done_frame(&rerun_fr);
     }
+
+    global_stat_destroy(gstat);
 
     if (runScheduleWork_->simulationWork.haveSeparatePmeRank)
     {

@@ -78,8 +78,8 @@
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/gmxassert.h"
 
+#include "bonded_threading.h"
 #include "listed_internal.h"
-#include "manage_threading.h"
 #include "utilities.h"
 
 ListedForces::ListedForces(const gmx_ffparams_t&      ffparams,
@@ -89,13 +89,13 @@ ListedForces::ListedForces(const gmx_ffparams_t&      ffparams,
                            const InteractionSelection interactionSelection,
                            const gmx_domdec_t*        domDec,
                            const gmx_multisim_t*      commMultiSim,
-                           FILE*                      fplog,
+                           const gmx::MDLogger&       mdlog,
                            gmx_wallcycle*             wcycle,
                            const t_forcerec&          fr,
                            t_nrnb*                    nrnb) :
     numEnergyGroups_(numEnergyGroups),
     idefSelection_(ffparams),
-    threading_(std::make_unique<bonded_threading_t>(numThreads, numEnergyGroups, numComGroups, fplog)),
+    threading_(std::make_unique<gmx::BondedThreading>(numThreads, numEnergyGroups, numComGroups, mdlog)),
     interactionSelection_(interactionSelection),
     foreignEnergyGroups_(std::make_unique<gmx_grppairener_t>(numEnergyGroups)),
     domDec_(domDec),
@@ -124,21 +124,21 @@ static void selectInteractions(InteractionDefinitions*                   idef,
     const bool selectRest =
             interactionSelection.test(static_cast<int>(ListedForces::InteractionGroup::Rest));
 
-    for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
+    for (const auto functionType : gmx::EnumerationWrapper<InteractionFunction>{})
     {
-        const t_interaction_function& ifunc = interaction_function[ftype];
-        if (ifunc.flags & IF_BOND)
+        const t_interaction_function& ifunc = interaction_function[functionType];
+        if (ifunc.categories & sc_ifcBondedForce)
         {
             bool assign = false;
-            if (ifunc.flags & IF_PAIR)
+            if (ifunc.categories & sc_ifcPair)
             {
                 assign = selectPairs;
             }
-            else if (ifunc.flags & IF_DIHEDRAL)
+            else if (ifunc.categories & sc_ifcDihedral)
             {
                 assign = selectDihedrals;
             }
-            else if (ifunc.flags & IF_ATYPE)
+            else if (ifunc.categories & sc_ifcAngle)
             {
                 assign = selectAngles;
             }
@@ -148,11 +148,11 @@ static void selectInteractions(InteractionDefinitions*                   idef,
             }
             if (assign)
             {
-                idef->il[ftype] = idefSrc.il[ftype];
+                idef->il[functionType] = idefSrc.il[functionType];
             }
             else
             {
-                idef->il[ftype].clear();
+                idef->il[functionType].clear();
             }
         }
     }
@@ -188,7 +188,7 @@ void ListedForces::setup(const InteractionDefinitions&             domainIdef,
         }
     }
 
-    setup_bonded_threading(threading_.get(), numAtomsForce, useGpu, *idef_);
+    threading_->updateAfterPartition(numAtomsForce, useGpu, *idef_);
 
     if (idef_->ilsort == ilsortFE_SORTED)
     {
@@ -204,13 +204,13 @@ namespace
 
 using gmx::ArrayRef;
 
-/*! \brief Return true if ftype is an explicit pair-listed LJ or
+/*! \brief Return true if functionType is an explicit pair-listed LJ or
  * COULOMB interaction type: bonded LJ (usually 1-4), or special
  * listed non-bonded for FEP. */
-bool isPairInteraction(InteractionFunction ftype)
+bool isPairInteraction(InteractionFunction functionType)
 {
-    return ((ftype) >= InteractionFunction::LennardJones14
-            && (ftype) <= InteractionFunction::LennardJonesCoulombNonBondedPairs);
+    return ((functionType) >= InteractionFunction::LennardJones14
+            && (functionType) <= InteractionFunction::LennardJonesCoulombNonBondedPairs);
 }
 
 /*! \brief Returns the bonded kernel flavor
@@ -254,11 +254,11 @@ BondedKernelFlavor selectBondedKernelFlavor(const gmx::StepWorkload& stepWork,
 } // namespace
 
 real ListedForces::calcOneBond(int                                 thread,
-                               InteractionFunction                 ftype,
+                               InteractionFunction                 functionType,
                                const InteractionDefinitions&       idef,
                                gmx::ArrayRef<const int>            iatoms,
                                const bool                          havePerturbedInteractions,
-                               const WorkDivision&                 workDivision,
+                               const gmx::WorkDivision&            workDivision,
                                const rvec                          x[],
                                rvec4                               f[],
                                rvec                                fshift[],
@@ -281,7 +281,7 @@ real ListedForces::calcOneBond(int                                 thread,
     BondedKernelFlavor flavor =
             selectBondedKernelFlavor(stepWork, fr_.use_simd_kernels, havePerturbedInteractions);
     FreeEnergyPerturbationCouplingType efptFTYPE;
-    if (IS_RESTRAINT_TYPE(ftype))
+    if (IS_RESTRAINT_TYPE(functionType))
     {
         efptFTYPE = FreeEnergyPerturbationCouplingType::Restraint;
     }
@@ -290,22 +290,22 @@ real ListedForces::calcOneBond(int                                 thread,
         efptFTYPE = FreeEnergyPerturbationCouplingType::Bonded;
     }
 
-    const int nat1   = interaction_function[ftype].nratoms + 1;
+    const int nat1   = interaction_function[functionType].nratoms + 1;
     const int nbonds = iatoms.ssize() / nat1;
 
     GMX_ASSERT(fr_.listedForcesGpu != nullptr
-                       || workDivision.end(static_cast<int>(ftype)) == iatoms.ssize(),
+                       || workDivision.end(static_cast<int>(functionType)) == iatoms.ssize(),
                "The thread division should match the topology");
 
-    const int nb0 = workDivision.bound(ftype, thread);
-    const int nbn = workDivision.bound(ftype, thread + 1) - nb0;
+    const int nb0 = workDivision.bound(functionType, thread);
+    const int nbn = workDivision.bound(functionType, thread + 1) - nb0;
 
     ArrayRef<const t_iparams> iparams = idef.iparams;
 
     real v = 0;
-    if (!isPairInteraction(ftype))
+    if (!isPairInteraction(functionType))
     {
-        if (ftype == InteractionFunction::DihedralEnergyCorrectionMap)
+        if (functionType == InteractionFunction::DihedralEnergyCorrectionMap)
         {
             /* TODO The execution time for CMAP dihedrals might be
                nice to account to its own subtimer, but first
@@ -329,7 +329,7 @@ real ListedForces::calcOneBond(int                                 thread,
         }
         else
         {
-            v = calculateSimpleBond(ftype,
+            v = calculateSimpleBond(functionType,
                                     nbn,
                                     iatoms.data() + nb0,
                                     iparams.data(),
@@ -352,7 +352,7 @@ real ListedForces::calcOneBond(int                                 thread,
         /* TODO The execution time for pairs might be nice to account
            to its own subtimer, but first wallcycle needs to be
            extended to support calling from multiple threads. */
-        do_pairs(ftype,
+        do_pairs(functionType,
                  nbn,
                  iatoms.data() + nb0,
                  iparams.data(),
@@ -376,7 +376,7 @@ real ListedForces::calcOneBond(int                                 thread,
 
     if (thread == 0)
     {
-        inc_nrnb(nrnb_, nrnbIndex(static_cast<int>(ftype)), nbonds);
+        inc_nrnb(nrnb_, nrnbIndex(static_cast<int>(functionType)), nbonds);
     }
 
     return v;
@@ -392,12 +392,12 @@ void ListedForces::calcPositionRestraintForces(const InteractionDefinitions& ide
                                                gmx::ArrayRef<const real> lambda,
                                                gmx::ArrayRef<real>       dvdl)
 {
-#pragma omp parallel for num_threads(threading_->nthreads) schedule(static)
-    for (int thread = 0; thread < threading_->nthreads; thread++)
+#pragma omp parallel for num_threads(threading_->numThreads_) schedule(static)
+    for (int thread = 0; thread < threading_->numThreads_; thread++)
     {
         try
         {
-            auto& threadBuffer = threading_->threadedForceBuffer.threadForceBuffer(thread);
+            auto& threadBuffer = threading_->threadedForceBuffers_.threadForceBuffer(thread);
 
             auto& comBuffers = threading_->centersOfMassScaledBuffers_[thread];
 
@@ -415,9 +415,9 @@ void ListedForces::calcPositionRestraintForces(const InteractionDefinitions& ide
 
             if (!idef.il[InteractionFunction::PositionRestraints].empty())
             {
-                int bound0 = threading_->workDivision.bound(InteractionFunction::PositionRestraints, thread);
-                int bound1 = threading_->workDivision.bound(InteractionFunction::PositionRestraints,
-                                                            thread + 1);
+                int bound0 = threading_->workDivision_.bound(InteractionFunction::PositionRestraints, thread);
+                int bound1 = threading_->workDivision_.bound(
+                        InteractionFunction::PositionRestraints, thread + 1);
                 auto iatoms = gmx::arrayRefFromArray(
                         idef.il[InteractionFunction::PositionRestraints].iatoms.data() + bound0,
                         bound1 - bound0);
@@ -439,9 +439,9 @@ void ListedForces::calcPositionRestraintForces(const InteractionDefinitions& ide
 
             if (!idef.il[InteractionFunction::FlatBottomedPositionRestraints].empty())
             {
-                int bound0 = threading_->workDivision.bound(
+                int bound0 = threading_->workDivision_.bound(
                         InteractionFunction::FlatBottomedPositionRestraints, thread);
-                int bound1 = threading_->workDivision.bound(
+                int bound1 = threading_->workDivision_.bound(
                         InteractionFunction::FlatBottomedPositionRestraints, thread + 1);
                 auto iatoms = gmx::arrayRefFromArray(
                         idef.il[InteractionFunction::FlatBottomedPositionRestraints].iatoms.data() + bound0,
@@ -481,12 +481,12 @@ void ListedForces::calcBondedForces(const InteractionDefinitions& idef,
                                     const gmx::StepWorkload&            stepWork,
                                     int*                                global_atom_index)
 {
-#pragma omp parallel for num_threads(threading_->nthreads) schedule(static)
-    for (int thread = 0; thread < threading_->nthreads; thread++)
+#pragma omp parallel for num_threads(threading_->numThreads_) schedule(static)
+    for (int thread = 0; thread < threading_->numThreads_; thread++)
     {
         try
         {
-            auto& threadBuffer = threading_->threadedForceBuffer.threadForceBuffer(thread);
+            auto& threadBuffer = threading_->threadedForceBuffers_.threadForceBuffer(thread);
             /* thread stuff */
             rvec*                                             fshift;
             gmx::ArrayRef<real>                               dvdlt;
@@ -518,21 +518,22 @@ void ListedForces::calcBondedForces(const InteractionDefinitions& idef,
                 dvdlt  = threadBuffer.dvdl();
             }
             /* Loop over all bonded force types to calculate the bonded forces */
-            for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
+            for (const auto functionType : gmx::EnumerationWrapper<InteractionFunction>{})
             {
-                const InteractionList& ilist = idef.il[ftype];
-                if (!ilist.empty() && ftype_is_bonded_potential(ftype))
+                const InteractionList& ilist = idef.il[functionType];
+                if (!ilist.empty() && functionTypeIsBondedPotential(functionType))
                 {
                     ArrayRef<const int> iatoms = gmx::makeConstArrayRef(ilist.iatoms);
                     const bool          havePerturbedInteractions =
                             (idef.ilsort == ilsortFE_SORTED
-                             && idef.numNonperturbedInteractions[ftype] < idef.il[ftype].size());
+                             && idef.numNonperturbedInteractions[functionType]
+                                        < idef.il[functionType].size());
                     real v = calcOneBond(thread,
-                                         ftype,
+                                         functionType,
                                          idef,
                                          iatoms,
                                          havePerturbedInteractions,
-                                         threading_->workDivision,
+                                         threading_->workDivision_,
                                          x,
                                          ft,
                                          fshift,
@@ -548,7 +549,7 @@ void ListedForces::calcBondedForces(const InteractionDefinitions& idef,
                                          fcd,
                                          stepWork,
                                          global_atom_index);
-                    (*epot)[ftype] += v;
+                    (*epot)[functionType] += v;
                 }
             }
         }
@@ -567,7 +568,7 @@ bool ListedForces::haveRestraints(const t_fcdata& fcdata) const
 
 bool ListedForces::haveCpuBondeds() const
 {
-    return threading_->haveBondeds;
+    return threading_->haveBondeds_;
 }
 
 bool ListedForces::haveCpuListedForces(const t_fcdata& fcdata) const
@@ -591,7 +592,7 @@ void ListedForces::calcListed(const InteractionDefinitions&       idef,
                               int*                                global_atom_index,
                               const gmx::StepWorkload&            stepWork)
 {
-    if (threading_->haveBondeds)
+    if (threading_->haveBondeds_)
     {
         gmx::ForceWithShiftForces& forceWithShiftForces = forceOutputs->forceWithShiftForces();
 
@@ -618,7 +619,7 @@ void ListedForces::calcListed(const InteractionDefinitions&       idef,
         wallcycle_sub_stop(wcycle_, WallCycleSubCounter::Listed);
 
         wallcycle_sub_start(wcycle_, WallCycleSubCounter::ListedBufOps);
-        threading_->threadedForceBuffer.reduce(
+        threading_->threadedForceBuffers_.reduce(
                 &forceWithShiftForces, &enerd->term, &enerd->grpp, dvdl, stepWork, 1);
 
         if (stepWork.computeDhdl)
@@ -657,7 +658,7 @@ void ListedForces::calcListedLambda(const InteractionDefinitions& idef,
 {
     GMX_ASSERT(idef.ilsort == ilsortFE_SORTED, "Must have sorted perturbed interactions to the end");
 
-    WorkDivision& workDivision = threading_->foreignLambdaWorkDivision;
+    gmx::WorkDivision& workDivision = threading_->foreignLambdaWorkDivision_;
 
     const t_pbc* pbc_null;
     if (fr_.bMolPBC)
@@ -678,26 +679,26 @@ void ListedForces::calcListedLambda(const InteractionDefinitions& idef,
     rvec*  fshift = as_rvec_array(shiftForceBufferLambda.data());
 
     /* Loop over all bonded force types to calculate the bonded energies */
-    for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
+    for (const auto functionType : gmx::EnumerationWrapper<InteractionFunction>{})
     {
-        if (ftype_is_bonded_potential(ftype))
+        if (functionTypeIsBondedPotential(functionType))
         {
-            const InteractionList& ilist = idef.il[ftype];
+            const InteractionList& ilist = idef.il[functionType];
             /* Create a temporary iatom list with only perturbed interactions */
-            const int           numNonperturbed = idef.numNonperturbedInteractions[ftype];
+            const int           numNonperturbed = idef.numNonperturbedInteractions[functionType];
             ArrayRef<const int> iatomsPerturbed = gmx::constArrayRefFromArray(
                     ilist.iatoms.data() + numNonperturbed, ilist.size() - numNonperturbed);
             if (!iatomsPerturbed.empty())
             {
                 /* Set the work range of thread 0 to the perturbed bondeds */
-                workDivision.setBound(ftype, 0, 0);
-                workDivision.setBound(ftype, 1, iatomsPerturbed.ssize());
+                workDivision.setBound(functionType, 0, 0);
+                workDivision.setBound(functionType, 1, iatomsPerturbed.ssize());
 
                 gmx::StepWorkload tempFlags;
                 tempFlags.computeEnergy              = true;
                 const bool havePerturbedInteractions = true;
                 real       v                         = calcOneBond(0,
-                                     ftype,
+                                     functionType,
                                      idef,
                                      iatomsPerturbed,
                                      havePerturbedInteractions,
@@ -717,7 +718,7 @@ void ListedForces::calcListedLambda(const InteractionDefinitions& idef,
                                      fcd,
                                      tempFlags,
                                      global_atom_index);
-                epot[ftype] += v;
+                epot[functionType] += v;
             }
         }
     }
@@ -790,7 +791,7 @@ void ListedForces::calculate(const matrix                              box,
             {
                 forceOutputs->forceWithVirial().addVirialContribution(diagonalVirial);
 
-                threading_->threadedForceBuffer.reduce(
+                threading_->threadedForceBuffers_.reduce(
                         &forceOutputs->forceWithVirial(), &enerd->term, &enerd->grpp, dvdl, stepWork, 1);
 
                 if (stepWork.computeDhdl)

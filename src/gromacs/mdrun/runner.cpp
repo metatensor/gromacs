@@ -96,10 +96,8 @@
 #include "gromacs/hardware/printhardware.h"
 #include "gromacs/imd/imd.h"
 #include "gromacs/listed_forces/disre.h"
-#include "gromacs/listed_forces/listed_forces.h"
 #include "gromacs/listed_forces/listed_forces_gpu.h"
 #include "gromacs/listed_forces/orires.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdlib/boxdeformation.h"
 #include "gromacs/mdlib/broadcaststructs.h"
@@ -113,7 +111,6 @@
 #include "gromacs/mdlib/gpuforcereduction.h"
 #include "gromacs/mdlib/makeconstraints.h"
 #include "gromacs/mdlib/md_support.h"
-#include "gromacs/mdlib/mdatoms.h"
 #include "gromacs/mdlib/mdgraph_gpu.h"
 #include "gromacs/mdlib/sighandler.h"
 #include "gromacs/mdlib/stophandler.h"
@@ -143,7 +140,7 @@
 #include "gromacs/mdtypes/interaction_const.h"
 #include "gromacs/mdtypes/locality.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
+#include "gromacs/mdtypes/mdatoms.h"
 #include "gromacs/mdtypes/mdrunoptions.h"
 #include "gromacs/mdtypes/multipletimestepping.h"
 #include "gromacs/mdtypes/observableshistory.h"
@@ -186,6 +183,7 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/filestream.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/gmxmpi.h"
 #include "gromacs/utility/keyvaluetree.h"
@@ -1611,6 +1609,8 @@ int Mdrunner::mdrunner()
     // so this boolean is sufficient on all ranks to determine whether separate PME ranks are used,
     // but this will no longer be the case if cr->duty is changed for !usingPme(fr->ic->eeltype).
     const bool haveSeparatePmeRank = (thisRankHasPPDuty(cr->dd) != thisRankHasPmeDuty(cr->dd));
+    // PME-only ranks don't call makeVirtualSitesHandler, so we count sc_ifcVirtualSite to have consistent simulationWork
+    const bool haveVirtualSites    = gmx_mtop_interaction_count(mtop, sc_ifcVirtualSite) > 0;
     runScheduleWork.simulationWork = createSimulationWorkload(
             mdlog,
             *inputrec,
@@ -1621,6 +1621,7 @@ int Mdrunner::mdrunner()
             haveFillerParticlesInLocalState,
             havePPDomainDecomposition(cr->dd),
             haveSeparatePmeRank,
+            haveVirtualSites,
             useGpuForNonbonded,
             useGpuForNonbondedFE,
             pmeRunMode,
@@ -1956,6 +1957,7 @@ int Mdrunner::mdrunner()
                 *hwinfo_,
                 runScheduleWork.simulationWork.useGpuNonbonded,
                 runScheduleWork.simulationWork.useGpuNonbondedFE,
+                runScheduleWork.simulationWork.useGpuUpdate,
                 deviceStreamManager.get(),
                 mtop,
                 runScheduleWork.simulationWork.haveFillerParticlesInLocalState,
@@ -1990,9 +1992,17 @@ int Mdrunner::mdrunner()
 
         /* Initialize the mdAtoms structure.
          * mdAtoms is not filled with atom data,
-         * as this can not be done now with domain decomposition.
+         * as this can not be done yet with domain decomposition.
          */
-        mdAtoms = makeMDAtoms(fplog, mtop, *inputrec, thisRankHasPmeGpuTask, deviceStreamManager.get());
+        mdAtoms = std::make_unique<MDAtoms>(
+                mtop, *inputrec, thisRankHasPmeGpuTask, useGpuForUpdate, deviceStreamManager.get());
+        if (fplog && inputrec->efep != FreeEnergyPerturbationType::No)
+        {
+            fprintf(fplog,
+                    "There are %d atoms and %d charges for free energy perturbation\n",
+                    mdAtoms->nPerturbed,
+                    mdAtoms->nChargePerturbed);
+        }
         if (globalState && thisRankHasPmeGpuTask)
         {
             // The pinning of coordinates in the global state object works, because we only use
@@ -2006,6 +2016,9 @@ int Mdrunner::mdrunner()
         /* Initialize the virtual site communication */
         vsite = makeVirtualSitesHandler(
                 mtop, cr->dd, fr->pbcType, updateGroups.updateGroupingPerMoleculeType());
+        GMX_RELEASE_ASSERT(
+                (vsite != nullptr) == runScheduleWork.simulationWork.haveVirtualSites,
+                "The virtual-site handler should only exist when the system has virtual sites");
 
         calc_shifts(box, fr->shift_vec);
 
@@ -2080,12 +2093,12 @@ int Mdrunner::mdrunner()
     std::unique_ptr<gmx_pme_t> pmedata;
     if (usingPme(inputrec->coulombtype) || usingLJPme(inputrec->vdwtype))
     {
-        if (mdAtoms && mdAtoms->mdatoms())
+        if (mdAtoms)
         {
-            nChargePerturbed = mdAtoms->mdatoms()->nChargePerturbed;
+            nChargePerturbed = mdAtoms->nChargePerturbed;
             if (usingLJPme(inputrec->vdwtype))
             {
-                nTypePerturbed = mdAtoms->mdatoms()->nTypePerturbed;
+                nTypePerturbed = mdAtoms->nTypePerturbed;
             }
         }
         if (cr->dd && cr->dd->numPmeOnlyRanks > 0)
@@ -2252,7 +2265,8 @@ int Mdrunner::mdrunner()
             }
 
             /* Let makeConstraints know whether we have essential dynamics constraints. */
-            auto constr = makeConstraints(
+            const bool hasMassPerturbedAtoms = haveFepPerturbedMasses(mtop);
+            auto       constr                = makeConstraints(
                     mtop,
                     *inputrec,
                     pull_work,
@@ -2262,6 +2276,7 @@ int Mdrunner::mdrunner()
                     cr->commMyGroup,
                     cr->dd,
                     updateGroups.useUpdateGroups(),
+                    hasMassPerturbedAtoms,
                     ms,
                     &nrnb,
                     wcycle.get(),

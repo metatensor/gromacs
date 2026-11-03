@@ -72,10 +72,8 @@
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/gpu_utils/gpu_utils.h"
 #include "gromacs/gpu_utils/hostallocator.h"
-#include "gromacs/listed_forces/listed_forces.h"
 #include "gromacs/listed_forces/listed_forces_gpu.h"
 #include "gromacs/math/arrayrefwithpadding.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdlib/checkpointhandler.h"
 #include "gromacs/mdlib/constr.h"
@@ -88,7 +86,6 @@
 #include "gromacs/mdlib/forcerec.h"
 #include "gromacs/mdlib/freeenergyparameters.h"
 #include "gromacs/mdlib/md_support.h"
-#include "gromacs/mdlib/mdatoms.h"
 #include "gromacs/mdlib/mdoutf.h"
 #include "gromacs/mdlib/membed.h"
 #include "gromacs/mdlib/resethandler.h"
@@ -116,7 +113,7 @@
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/interaction_const.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
+#include "gromacs/mdtypes/mdatoms.h"
 #include "gromacs/mdtypes/mdrunoptions.h"
 #include "gromacs/mdtypes/multipletimestepping.h"
 #include "gromacs/mdtypes/observableshistory.h"
@@ -141,6 +138,7 @@
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/vec.h"
@@ -337,6 +335,7 @@ void LegacySimulator::do_mimic()
                                   top_,
                                   fr_,
                                   &f,
+                                  state_->lambda[FreeEnergyPerturbationCouplingType::Mass],
                                   mdAtoms_,
                                   constr_,
                                   virtualSites_,
@@ -345,15 +344,12 @@ void LegacySimulator::do_mimic()
                                   wallCycleCounters_);
     }
 
-    auto* mdatoms = mdAtoms_->mdatoms();
-
     // NOTE: The global state is no longer used at this point.
     // But state_global is still used as temporary storage space for writing
     // the global state to file and potentially for replica exchange.
     // (Global topology should persist.)
 
-    update_mdatoms(mdatoms, state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
-    fr_->longRangeNonbondeds->updateAfterPartition(*mdatoms);
+    fr_->longRangeNonbondeds->updateAfterPartition(*mdAtoms_);
 
     if (ir->efep != FreeEnergyPerturbationType::No && ir->fepvals->nstdhdl != 0)
     {
@@ -374,7 +370,7 @@ void LegacySimulator::do_mimic()
                         makeConstArrayRef(state_->x),
                         makeConstArrayRef(state_->v),
                         state_->box,
-                        mdatoms,
+                        *mdAtoms_,
                         nrnb_,
                         vcm,
                         nullptr,
@@ -520,12 +516,12 @@ void LegacySimulator::do_mimic()
             EnergyOutput::printHeader(fpLog_, step, t); /* can we improve the information printed here? */
         }
 
-        if (ir->efep != FreeEnergyPerturbationType::No)
+        if (ir->efep == FreeEnergyPerturbationType::SlowGrowth)
         {
-            update_mdatoms(mdatoms, state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
+            mdAtoms_->updateForMassLambda(state_->lambda[FreeEnergyPerturbationCouplingType::Mass]);
         }
 
-        fr_->longRangeNonbondeds->updateAfterPartition(*mdatoms);
+        fr_->longRangeNonbondeds->updateAfterPartition(*mdAtoms_);
 
         force_flags = (GMX_FORCE_STATECHANGED | GMX_FORCE_ALLFORCES
                        | GMX_FORCE_VIRIAL
@@ -544,7 +540,7 @@ void LegacySimulator::do_mimic()
                 fr_->listedForcesGpu->updateHaveInteractions(top_->idef);
             }
             runScheduleWork_->domainWork = setupDomainLifetimeWorkload(
-                    *ir, *fr_, pullWork_, ed, *mdatoms, runScheduleWork_->simulationWork);
+                    *ir, *fr_, pullWork_, ed, mdAtoms_->nPerturbed > 0, runScheduleWork_->simulationWork);
         }
 
 
@@ -580,7 +576,7 @@ void LegacySimulator::do_mimic()
                                 &state_->hist,
                                 &f.view(),
                                 force_vir,
-                                *mdatoms,
+                                *mdAtoms_,
                                 fr_->longRangeNonbondeds.get(),
                                 nrnb_,
                                 wallCycleCounters_,
@@ -619,7 +615,7 @@ void LegacySimulator::do_mimic()
                      &state_->hist,
                      &f.view(),
                      force_vir,
-                     mdatoms,
+                     *mdAtoms_,
                      enerd_,
                      state_->lambda,
                      fr_,
@@ -655,6 +651,7 @@ void LegacySimulator::do_mimic()
                                      energyOutput,
                                      ekind_,
                                      f.view().force(),
+                                     virtualSites_,
                                      isCheckpointingStep,
                                      doRerun,
                                      isLastStep,
@@ -678,7 +675,7 @@ void LegacySimulator::do_mimic()
                             makeConstArrayRef(state_->x),
                             makeConstArrayRef(state_->v),
                             state_->box,
-                            mdatoms,
+                            *mdAtoms_,
                             nrnb_,
                             vcm,
                             wallCycleCounters_,
@@ -736,7 +733,7 @@ void LegacySimulator::do_mimic()
             energyOutput.addDataAtEnergyStep(doFreeEnergyPerturbation,
                                              bCalcEnerStep,
                                              t,
-                                             mdatoms->tmass,
+                                             mdAtoms_->tmass,
                                              enerd_,
                                              ir->fepvals.get(),
                                              state_->box,
@@ -822,6 +819,8 @@ void LegacySimulator::do_mimic()
     done_mdoutf(outf);
 
     done_shellfc(fpLog_, shellfc, step_rel);
+
+    global_stat_destroy(gstat);
 
     walltime_accounting_set_nsteps_done(wallTimeAccounting_, step_rel);
 }

@@ -95,10 +95,10 @@ static void calc_h2order(const char*             fn,
     rvec*        dip;    /* sum of dipoles, unnormalized */
     matrix       box;    /* box (3x3) */
     t_trxstatus* status;
-    real         t,          /* time from trajectory */
-            *sum,            /* sum of all cosines of dipoles, per slice */
-            *frame;          /* order over one frame */
-    int natoms,              /* nr. atoms in trj */
+    double       t;          /* time from trajectory */
+    real*        sum;        /* sum of all cosines of dipoles, per slice */
+    real*        frame;      /* order over one frame */
+    int          natoms,     /* nr. atoms in trj */
             i, j, slice = 0, /* current slice number */
             *count;          /* nr. of atoms in one slice */
     gmx_rmpbc_t gpbc = nullptr;
@@ -219,6 +219,7 @@ static void calc_h2order(const char*             fn,
 
     } while (read_next_x(oenv, status, &t, x0, box));
     /*********** done with status file **********/
+    close_trx(status);
 
     fprintf(stderr, "\nRead trajectory. Printing parameters to file\n");
     gmx_rmpbc_done(gpbc);
@@ -292,8 +293,8 @@ int gmx_h2order(int argc, char* argv[])
         "dipole and the axis from the center of mass to the oxygen is calculated",
         "instead of the angle between the dipole and a box axis."
     };
-    static const char* axisOption[axisNR + 1] = { nullptr, "Z", "Y", "X", nullptr };
-    static int         nslices                = 0; /* nr of slices defined       */
+    const char* axisOption[axisNR + 1] = { nullptr, "Z", "Y", "X", nullptr };
+    int         nslices                = 0; /* nr of slices defined       */
     // The struct that will hold the parsed user input
     t_pargs     pa[]   = { { "-d",
                              FALSE,

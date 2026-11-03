@@ -51,7 +51,6 @@
 #include "gromacs/gmxpreprocess/grompp_impl.h"
 #include "gromacs/gmxpreprocess/notset.h"
 #include "gromacs/gmxpreprocess/toputil.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdtypes/md_enums.h"
@@ -64,6 +63,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/real.h"
@@ -151,7 +151,7 @@ static int vsite_bond_nrcheck(InteractionFunction ftype)
 {
     int nrcheck;
 
-    if ((interaction_function[ftype].flags & (IF_BTYPE | IF_CONSTRAINT | IF_ATYPE))
+    if ((interaction_function[ftype].categories & (sc_ifcBType | sc_ifcConstraint | sc_ifcAngle))
         || (static_cast<InteractionFunction>(ftype) == InteractionFunction::ImproperDihedrals))
     {
         nrcheck = NRAL(ftype);
@@ -217,7 +217,8 @@ make_at2vsitebond(int natoms, EnumerationArray<InteractionFunction, Interactions
     snew(bVSI, natoms);
     for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
     {
-        if ((interaction_function[ftype].flags & IF_VSITE) && ftype != InteractionFunction::VirtualSiteN)
+        if ((interaction_function[ftype].categories & sc_ifcVirtualSite)
+            && ftype != InteractionFunction::VirtualSiteN)
         {
             for (int i = 0; (i < gmx::ssize(plist[ftype])); i++)
             {
@@ -262,7 +263,8 @@ make_at2vsitecon(int natoms, EnumerationArray<InteractionFunction, InteractionsO
 
     for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
     {
-        if ((interaction_function[ftype].flags & IF_VSITE) && ftype != InteractionFunction::VirtualSiteN)
+        if ((interaction_function[ftype].categories & sc_ifcVirtualSite)
+            && ftype != InteractionFunction::VirtualSiteN)
         {
             for (int i = 0; (i < gmx::ssize(plist[ftype])); i++)
             {
@@ -277,7 +279,7 @@ make_at2vsitecon(int natoms, EnumerationArray<InteractionFunction, InteractionsO
 
     for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
     {
-        if (interaction_function[ftype].flags & IF_CONSTRAINT)
+        if (interaction_function[ftype].categories & sc_ifcConstraint)
         {
             for (int i = 0; (i < gmx::ssize(plist[ftype])); i++)
             {
@@ -804,7 +806,7 @@ int set_vsites(bool                                                       bVerbo
 
     for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
     {
-        if (interaction_function[ftype].flags & IF_VSITE)
+        if (interaction_function[ftype].categories & sc_ifcVirtualSite)
         {
             nvsite += plist[ftype].size();
 
@@ -864,11 +866,11 @@ int set_vsites(bool                                                       bVerbo
                             bERROR = calc_vsite3_param(
                                     atypes, &param, atoms, allVsiteBondeds.bonds, allVsiteBondeds.angles);
                             break;
-                        case InteractionFunction::VirtualSite3FlexibleDistance:
+                        case InteractionFunction::VirtualSite3FixedDistance:
                             bERROR = calc_vsite3fd_param(
                                     &param, allVsiteBondeds.bonds, allVsiteBondeds.angles);
                             break;
-                        case InteractionFunction::VirtualSite3FlexibleAngleDistance:
+                        case InteractionFunction::VirtualSite3FixedAngleDistance:
                             bERROR = calc_vsite3fad_param(
                                     &param, allVsiteBondeds.bonds, allVsiteBondeds.angles);
                             break;
@@ -876,11 +878,11 @@ int set_vsites(bool                                                       bVerbo
                             bERROR = calc_vsite3out_param(
                                     atypes, &param, atoms, allVsiteBondeds.bonds, allVsiteBondeds.angles);
                             break;
-                        case InteractionFunction::VirtualSite4FlexibleDistance:
+                        case InteractionFunction::VirtualSite4FixedDistance:
                             bERROR = calc_vsite4fd_param(
                                     &param, allVsiteBondeds.bonds, allVsiteBondeds.angles, logger);
                             break;
-                        case InteractionFunction::VirtualSite4FlexibleDistanceNormalization:
+                        case InteractionFunction::VirtualSite4FixedDistanceNormalization:
                             bERROR = calc_vsite4fdn_param(
                                     &param, allVsiteBondeds.bonds, allVsiteBondeds.angles, logger);
                             break;
@@ -903,7 +905,7 @@ int set_vsites(bool                                                       bVerbo
                 } /* if bSet */
                 i++;
             }
-        } /* if IF_VSITE */
+        } /* if sc_ifcVirtualSite */
     }
     return nvsite;
 }
@@ -921,7 +923,7 @@ void set_vsites_ptype(bool bVerbose, gmx_moltype_t* molt, const MDLogger& logger
     for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
     {
         InteractionList* il = &molt->ilist[ftype];
-        if (interaction_function[ftype].flags & IF_VSITE)
+        if (interaction_function[ftype].categories & sc_ifcVirtualSite)
         {
             const int           nra = interaction_function[ftype].nratoms;
             const int           nrd = il->size();
@@ -1017,10 +1019,9 @@ static void clean_vsite_bonds(EnumerationArray<InteractionFunction, Interactions
     bool                bKeep, bRemove, bAllFD;
     InteractionsOfType* ps;
 
-    if (static_cast<InteractionFunction>(cftype) == InteractionFunction::ConnectBonds)
-    {
-        return;
-    }
+    GMX_RELEASE_ASSERT(
+            cftype != InteractionFunction::ConnectBonds,
+            "Only regular sc_ifcBType bonds to virtual sites are considered for removal");
 
     ps         = &(plist[cftype]);
     nconverted = 0;
@@ -1049,13 +1050,14 @@ static void clean_vsite_bonds(EnumerationArray<InteractionFunction, Interactions
                 const InteractionFunction iftype = pindex[atom].value().functionType();
                 const int  interactionIndex      = pindex[atom].value().interactionIndex();
                 const bool bThisFD =
-                        ((iftype == InteractionFunction::VirtualSite3FlexibleDistance)
-                         || (iftype == InteractionFunction::VirtualSite3FlexibleAngleDistance)
-                         || (iftype == InteractionFunction::VirtualSite4FlexibleDistance)
-                         || (iftype == InteractionFunction::VirtualSite4FlexibleDistanceNormalization));
-                const bool bThisOUT = ((iftype == InteractionFunction::VirtualSite3Outside)
-                                       && ((interaction_function[cftype].flags & IF_CONSTRAINT) != 0U));
-                bAllFD              = bAllFD && bThisFD;
+                        ((iftype == InteractionFunction::VirtualSite3FixedDistance)
+                         || (iftype == InteractionFunction::VirtualSite3FixedAngleDistance)
+                         || (iftype == InteractionFunction::VirtualSite4FixedDistance)
+                         || (iftype == InteractionFunction::VirtualSite4FixedDistanceNormalization));
+                const bool bThisOUT =
+                        ((iftype == InteractionFunction::VirtualSite3Outside)
+                         && ((interaction_function[cftype].categories & sc_ifcConstraint) != 0U));
+                bAllFD = bAllFD && bThisFD;
                 if (bThisFD || bThisOUT)
                 {
                     oatom = atoms[1 - k]; /* the other atom */
@@ -1179,7 +1181,7 @@ static void clean_vsite_bonds(EnumerationArray<InteractionFunction, Interactions
                     bool bPresent = false;
                     for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
                     {
-                        if (interaction_function[ftype].flags & IF_CONSTRAINT)
+                        if (interaction_function[ftype].categories & sc_ifcConstraint)
                         {
                             for (auto entry = plist[ftype].interactionTypes.begin();
                                  (entry != plist[ftype].interactionTypes.end()) && !bPresent;
@@ -1282,7 +1284,7 @@ static void clean_vsite_angles(EnumerationArray<InteractionFunction, Interaction
                                    "Virtual-site atom mapping inconsistency in angles");
                 const InteractionFunction iftype = pindex[atom].value().functionType();
                 const int interactionIndex       = pindex[atom].value().interactionIndex();
-                bAll3FAD = bAll3FAD && (iftype == InteractionFunction::VirtualSite3FlexibleAngleDistance);
+                bAll3FAD = bAll3FAD && (iftype == InteractionFunction::VirtualSite3FixedAngleDistance);
                 if (nvsite == 1)
                 {
                     /* store construction atoms of first vsite */
@@ -1546,7 +1548,7 @@ void clean_vsite_bondeds(EnumerationArray<InteractionFunction, InteractionsOfTyp
     int                                             nvsite = 0;
     for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
     {
-        if (interaction_function[ftype].flags & IF_VSITE)
+        if (interaction_function[ftype].categories & sc_ifcVirtualSite)
         {
             nvsite += plist[ftype].size();
             int i = 0;
@@ -1598,7 +1600,8 @@ void clean_vsite_bondeds(EnumerationArray<InteractionFunction, InteractionsOfTyp
              * constructions with fixed distance (which is anyhow useless).
              * This will generate a fatal error in check_vsite_constraints.
              */
-            if ((interaction_function[ftype].flags & IF_VSITE) && ftype != InteractionFunction::VirtualSiteN)
+            if ((interaction_function[ftype].categories & sc_ifcVirtualSite)
+                && ftype != InteractionFunction::VirtualSiteN)
             {
                 for (Index interactionIndex = 0; interactionIndex < gmx::ssize(plist[ftype]);
                      interactionIndex++)
@@ -1612,14 +1615,14 @@ void clean_vsite_bondeds(EnumerationArray<InteractionFunction, InteractionsOfTyp
         /* remove interactions that include virtual sites */
         for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
         {
-            if (((interaction_function[ftype].flags & IF_BOND) && bRmVSiteBds)
-                || (interaction_function[ftype].flags & IF_CONSTRAINT))
+            if (((interaction_function[ftype].categories & sc_ifcBondedForce) && bRmVSiteBds)
+                || (interaction_function[ftype].categories & sc_ifcConstraint))
             {
-                if (interaction_function[ftype].flags & (IF_BTYPE | IF_CONSTRAINT))
+                if (interaction_function[ftype].categories & (sc_ifcBType | sc_ifcConstraint))
                 {
                     clean_vsite_bonds(plist, pindex, ftype, vsite_type, logger);
                 }
-                else if (interaction_function[ftype].flags & IF_ATYPE)
+                else if (interaction_function[ftype].categories & sc_ifcAngle)
                 {
                     clean_vsite_angles(plist, pindex, ftype, vsite_type, at2vc, logger);
                 }
@@ -1633,7 +1636,7 @@ void clean_vsite_bondeds(EnumerationArray<InteractionFunction, InteractionsOfTyp
         /* check that no remaining constraints include virtual sites */
         for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
         {
-            if (interaction_function[ftype].flags & IF_CONSTRAINT)
+            if (interaction_function[ftype].categories & sc_ifcConstraint)
             {
                 check_vsite_constraints(plist, ftype, vsite_type, logger);
             }

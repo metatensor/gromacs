@@ -63,8 +63,8 @@
 
 #include <gtest/gtest.h>
 
-// Currently FEP-on-GPU calculations are only implemented on CUDA platform
-#if GMX_GPU_CUDA
+// Currently FEP-on-GPU calculations are only implemented on CUDA and HIP platform
+#if GMX_GPU_CUDA || GMX_GPU_HIP
 #    include "gromacs/ewald/ewald_utils.h"
 #    include "gromacs/gpu_utils/device_stream_manager.h"
 #    include "gromacs/gpu_utils/devicebuffer.h"
@@ -82,12 +82,13 @@
 #    include "gromacs/mdtypes/forcerec.h"
 #    include "gromacs/mdtypes/interaction_const.h"
 #    include "gromacs/mdtypes/md_enums.h"
-#    include "gromacs/mdtypes/mdatom.h"
 #    include "gromacs/mdtypes/simulation_workload.h"
 #    include "gromacs/nbnxm/atomdata.h"
 #    include "gromacs/nbnxm/atompairlist.h"
 #    if GMX_GPU_CUDA
 #        include "gromacs/nbnxm/cuda/nbnxm_cuda_types.h"
+#    elif GMX_GPU_HIP
+#        include "gromacs/nbnxm/hip/nbnxm_hip_types.h"
 #    endif
 #    include "gromacs/nbnxm/gpu_data_mgmt.h"
 #    include "gromacs/nbnxm/gpu_types_common.h"
@@ -276,8 +277,10 @@ public:
                       InteractionModifiers   vdwMod)
     {
         icHelper_.initInteractionConst(coulType, vdwType, vdwMod);
-        nbfp_ = makeNonBondedParameterLists(idef.atnr, false, idef.iparams, false);
-        ljPmeC6Grid_ = makeLJPmeC6GridCorrectionParameters(idef.atnr, idef.iparams, LongRangeVdW::Geom);
+        const bool addFillerType = false;
+        nbfp_        = makeNonBondedParameterLists(idef.atnr, addFillerType, idef.iparams, false);
+        ljPmeC6Grid_ = makeLJPmeC6GridCorrectionParameters(
+                idef.atnr, addFillerType, idef.iparams, LongRangeVdW::Geom);
     }
 
     void setSoftcoreAlpha(const real scBeutlerAlphaOrGapsysLinpointScaling)

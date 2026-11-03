@@ -51,12 +51,12 @@
 #include "gromacs/gmxana/angle_correction.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/gmxana/gstat.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/topology/index.h"
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/pleasecite.h"
 #include "gromacs/utility/real.h"
@@ -114,7 +114,7 @@ static void dump_dih_trr(int nframes, int nangles, real** dih, const char* fn, r
 
 int gmx_g_angle(int argc, char* argv[])
 {
-    static const char* desc[] = {
+    const char* desc[] = {
         "[THISMODULE] computes the angle distribution for a number of angles",
         "or dihedrals.[PAR]",
         "With option [TT]-ov[tt], you can plot the average angle of",
@@ -137,39 +137,36 @@ int gmx_g_angle(int argc, char* argv[])
         "assuming the input trajectory frames are equally spaced in time. Output files are only",
         "generated if [TT]-type dihedral[tt] is specified."
     };
-    static const char* opt[] = { nullptr, "angle", "dihedral", "improper", "ryckaert-bellemans",
-                                 nullptr };
-    static gmx_bool    bALL = FALSE, bChandler = FALSE, bAverCorr = FALSE, bPBC = TRUE;
-    static real        binwidth = 1;
-    t_pargs            pa[]     = {
+    const char* opt[] = { nullptr, "angle", "dihedral", "improper", "ryckaert-bellemans", nullptr };
+    gmx_bool    bALL = FALSE, bChandler = FALSE, bAverCorr = FALSE, bPBC = TRUE;
+    real        binwidth = 1;
+    t_pargs     pa[]     = {
         { "-type", FALSE, etENUM, { opt }, "Type of angle to analyse" },
         { "-all",
-                         FALSE,
-                         etBOOL,
-                         { &bALL },
-                         "Plot all angles separately in the averages file, in the order of appearance in the "
-                                        "index file." },
+                  FALSE,
+                  etBOOL,
+                  { &bALL },
+                  "Plot all angles separately in the averages file, in the order of appearance in the "
+                          "index file." },
         { "-binwidth",
-                         FALSE,
-                         etREAL,
-                         { &binwidth },
-                         "binwidth (degrees) for calculating the distribution" },
+                  FALSE,
+                  etREAL,
+                  { &binwidth },
+                  "binwidth (degrees) for calculating the distribution" },
         { "-periodic", FALSE, etBOOL, { &bPBC }, "Print dihedral angles modulo 360 degrees" },
         { "-chandler",
-                         FALSE,
-                         etBOOL,
-                         { &bChandler },
-                         "Use Chandler correlation function (N[trans] = 1, N[gauche] = 0) rather than cosine "
-                                        "correlation function. Trans is defined as phi < -60 or phi > 60." },
+                  FALSE,
+                  etBOOL,
+                  { &bChandler },
+                  "Use Chandler correlation function (N[trans] = 1, N[gauche] = 0) rather than cosine "
+                          "correlation function. Trans is defined as phi < -60 or phi > 60." },
         { "-avercorr",
-                         FALSE,
-                         etBOOL,
-                         { &bAverCorr },
-                         "Average the correlation functions for the individual angles/dihedrals" }
+                  FALSE,
+                  etBOOL,
+                  { &bAverCorr },
+                  "Average the correlation functions for the individual angles/dihedrals" }
     };
-    static const char* bugs[] = {
-        "Counting transitions only works for dihedrals with multiplicity 3"
-    };
+    const char* bugs[] = { "Counting transitions only works for dihedrals with multiplicity 3" };
 
     FILE*         out;
     real          dt;
@@ -271,7 +268,7 @@ int gmx_g_angle(int argc, char* argv[])
 
     if (!bTrans && bHisto)
     {
-        fprintf(stderr, "Warning: Option -ot is not specified. -oh will not be generated.\n");
+        gmx_fatal(FARGS, "Both -ot and -oh must be specified for -oh to be generated.\n");
     }
 
     if (bChandler && !bCorr)
@@ -281,10 +278,7 @@ int gmx_g_angle(int argc, char* argv[])
 
     if (bFrac && !bRb)
     {
-        fprintf(stderr,
-                "Warning: Option -of should only accompany -type ryckaert-bellemans. Disabling "
-                "-of.\n\n");
-        bFrac = FALSE;
+        gmx_fatal(FARGS, "Option -of can only be used with -type ryckaert-bellemans.\n");
     }
 
     /*

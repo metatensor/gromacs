@@ -914,6 +914,12 @@ options, but note that these will be appended to those set by
 some of this with advanced CMake options, such as ``CMAKE_C_FLAGS``
 and its relatives.
 
+Note that C++ compiler flags are not applied to CUDA and HIP source files.
+Flags that should affect them must be passed separately, via
+the ``CMAKE_CUDA_FLAGS``/``CMAKE_HIP_FLAGS`` CMake options.
+When nvcc is used, host compiler flags must be wrapped
+with ``-Xcompiler=``, e.g., ``-DCMAKE_CUDA_FLAGS=-Xcompiler=-march=native``.
+
 See also the page on `CMake environment variables`_.
 
 .. _CUDA GPU acceleration:
@@ -1089,7 +1095,7 @@ flags for compatibility and improved performance:
 
    cmake .. -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx \
             -DGMX_GPU=SYCL -DGMX_SYCL=DPCPP \
-            -DGMX_GPU_NB_NUM_CLUSTER_PER_BIN_X=1 -DGMX_GPU_NB_CLUSTER_SIZE=8
+            -DGMX_GPU_NB_NUM_CLUSTER_PER_BIN=4 -DGMX_GPU_NB_CLUSTER_SIZE=8
 
 Note that ``GMX_GPU_NB_NUM_CLUSTER_PER_CELL`` changed its name in |Gromacs| 2027.0
 to ``GMX_GPU_NB_NUM_CLUSTER_PER_BIN`` without changing its function.
@@ -1157,11 +1163,10 @@ The following flags can be passed to CMake in order to tune |Gromacs|:
       is better. When compiling with AdaptiveCpp_, the default value is 8,
       which is the only supported value for AMD and NVIDIA devices.
 
-``-DGMX_GPU_NB_NUM_CLUSTER_PER_BIN_X``, ``-DGMX_GPU_NB_NUM_CLUSTER_PER_BIN_Y``, ``-DGMX_GPU_NB_NUM_CLUSTER_PER_BIN_Z``
-      Sets the number of clusters along X, Y, or Z in a pair-search
-      grid bin, default 2. When targeting Intel Ponte Vecchio GPUs,
-      set ``-DGMX_GPU_NB_NUM_CLUSTER_PER_BIN_X=1`` and leave the
-      other values as the default.
+``-DGMX_GPU_NB_NUM_CLUSTER_PER_BIN``
+      Sets the number of clusters in a pair-search grid bin, default 8.
+      When targeting Intel Ponte Vecchio GPUs,
+      set ``-DGMX_GPU_NB_NUM_CLUSTER_PER_BIN=4``.
 
 ``-DGMX_GPU_NB_DISABLE_CLUSTER_PAIR_SPLIT``
      Disables cluster pair splitting in the GPU non-bonded kernels.
@@ -1350,8 +1355,28 @@ double-precision version of |Gromacs| compiled with MPI support:
 
 .. _installing with CP2K:
 
-Building with CP2K QM/MM support
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Building with CP2K QM/MM support for CP2K 2026 and newer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The primary way to build |Gromacs|-CP2K QM/MM interface is using spack package manager. 
+The :file:`make_cp2k.sh` script from CP2K source can perform building of CP2K and its dependencies 
+together with |Gromacs| and test the QM/MM interface. 
+To use it, run the following command from the CP2K source directory::
+
+    ./make_cp2k.sh -bd --test_gromacs
+
+This builds the latest |Gromacs| release supported by the script. To select
+a specific |Gromacs| version, use the ``-gromacs`` option, for example::
+
+    ./make_cp2k.sh -bd -gromacs v2025.2 --test_gromacs
+
+The ``-bd`` option rebuilds all the dependencies from scratch, removing the
+script's existing :file:`spack/` directory. 
+For additional information follow the `GROMACS/CP2K QM/MM build instructions in the CP2K manual
+<https://manual.cp2k.org/trunk/getting-started/build-from-source.html#gromacs-cp2k-qm-mm>`__.
+
+Building with CP2K QM/MM support for CP2K versions older than 2026 and for manual builds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 CP2K QM/MM interface integration will require linking against libcp2k
 library, that incorporates CP2K functionality into |Gromacs|.
@@ -1441,6 +1466,16 @@ You must use the same ABI version as you use when building the rest of
 So get (or build) the CXX11 ABI version of Libtorch.
 For the same reason, it is also not possible to use the Libtorch version that ships
 with a conda installation of Pytorch, because it is built with the pre-CXX11 ABI by default.
+To run model inference on Intel GPUs, use a Libtorch with XPU support (PyTorch 2.5 or
+later, for example the one bundled in the ``torch`` XPU wheel). |Gromacs| itself can be
+built with or without SYCL, but the CMake configuration of such a Libtorch requires an
+Intel oneAPI DPC++ compiler installation at configure time (found through ``SYCL_ROOT``
+or ``CMPLR_ROOT``, which sourcing ``setvars.sh`` sets, or at
+``/opt/intel/oneapi/compiler/latest``), and the oneAPI runtime libraries that Libtorch
+links against must be on the library path at run time.
+Libtorch 2.14 and later require C++20. Only the sources that include the Libtorch
+headers are then compiled with C++20, while the rest of |Gromacs| keeps the configured
+standard (C++17 by default), so no extra option is needed.
 The NNP interface is enabled by default when a Libtorch installation is found in the
 ``CMAKE_PREFIX_PATH``, or ``Torch_DIR`` is set to a ``TorchConfig.cmake`` or
 ``torch-config.cmake`` usually found under ``share/cmake/Torch/`` in the libtorch
@@ -1764,7 +1799,9 @@ NVIDIA Grace
 
 For best performance on Grace, use GCC >= 13.1 or LLVM >= 17, and set the
 ``-DCMAKE_CXX_FLAGS=-mcpu=neoverse-v2 -DCMAKE_C_FLAGS=-mcpu=neoverse-v2``
-flags when configuring |Gromacs|.
+flags when configuring |Gromacs|. When building with CUDA, also set
+``-DCMAKE_CUDA_FLAGS=-Xcompiler=-mcpu=neoverse-v2``
+so that the host code in CUDA source files is compiled for the same target.
 
 With short-range non-bonded interactions calculations on the CPU (``-nb cpu`` or
 when building without GPU support), performance can be improved by also setting

@@ -58,11 +58,12 @@ struct gmx_mtop_t;
 enum class PbcType : int;
 class InteractionDefinitions;
 struct t_inputrec;
-struct t_mdatoms;
 struct t_pbc;
 
 namespace gmx
 {
+
+class MDAtoms;
 
 class UpdateConstrainGpu
 {
@@ -138,17 +139,28 @@ public:
 
     /*! \brief Set the pointers and update data-structures (e.g. after NB search step).
      *
+     * The copies to the GPU are asynchronous and this function may reallocate buffers that earlier
+     * copies and kernels still use, so the device stream has to be synchronized between calls. In
+     * mdrun this is implicit, because a search step needs the coordinates on the host. The caller
+     * declares each such synchronization with markStreamSynchronized(), which is checked here.
+     *
      * \param[in,out]  d_x                 Device buffer with coordinates.
      * \param[in,out]  d_v                 Device buffer with velocities.
      * \param[in]      d_f                 Device buffer with forces.
      * \param[in]      idef                System topology
-     * \param[in]      md                  Atoms data.
+     * \param[in]      mdAtoms             Atoms data.
      */
     void set(DeviceBuffer<RVec>            d_x,
              DeviceBuffer<RVec>            d_v,
              DeviceBuffer<RVec>            d_f,
              const InteractionDefinitions& idef,
-             const t_mdatoms&              md);
+             const MDAtoms&                mdAtoms);
+
+    /*! \brief Record that the host has waited for all work in the update stream.
+     *
+     * This allows the next set() call, see there.
+     */
+    void markStreamSynchronized();
 
     /*! \brief
      * Update PBC data.

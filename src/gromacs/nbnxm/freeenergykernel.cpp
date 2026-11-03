@@ -51,12 +51,10 @@
 
 #include "gromacs/gmxlib/nrnb.h"
 #include "gromacs/math/arrayrefwithpadding.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/forceoutput.h"
 #include "gromacs/mdtypes/forcerec.h"
 #include "gromacs/mdtypes/interaction_const.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
 #include "gromacs/mdtypes/simulation_workload.h"
 #include "gromacs/pbcutil/ishift.h"
 #include "gromacs/simd/simd.h"
@@ -64,6 +62,7 @@
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/vec.h"
 
@@ -409,6 +408,11 @@ static void nb_free_energy_kernel(const AtomPairlist&                    nlist,
     real gmx_unused       ewaldLJCoeffSixDivSix;
     if constexpr (ljKernelType == LJKernelType::Ewald)
     {
+        GMX_RELEASE_ASSERT(
+                nbfp_grid.size() == nbfp.size(),
+                "LJ-PME correction parameter matrix should have the same size as the normal LJ "
+                "matrix");
+
         ewaldLJCoeffSq        = gmx::square(ic.vdw.ewaldCoeff);
         ewaldLJCoeffSixDivSix = ewaldLJCoeffSq * ewaldLJCoeffSq * ewaldLJCoeffSq / six;
     }

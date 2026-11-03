@@ -91,14 +91,14 @@ int gmx_filter(int argc, char* argv[])
         "the coordinates in the structure file."
     };
 
-    static int      nf      = 10;
-    static gmx_bool bNoJump = TRUE, bFit = FALSE, bLowAll = FALSE;
-    t_pargs         pa[] = {
+    int      nf      = 10;
+    gmx_bool bNoJump = TRUE, bFit = FALSE, bLowAll = FALSE;
+    t_pargs  pa[] = {
         { "-nf",
-                  FALSE,
-                  etINT,
-                  { &nf },
-                  "Sets the filter length as well as the output interval for low-pass filtering" },
+           FALSE,
+           etINT,
+           { &nf },
+           "Sets the filter length as well as the output interval for low-pass filtering" },
         { "-all", FALSE, etBOOL, { &bLowAll }, "Write all low-pass filtered frames" },
         { "-nojump", FALSE, etBOOL, { &bNoJump }, "Remove jumps of atoms across the box" },
         { "-fit", FALSE, etBOOL, { &bFit }, "Fit all frames to a reference structure" }
@@ -117,7 +117,8 @@ int gmx_filter(int argc, char* argv[])
     t_trxstatus *     outl, *outh;
     int               nffr, i, fr, nat, j, d, m;
     int*              ind;
-    real              flen, *filt, sum, *t;
+    real              flen, *filt, sum;
+    double*           t;
     rvec              xcmtop, xcm, **x, *ptr, *xf, *xn, *xp, hbox;
     gmx_output_env_t* oenv;
     gmx::TimeControl  timeControl;

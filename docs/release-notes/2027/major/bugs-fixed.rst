@@ -15,3 +15,27 @@ and dimensions of 1 Angstrom to indicate no periodic boundary conditions.
 |Gromacs| now interprets such structures as not having PBC.
 
 :issue:`4645`, :issue:`5679`
+
+PDB trajectory output now writes correct per-frame PBC type
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+When writing PDB trajectories, the PBC type of the system was ignored
+and instead guessed from the box. As a result, the ``CRYST1`` record
+was written incorrectly for screw PBC (wrong space group and cell length).
+
+Analysis tools now always process time values in double precision
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+This avoids picking incorrect frames when times values are large.
+
+Request the MPI thread support required by CP2K
+"""""""""""""""""""""""""""""""""""""""""""""""
+
+With external MPI, setting the new environment variable
+``GMX_USE_MPI_THREAD_MULTIPLE`` to any value requests ``MPI_THREAD_MULTIPLE``.
+The default MPI initialization is unchanged. QM/MM setup checks the linked
+CP2K version and reports a helpful fatal error if it requires
+``MPI_THREAD_MULTIPLE`` but MPI was initialized with insufficient thread support.
+This applies to CP2K 2027 or later, CP2K 2026.2 development builds, and
+unrecognized CP2K versions. Users are instructed to set the environment
+variable before launching |Gromacs|.

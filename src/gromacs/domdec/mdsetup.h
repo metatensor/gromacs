@@ -44,14 +44,12 @@
 
 #include "gromacs/utility/vectypes.h"
 
-struct bonded_threading_t;
 struct gmx_domdec_t;
 struct gmx_localtop_t;
 struct gmx_mtop_t;
 struct gmx_wallcycle;
 struct t_forcerec;
 struct t_inputrec;
-struct t_mdatoms;
 
 namespace gmx
 {
@@ -66,10 +64,10 @@ class VirtualSitesHandler;
 /*! \brief Gets the local shell with domain decomposition
  *
  * \param[in]     dd        Domain decomposition struct, can be nullptr
- * \param[in]     md        The MD atom data
+ * \param[in]     mdAtoms   The MD atom data
  * \param[in,out] shfc      The shell/flexible-constraint data
  */
-void make_local_shells(const gmx_domdec_t* dd, const t_mdatoms& md, shellfc_t* shfc);
+void make_local_shells(const gmx_domdec_t* dd, const MDAtoms& mdAtoms, shellfc_t* shfc);
 
 /*! \brief Sets atom data for several MD algorithms
  *
@@ -85,6 +83,7 @@ void make_local_shells(const gmx_domdec_t* dd, const t_mdatoms& md, shellfc_t* s
  * \param[in,out] top        The local topology
  * \param[in,out] fr         The force calculation parameter/data record
  * \param[out]    force      The force buffer
+ * \param[in]     massLambda The FEP lambda value relevant to mass perturbation
  * \param[out]    mdAtoms    The MD atom data
  * \param[in,out] constr     The constraints handler, can be NULL
  * \param[in,out] vsite      The virtual site data, can be NULL
@@ -99,6 +98,7 @@ void mdAlgorithmsSetupAtomData(const SimulationWorkload& simulationWork,
                                gmx_localtop_t*           top,
                                t_forcerec*               fr,
                                ForceBuffers*             force,
+                               real                      massLambda,
                                MDAtoms*                  mdAtoms,
                                Constraints*              constr,
                                VirtualSitesHandler*      vsite,

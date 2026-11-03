@@ -55,7 +55,6 @@
 #include "gromacs/gmxana/princ.h"
 #include "gromacs/linearalgebra/eigensolver.h"
 #include "gromacs/math/do_fit.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/pbcutil/rmpbc.h"
@@ -66,6 +65,7 @@
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -237,20 +237,21 @@ int gmx_rmsf(int argc, char* argv[])
         "This shows the directions in which the atoms fluctuate the most and",
         "the least."
     };
-    static gmx_bool bRes = FALSE, bAniso = FALSE, bFit = TRUE;
-    t_pargs         pargs[] = {
+    gmx_bool bRes = FALSE, bAniso = FALSE, bFit = TRUE;
+    t_pargs  pargs[] = {
         { "-res", FALSE, etBOOL, { &bRes }, "Calculate averages for each residue" },
         { "-aniso", FALSE, etBOOL, { &bAniso }, "Compute anisotropic temperature factors" },
         { "-fit",
-                  FALSE,
-                  etBOOL,
-                  { &bFit },
-                  "Do a least squares superposition before computing RMSF. Without this you must "
-                          "make sure that the reference structure and the trajectory match." }
+           FALSE,
+           etBOOL,
+           { &bFit },
+           "Do a least squares superposition before computing RMSF. Without this you must "
+            "make sure that the reference structure and the trajectory match." }
     };
-    int  natom;
-    int  i, m;
-    real t, *w_rls;
+    int    natom;
+    int    i, m;
+    double t;
+    real*  w_rls;
 
     t_topology top;
     PbcType    pbcType;

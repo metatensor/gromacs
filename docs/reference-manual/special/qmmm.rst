@@ -23,6 +23,10 @@ mechanically, with the remainder being modeled using the force field.
 The current version of |Gromacs| provides an interface to the popular
 Quantum Chemistry package CP2K :ref:`188 <refcp2k2020>`.
 
+When using the |Gromacs|-CP2K interface for QM/MM simulations, please cite
+Morozov et al., "Seamless QM/MM Simulations via a GROMACS-CP2K Interface"
+:ref:`201 <refMorozov2026>`.
+
 Overview
 ^^^^^^^^
 
@@ -37,7 +41,7 @@ the Hamiltonian for the QM subsystem:
    .. math::
 
       H^{QM/MM} =
-      H^{QM}_e-\sum_i^n\sum_J^M\frac{e^2Q_J}{4\pi\epsilon_0r_{iJ}}+\sum_A^N\sum_J^M\frac{e^2Z_AQ_J}{e\pi\epsilon_0R_{AJ}},
+      H^{QM}_e-\sum_i^n\sum_J^M\frac{e^2Q_J}{4\pi\epsilon_0r_{iJ}}+\sum_A^N\sum_J^M\frac{e^2Z_AQ_J}{4\pi\epsilon_0R_{AJ}},
 
 where :math:`n` and :math:`N` are the number of electrons and nuclei
 in the QM region, respectively, and :math:`M` is the number of
@@ -69,6 +73,27 @@ Software prerequisites
 
 CP2K version 8.1 (or later) should be linked into |Gromacs| as libcp2k.
 For a specific installation instructions please follow the :ref:`installing with CP2K` guide.
+
+For QM/MM simulations with external MPI and CP2K 2027 or later, or a CP2K
+2026.2 development build, set the environment variable
+``GMX_USE_MPI_THREAD_MULTIPLE`` before launching |Gromacs|, for example::
+
+    export GMX_USE_MPI_THREAD_MULTIPLE=1
+
+For High Performance Computing (HPC) cluster runs, you may need to pass an option 
+to ``mpirun`` (or ``srun``) to export ``GMX_USE_MPI_THREAD_MULTIPLE`` to the compute processes. 
+Consult your MPI launcher or scheduler documentation for the appropriate option.
+
+Setting this variable to any value (including an empty string or ``0``) requests
+``MPI_THREAD_MULTIPLE`` during MPI initialization. Otherwise, |Gromacs| retains
+its default MPI initialization, requesting ``MPI_THREAD_FUNNELED`` when built
+with OpenMP. QM/MM setup checks the CP2K version and reports a fatal error with
+instructions if the required MPI thread support is unavailable. Unrecognized
+CP2K version strings conservatively also require ``MPI_THREAD_MULTIPLE``.
+
+Using ``GMX_USE_MPI_THREAD_MULTIPLE`` may slightly reduce the performance of
+normal classical MD simulations, even when QM/MM is not used. Leave it unset
+for those simulations.
 
 Limitations in simulation techniques
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

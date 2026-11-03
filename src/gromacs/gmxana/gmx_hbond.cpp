@@ -66,7 +66,6 @@
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/gmxana/gstat.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdtypes/inputrec.h"
@@ -84,6 +83,7 @@
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/gmxomp.h"
@@ -2422,13 +2422,13 @@ int gmx_hbond(int argc, char* argv[])
         "times the total number of acceptors in the selected group(s)."
     };
 
-    static real acut = 30, abin = 1, rcut = 0.35, r2cut = 0, rbin = 0.005, rshell = -1;
-    static real maxnhb = 0, fit_start = 1, fit_end = 60, temp = 298.15;
-    static bool bNitAcc = true, bDA = true, bMerge = true;
-    static int  nDump    = 0;
-    static int  nThreads = 0;
+    real acut = 30, abin = 1, rcut = 0.35, r2cut = 0, rbin = 0.005, rshell = -1;
+    real maxnhb = 0, fit_start = 1, fit_end = 60, temp = 298.15;
+    bool bNitAcc = true, bDA = true, bMerge = true;
+    int  nDump    = 0;
+    int  nThreads = 0;
 
-    static gmx_bool bContact = FALSE;
+    gmx_bool bContact = FALSE;
 
     /* options */
     t_pargs pa[] = {
@@ -2531,7 +2531,8 @@ int gmx_hbond(int argc, char* argv[])
     int          npargs, natoms, nframes = 0, shatom;
     rvec *       x, hbox;
     matrix       box;
-    real         t, ccut, dist = 0.0, ang = 0.0;
+    double       t;
+    real         ccut, dist = 0.0, ang = 0.0;
     double       max_nhb, aver_nhb, aver_dist;
     int          h = 0, i = 0, j, k = 0, ogrp;
     int          xi = 0, yi, zi, ai;

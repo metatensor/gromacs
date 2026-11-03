@@ -60,7 +60,6 @@
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/listed_forces/bonded.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/nrjac.h"
 #include "gromacs/math/units.h"
 #include "gromacs/mdrun/binary_information.h"
@@ -79,6 +78,7 @@
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -469,7 +469,7 @@ static void print_gkrbin(const char* fn, t_gkrbin* gb, int ngrp, int nframes, re
 }
 
 static gmx_bool
-read_mu_from_enx(ener_file_t fmu, int Vol, const ivec iMu, rvec mu, real* vol, real* t, int nre, t_enxframe* fr)
+read_mu_from_enx(ener_file_t fmu, int Vol, const ivec iMu, rvec mu, real* vol, double* t, int nre, t_enxframe* fr)
 {
     int      i;
     gmx_bool bCont;
@@ -559,7 +559,7 @@ static void mol_dip(int k0, int k1, rvec x[], const t_atom atom[], rvec mu)
     }
 }
 
-static void mol_quad(int k0, int k1, rvec x[], const t_atom atom[], rvec quad)
+static void mol_quad(int k0, int k1, rvec x[], const t_atom atom[], rvec quadrupole)
 {
     int      i, k, m, n, niter;
     real     q, r2, mass, masstot;
@@ -662,14 +662,14 @@ static void mol_quad(int k0, int k1, rvec x[], const t_atom atom[], rvec quad)
 
     for (m = 0; (m < DIM); m++)
     {
-        quad[0] = dd[2]; /* yy */
-        quad[1] = dd[0]; /* zz */
-        quad[2] = dd[1]; /* xx */
+        quadrupole[0] = dd[2]; /* yy */
+        quadrupole[1] = dd[0]; /* zz */
+        quadrupole[2] = dd[1]; /* xx */
     }
 
     if (debug)
     {
-        pr_rvec(debug, 0, "Quadrupole", quad, DIM, TRUE);
+        pr_rvec(debug, 0, "Quadrupole", quadrupole, DIM, TRUE);
     }
 
     /* clean-up */
@@ -843,7 +843,7 @@ static void do_dip(const t_topology*       top,
 
     FILE *         outdd, *outmtot, *outaver, *outeps, *caver = nullptr;
     FILE *         dip3d = nullptr, *adip = nullptr;
-    rvec *         x, *dipole = nullptr, mu_t, quad, *dipsp = nullptr;
+    rvec *         x, *dipole = nullptr, mu_t, quadrupole, *dipsp = nullptr;
     t_gkrbin*      gkrbin = nullptr;
     t_enxframe*    fr;
     int            nframes = 1000, nre, timecheck = 0, ncolour = 0;
@@ -852,7 +852,8 @@ static void do_dip(const t_topology*       top,
     t_trxstatus*   status;
     int *          dipole_bin, ndipbin, ibin, iVol, idim = -1;
     unsigned long  mode;
-    real           rcut = 0, t, t0, t1, dt, dd, rms_cos;
+    real           rcut = 0, dd, rms_cos;
+    double         t, t0, t1, dt;
     rvec           dipaxis;
     matrix         box;
     gmx_bool       bCorr, bTotal, bCont;
@@ -1158,10 +1159,10 @@ static void do_dip(const t_topology*       top,
                     }
                     if (bQuad)
                     {
-                        mol_quad(ind0, ind1, x, atom, quad);
+                        mol_quad(ind0, ind1, x, atom, quadrupole);
                         for (m = 0; (m < DIM); m++)
                         {
-                            gmx::stats_add_point(Qlsq[m], 0, quad[m], 0, 0);
+                            gmx::stats_add_point(Qlsq[m], 0, quadrupole[m], 0, 0);
                         }
                     }
                     if (bCorr && !bTotal)
@@ -1408,7 +1409,11 @@ static void do_dip(const t_topology*       top,
 
     gmx_rmpbc_done(gpbc);
 
-    if (!bMU)
+    if (bMU)
+    {
+        done_ener_file(fmu);
+    }
+    else
     {
         close_trx(status);
     }
@@ -1760,19 +1765,17 @@ int gmx_dipoles(int argc, char* argv[])
     {
         if (bQuad)
         {
-            printf("WARNING: Can not determine quadrupoles from energy file\n");
-            bQuad = FALSE;
+            gmx_fatal(FARGS, "Can not determine quadrupoles from energy file.\n");
         }
         if (bGkr)
         {
-            printf("WARNING: Can not determine Gk(r) from energy file\n");
-            bGkr = FALSE;
-            ncos = 1;
+            gmx_fatal(FARGS, "Can not determine Gk(r) from energy file\n");
         }
         if (mu_aver == -1)
         {
-            printf("WARNING: Can not calculate Gk and gk, since you did\n"
-                   "         not enter a valid dipole for the molecules\n");
+            gmx_fatal(FARGS,
+                      "Can not calculate Gk and gk, since you did "
+                      "not enter a valid dipole for the molecules (-mu)\n");
         }
     }
 

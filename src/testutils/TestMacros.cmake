@@ -31,8 +31,6 @@
 # To help us fund GROMACS development, we humbly ask that you cite
 # the research papers on the package. Check out https://www.gromacs.org.
 
-include(CMakeParseArguments)
-
 set(GMX_TEST_TIMEOUT_FACTOR "1" CACHE STRING "Scaling factor to apply for test timeouts")
 mark_as_advanced(GMX_TEST_TIMEOUT_FACTOR)
 
@@ -65,7 +63,7 @@ elseif (NOT GMX_THREAD_MPI)
 endif()
 
 function (gmx_add_unit_test_library NAME)
-    if (GMX_BUILD_UNITTESTS AND BUILD_TESTING)
+    if (BUILD_TESTING)
         add_library(${NAME} STATIC ${UNITTEST_TARGET_OPTIONS} ${ARGN})
         gmx_target_compile_options(${NAME})
         target_compile_definitions(${NAME} PRIVATE HAVE_CONFIG_H)
@@ -97,10 +95,6 @@ function (gmx_add_unit_test_library NAME)
                 gmx_target_warning_suppression(${NAME} "-Wno-old-style-cast" HAS_NO_OLD_STYLE_CAST)
             endif()
         endif()
-        # GCC 14 has false positives with -Wmaybe-uninitialized in GoogleTest
-        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 14 AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15)
-            gmx_target_warning_suppression(${NAME} "-Wno-maybe-uninitialized" HAS_WARNING_NO_MAYBE_UNINITIALIZED)
-        endif()
     endif()
 endfunction ()
 
@@ -131,7 +125,7 @@ endfunction ()
 # Note that multi-value options (like source-file lists) must follow the
 # no-option or single-value options.
 function (gmx_add_gtest_executable EXENAME)
-    if (GMX_BUILD_UNITTESTS AND BUILD_TESTING)
+    if (BUILD_TESTING)
         set(_options MPI NVSHMEM HARDWARE_DETECTION DYNAMIC_REGISTRATION)
         set(_multi_value_keywords
             CPP_SOURCE_FILES
@@ -276,10 +270,6 @@ function (gmx_add_gtest_executable EXENAME)
                 gmx_target_warning_suppression(${EXENAME} "-Wno-old-style-cast" HAS_NO_OLD_STYLE_CAST)
             endif()
         endif()
-        # GCC 14 has false positives with -Wmaybe-uninitialized in GoogleTest
-        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 14 AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15)
-            gmx_target_warning_suppression(${EXENAME} "-Wno-maybe-uninitialized" HAS_WARNING_NO_MAYBE_UNINITIALIZED)
-        endif()
     endif()
 endfunction()
 
@@ -306,7 +296,7 @@ endfunction()
 # that ctest can run the test binary over a range of numbers of MPI
 # ranks.
 function (gmx_register_gtest_test NAME EXENAME)
-    if (GMX_BUILD_UNITTESTS AND BUILD_TESTING)
+    if (BUILD_TESTING)
         set(_options INTEGRATION_TEST SLOW_TEST IGNORE_LEAKS QUICK_GPU_TEST SLOW_GPU_TEST)
         set(_one_value_args MPI_RANKS OPENMP_THREADS)
         cmake_parse_arguments(ARG "${_options}" "${_one_value_args}" "" ${ARGN})
@@ -326,6 +316,11 @@ function (gmx_register_gtest_test NAME EXENAME)
                 set(_timeout 300)
             else()
                 set(_timeout 120)
+            endif()
+            # Allow marking IntegrationTest with SLOW_TEST as well
+            if (ARG_SLOW_TEST)
+                list(APPEND _labels SlowTest)
+                math(EXPR _timeout "${_timeout} * 4")
             endif()
         elseif (ARG_SLOW_TEST)
             list(APPEND _labels SlowTest)

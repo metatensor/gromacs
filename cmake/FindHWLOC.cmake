@@ -246,32 +246,25 @@ endif ()
 
 # check a function to validate the find
 if(HWLOC_LIBRARIES)
+    # HWLOC_LIBRARIES is the full path found by find_library(), so no
+    # -L flags are needed to link it.
+    include(CheckSourceCompiles)
+    include(CMakePushCheckState)
+    cmake_push_check_state()
+    set(CMAKE_REQUIRED_INCLUDES "${HWLOC_INCLUDE_DIRS}")
+    set(CMAKE_REQUIRED_LIBRARIES "${HWLOC_LIBRARIES}")
 
-    set(REQUIRED_INCDIRS)
-    set(REQUIRED_LIBDIRS)
-    set(REQUIRED_LIBS)
-
-    # HWLOC
-    if (HWLOC_INCLUDE_DIRS)
-        set(REQUIRED_INCDIRS "${HWLOC_INCLUDE_DIRS}")
-    endif()
-    if (HWLOC_LIBRARY_DIRS)
-        set(REQUIRED_LIBDIRS "${HWLOC_LIBRARY_DIRS}")
-    endif()
-    set(REQUIRED_LIBS "${HWLOC_LIBRARIES}")
-
-    # set required libraries for link
-    set(CMAKE_REQUIRED_INCLUDES "${REQUIRED_INCDIRS}")
-    set(CMAKE_REQUIRED_LIBRARIES)
-    foreach(lib_dir ${REQUIRED_LIBDIRS})
-        list(APPEND CMAKE_REQUIRED_LIBRARIES "-L${lib_dir}")
-    endforeach()
-    list(APPEND CMAKE_REQUIRED_LIBRARIES "${REQUIRED_LIBS}")
-    string(REGEX REPLACE "^ -" "-" CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES}")
-
-    # test link
-    include(CheckFunctionExists)
-    check_function_exists(hwloc_topology_init HWLOC_WORKS)
+    # test link; hwloc_topology_init may be a macro (see hwloc/rename.h),
+    # so call it rather than only checking that the symbol is declared
+    check_source_compiles(C
+        "#include <hwloc.h>
+        int main(void)
+        {
+            hwloc_topology_t topology;
+            if (hwloc_topology_init(&topology) != 0) { return 1; }
+            hwloc_topology_destroy(topology);
+            return 0;
+        }" HWLOC_WORKS)
     mark_as_advanced(HWLOC_WORKS)
 
     if(NOT HWLOC_WORKS)
@@ -279,13 +272,11 @@ if(HWLOC_LIBRARIES)
             message(STATUS "Looking for hwloc : test of hwloc_topology_init with hwloc library fails")
             message(STATUS "CMAKE_REQUIRED_LIBRARIES: ${CMAKE_REQUIRED_LIBRARIES}")
             message(STATUS "CMAKE_REQUIRED_INCLUDES: ${CMAKE_REQUIRED_INCLUDES}")
-            message(STATUS "Check in CMakeFiles/CMakeError.log to figure out why it fails")
+            message(STATUS "Check in CMakeFiles/CMakeConfigureLog.yaml to figure out why it fails")
         endif()
     endif()
-    set(CMAKE_REQUIRED_INCLUDES)
-    set(CMAKE_REQUIRED_FLAGS)
-    set(CMAKE_REQUIRED_LIBRARIES)
-endif(HWLOC_LIBRARIES)
+    cmake_pop_check_state()
+endif()
 
 if (HWLOC_LIBRARIES)
   if (HWLOC_LIBRARY_DIRS)
@@ -303,37 +294,6 @@ if (HWLOC_LIBRARIES)
 endif()
 mark_as_advanced(HWLOC_DIR)
 mark_as_advanced(HWLOC_DIR_FOUND)
-
-# Function for converting hex version numbers from HWLOC_API_VERSION if necessary
-function(HEX2DEC str res)
-    string(LENGTH "${str}" len)
-    if("${len}" EQUAL 1)
-        if("${str}" MATCHES "[0-9]")
-            set(${res} "${str}" PARENT_SCOPE)
-        elseif( "${str}" MATCHES "[aA]")
-            set(${res} 10 PARENT_SCOPE)
-        elseif( "${str}" MATCHES "[bB]")
-            set(${res} 11 PARENT_SCOPE)
-        elseif( "${str}" MATCHES "[cC]")
-            set(${res} 12 PARENT_SCOPE)
-        elseif( "${str}" MATCHES "[dD]")
-            set(${res} 13 PARENT_SCOPE)
-        elseif( "${str}" MATCHES "[eE]")
-            set(${res} 14 PARENT_SCOPE)
-        elseif( "${str}" MATCHES "[fF]")
-            set(${res} 15 PARENT_SCOPE)
-        else()
-            return()
-        endif()
-    else()
-        string(SUBSTRING "${str}" 0 1 str1)
-        string(SUBSTRING "${str}" 1 -1 str2)
-        hex2dec(${str1} res1)
-        hex2dec(${str2} res2)
-        math(EXPR val "16 * ${res1} + ${res2}")
-        set(${res} "${val}" PARENT_SCOPE)
-    endif()
-endfunction()
 
 if(HWLOC_INCLUDE_DIRS)
     # If we are not cross-compiling we try to use the hwloc-info program
@@ -372,9 +332,9 @@ if(HWLOC_INCLUDE_DIRS)
     string(SUBSTRING "${HWLOC_API_VERSION}" 4 2 HEX_MAJOR)
     string(SUBSTRING "${HWLOC_API_VERSION}" 6 2 HEX_MINOR)
     string(SUBSTRING "${HWLOC_API_VERSION}" 8 2 HEX_PATCH)
-    hex2dec(${HEX_MAJOR} DEC_MAJOR)
-    hex2dec(${HEX_MINOR} DEC_MINOR)
-    hex2dec(${HEX_PATCH} DEC_PATCH)
+    math(EXPR DEC_MAJOR "0x${HEX_MAJOR}")
+    math(EXPR DEC_MINOR "0x${HEX_MINOR}")
+    math(EXPR DEC_PATCH "0x${HEX_PATCH}")
     set(HWLOC_HEADER_VERSION "${DEC_MAJOR}.${DEC_MINOR}.${DEC_PATCH}")
 
     if (HWLOC_LIBRARY_VERSION AND HWLOC_HEADER_VERSION)

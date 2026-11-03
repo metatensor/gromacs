@@ -48,7 +48,6 @@
 #include "gromacs/gmxana/angle_correction.h"
 #include "gromacs/gmxana/gstat.h"
 #include "gromacs/listed_forces/bonded.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdtypes/md_enums.h"
@@ -56,6 +55,7 @@
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -834,7 +834,8 @@ void read_ang_dih(const char*             trj_fn,
     t_trxstatus*  status;
     int           i, angind, teller;
     int           nangles, n_alloc;
-    real          t, fraction, pifac, angle;
+    double        t;
+    real          fraction, pifac, angle;
     real*         angles[2];
     matrix        box;
     rvec*         x;

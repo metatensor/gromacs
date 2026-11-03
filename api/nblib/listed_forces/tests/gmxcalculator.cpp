@@ -58,6 +58,7 @@
 #include "gromacs/pbcutil/ishift.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/booltype.h"
+#include "gromacs/utility/logger.h"
 
 #include "nblib/exception.h"
 #include "nblib/listed_forces/bondtypes.h"
@@ -98,8 +99,8 @@ ListedGmxCalculator::ListedGmxCalculator(const ListedInteractionData& interactio
 
     gmx_wallcycle* wcycle = nullptr;
     gmxListedForces_      = std::make_unique<ListedForces>(
-            *ffparams, 1, 0, numThreads, interactionSelection, nullptr, nullptr, nullptr, wcycle, fr, &nrnb);
-    gmxListedForces_->setup(*idef, nP, false, mdatoms_.cVCM);
+            *ffparams, 1, 0, numThreads, interactionSelection, nullptr, nullptr, gmx::MDLogger{}, wcycle, fr, &nrnb);
+    gmxListedForces_->setup(*idef, nP, false, {});
 
     set_pbc(&pbc, PbcType::Xyz, box_.legacyMatrix());
 
@@ -109,9 +110,6 @@ ListedGmxCalculator::ListedGmxCalculator(const ListedInteractionData& interactio
     stepWork.computeEnergy       = true;
 
     fr.natoms_force = numParticles;
-
-    mdatoms_.nr         = nP;
-    mdatoms_.nPerturbed = 0;
 }
 
 void ListedGmxCalculator::compute(gmx::ArrayRef<const gmx::RVec>     x,
@@ -145,6 +143,7 @@ void ListedGmxCalculator::compute(gmx::ArrayRef<const gmx::RVec>     x,
     std::fill(forceBuffer.begin(), forceBuffer.end(), gmx::RVec{ 0, 0, 0 });
     std::fill(shiftBuffer.begin(), shiftBuffer.end(), gmx::RVec{ 0, 0, 0 });
 
+    const int numPerturbed = 0;
     gmxListedForces_->calculate(box_.legacyMatrix(),
                                 { x.data(), x.data() + x.size(), x.data() + x.size() },
                                 gmx::ArrayRef<const gmx::RVec>{},
@@ -154,11 +153,11 @@ void ListedGmxCalculator::compute(gmx::ArrayRef<const gmx::RVec>     x,
                                 &pbc,
                                 &enerd,
                                 lambdaBuffer,
-                                mdatoms_.chargeA,
-                                mdatoms_.chargeB,
-                                makeConstArrayRef(mdatoms_.bPerturbed),
-                                mdatoms_.cENER,
-                                mdatoms_.nPerturbed,
+                                gmx::ArrayRef<real>{},
+                                gmx::ArrayRef<real>{},
+                                {},
+                                {},
+                                numPerturbed,
                                 nullptr,
                                 stepWork);
 

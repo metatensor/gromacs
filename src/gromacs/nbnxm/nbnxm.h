@@ -408,7 +408,7 @@ public:
                                       const StepWorkload&                    stepWork,
                                       t_nrnb*                                nrnb);
 
-#if GMX_GPU && !GMX_GPU_CUDA
+#if (GMX_GPU_SYCL || GMX_GPU_OPENCL)
     [[noreturn]]
 #endif
     //! Executes the non-bonded free-energy kernels, local + non-local, runs on the GPU
@@ -513,6 +513,7 @@ std::unique_ptr<nonbonded_verlet_t> init_nb_verlet(const MDLogger&            md
                                                    const gmx_hw_info_t&       hardwareInfo,
                                                    bool                       useGpuForNonbonded,
                                                    bool                       useGpuForNonbondedFE,
+                                                   bool                       useGpuUpdate,
                                                    const DeviceStreamManager* deviceStreamManager,
                                                    const gmx_mtop_t&          mtop,
                                                    bool localAtomOrderMatchesNbnxmOrder,

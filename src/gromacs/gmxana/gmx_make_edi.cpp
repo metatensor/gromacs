@@ -54,7 +54,6 @@
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/eigio.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/topology/atoms.h"
 #include "gromacs/topology/index.h"
 #include "gromacs/topology/topology.h"
@@ -62,6 +61,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -645,7 +645,7 @@ static void get_structure(const t_atoms* atoms,
 int gmx_make_edi(int argc, char* argv[])
 {
 
-    static const char* desc[] = {
+    const char* desc[] = {
         "[THISMODULE] generates an essential dynamics (ED) sampling input file to be used with ",
         "[TT]mdrun[tt] based on eigenvectors of a covariance matrix ([gmx-covar]) or from a",
         "normal modes analysis ([gmx-nmeig]).",

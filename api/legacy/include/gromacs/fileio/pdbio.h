@@ -45,9 +45,10 @@
 #include "gromacs/utility/vectypes.h"
 
 class AtomProperties;
+struct gmx_mtop_t;
 struct t_atoms;
+struct t_idef;
 struct t_symtab;
-struct t_topology;
 enum class PbcType : int;
 enum class PdbRecordType : int;
 
@@ -178,8 +179,11 @@ gmx_bool gmx_conect_exist(gmx_conect conect, int ai, int aj);
 void gmx_conect_add(gmx_conect conect, int ai, int aj);
 /* Add a connection between ai and aj (numbered from 0 to natom-1) */
 
-gmx_conect gmx_conect_generate(const t_topology* top);
-/* Generate a conect structure from a topology */
+//! DEPRECATED Generate a conect structure from a list of interaction definitions */
+gmx_conect gmx_conect_generate(const t_idef& idef);
+
+//! Generate a conect structure from a system topology
+gmx_conect gmx_conect_generate(const gmx_mtop_t& mtop);
 
 gmx_conect gmx_conect_init();
 /* Initiate data structure */

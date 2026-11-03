@@ -59,10 +59,8 @@
 #include "gromacs/domdec/ga2la.h"
 #include "gromacs/domdec/options.h"
 #include "gromacs/domdec/reversetopology.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/atominfo.h"
 #include "gromacs/mdtypes/forcerec.h"
-#include "gromacs/mdtypes/mdatom.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/topology/idef.h"
 #include "gromacs/topology/ifunc.h"
@@ -74,6 +72,7 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
 #include "gromacs/utility/fixedcapacityvector.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/listoflists.h"
 #include "gromacs/utility/range.h"
@@ -304,7 +303,7 @@ static void add_vsite(const gmx_ga2la_t&        ga2la,
                 {
                     InteractionFunction ftype_r = static_cast<InteractionFunction>(reverseIlist.il[j++]);
                     int nral_r = NRAL(ftype_r);
-                    if (interaction_function[ftype_r].flags & IF_VSITE)
+                    if (interaction_function[ftype_r].categories & sc_ifcVirtualSite)
                     {
                         /* Add this vsite (recursion) */
                         const AtomIndexSet atomIndexRecur = {
@@ -435,7 +434,7 @@ static inline int assignInteractionsForAtom(const AtomIndexSet&             atom
         const InteractionFunction ftype = static_cast<InteractionFunction>(rtil[j++]);
         auto      iatoms = gmx::constArrayRefFromArray(rtil.data() + j, rtil.size() - j);
         const int nral   = NRAL(ftype);
-        if (interaction_function[ftype].flags & IF_VSITE)
+        if (interaction_function[ftype].categories & sc_ifcVirtualSite)
         {
             /* The vsite construction goes where the vsite itself is */
             if (iz == 0)
@@ -581,7 +580,7 @@ static inline int assignInteractionsForAtom(const AtomIndexSet&             atom
                  * if we have everything.
                  */
                 if (ddBondedChecking == DDBondedChecking::All
-                    || !(interaction_function[ftype].flags & IF_LIMZERO))
+                    || !(interaction_function[ftype].categories & sc_ifcZeroAtLargeDistances))
                 {
                     numBondedInteractions++;
                 }

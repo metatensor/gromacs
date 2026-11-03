@@ -83,13 +83,13 @@ int gmx_principal(int argc, char* argv[])
         "each frame, and similarly for the middle and minor axes in paxis2.dat",
         "and paxis3.dat."
     };
-    static gmx_bool foo = FALSE;
+    gmx_bool foo = FALSE;
 
     t_pargs pa[] = { { "-foo", FALSE, etBOOL, { &foo }, "Dummy option to avoid empty array" } };
     t_trxstatus* status;
     t_topology   top;
     PbcType      pbcType;
-    real         t;
+    double       t;
     rvec*        x;
 
     int                      natoms;

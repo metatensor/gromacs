@@ -124,13 +124,13 @@ void make_shake(EnumerationArray<InteractionFunction, InteractionsOfType>& plist
             for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
             {
                 const InteractionsOfType* bonds = &(plist[ftype]);
-                if ((interaction_function[ftype].flags & IF_CHEMBOND) && (bonds->size() > 0))
+                if ((interaction_function[ftype].categories & sc_ifcChemicalBond) && (bonds->size() > 0))
                 {
-                    for (InteractionFunction ftype_a : EnumerationWrapper<InteractionFunction>{})
+                    for (InteractionFunction angleFtype : EnumerationWrapper<InteractionFunction>{})
                     {
-                        if (interaction_function[ftype_a].flags & IF_ATYPE)
+                        if (interaction_function[angleFtype].categories & sc_ifcAngle)
                         {
-                            InteractionsOfType* pr = &(plist[ftype_a]);
+                            InteractionsOfType* pr = &(plist[angleFtype]);
 
                             for (auto parm = pr->interactionTypes.begin();
                                  parm != pr->interactionTypes.end();)
@@ -175,8 +175,7 @@ void make_shake(EnumerationArray<InteractionFunction, InteractionsOfType>& plist
                                                 b_ij * b_ij + b_jk * b_jk
                                                 - 2.0 * b_ij * b_jk * std::cos(c_deg2Rad * ang->c0()));
                                         std::vector<real> forceParm = { param, param };
-                                        if (ftype == InteractionFunction::ConnectBonds
-                                            || ftype_a == InteractionFunction::ConnectBonds)
+                                        if (ftype == InteractionFunction::ConnectBonds)
                                         {
                                             gmx_fatal(FARGS,
                                                       "Can not constrain all angles when they "
@@ -199,15 +198,20 @@ void make_shake(EnumerationArray<InteractionFunction, InteractionsOfType>& plist
                                         *parm = *(pr->interactionTypes.end() - 1);
                                         pr->interactionTypes.erase(pr->interactionTypes.end() - 1);
                                     }
+                                    // If using angle-conversion and an angle has a bond with
+                                    // zero length or was between two bonds with different ftype
+                                    // then grompp would never increment parm and be stuck
+                                    // processing that angle. But converting angles to constraints
+                                    // is deprecated, so we won't fix that.
                                 }
                                 else
                                 {
                                     ++parm;
                                 }
                             }
-                        } /* if IF_ATYPE */
-                    } /* for ftype_A */
-                } /* if IF_BTYPE */
+                        } /* if sc_ifcAngle */
+                    } /* for angleFtype */
+                } /* if sc_ifcBType */
             } /* for ftype */
         } /* if shake angles */
 
@@ -216,7 +220,7 @@ void make_shake(EnumerationArray<InteractionFunction, InteractionsOfType>& plist
          */
         for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
         {
-            if (interaction_function[ftype].flags & IF_BTYPE)
+            if (interaction_function[ftype].categories & sc_ifcBType)
             {
                 InteractionsOfType* pr = &(plist[ftype]);
                 for (auto parm = pr->interactionTypes.begin(); parm != pr->interactionTypes.end();)

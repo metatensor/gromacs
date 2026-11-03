@@ -64,14 +64,11 @@
 #include "gromacs/gmxana/gstat.h"
 #include "gromacs/listed_forces/disre.h"
 #include "gromacs/math/do_fit.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdlib/force.h"
-#include "gromacs/mdlib/mdatoms.h"
 #include "gromacs/mdtypes/commrec.h"
 #include "gromacs/mdtypes/fcdata.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
 #include "gromacs/pbcutil/ishift.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/pbcutil/rmpbc.h"
@@ -86,6 +83,7 @@
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -729,34 +727,34 @@ int gmx_disre(int argc, char* argv[])
         "the program will compute average violations using the third power",
         "averaging algorithm and print them in the log file."
     };
-    static int      ntoppar = 0;
-    static int      nlevels = 20;
-    static real     max_dr  = 0;
-    static gmx_bool bThird  = TRUE;
-    t_pargs         pa[]    = {
+    int      ntoppar = 0;
+    int      nlevels = 20;
+    real     max_dr  = 0;
+    gmx_bool bThird  = TRUE;
+    t_pargs  pa[]    = {
         { "-ntop",
-                     FALSE,
-                     etINT,
-                     { &ntoppar },
-                     "Number of large violations that are stored in the log file every step" },
+              FALSE,
+              etINT,
+              { &ntoppar },
+              "Number of large violations that are stored in the log file every step" },
         { "-maxdr",
-                     FALSE,
-                     etREAL,
-                     { &max_dr },
-                     "Maximum distance violation in matrix output. If less than or equal to 0 the "
-                                "maximum will be determined by the data." },
+              FALSE,
+              etREAL,
+              { &max_dr },
+              "Maximum distance violation in matrix output. If less than or equal to 0 the "
+                  "maximum will be determined by the data." },
         { "-nlevels", FALSE, etINT, { &nlevels }, "Number of levels in the matrix output" },
         { "-third",
-                     FALSE,
-                     etBOOL,
-                     { &bThird },
-                     "Use inverse third power averaging or linear for matrix output" }
+              FALSE,
+              etBOOL,
+              { &bThird },
+              "Use inverse third power averaging or linear for matrix output" }
     };
 
     FILE *       out = nullptr, *aver = nullptr, *numv = nullptr, *maxxv = nullptr, *xvg = nullptr;
     int          i, j, kkk;
     t_trxstatus* status;
-    real         t;
+    double       t;
     rvec *       x, *xav = nullptr;
     rvec4*       f;
     matrix       box;
@@ -888,9 +886,6 @@ int gmx_disre(int argc, char* argv[])
         maxxv = xvgropen(opt2fn("-dm", NFILE, fnm), "Largest Violation", "Time (ps)", "nm", oenv);
     }
 
-    auto mdAtoms = gmx::makeMDAtoms(fplog, *topInfo.mtop(), *ir, false, nullptr);
-    atoms2md(*topInfo.mtop(), *ir, -1, {}, ntopatoms, mdAtoms.get());
-    update_mdatoms(mdAtoms->mdatoms(), ir->fepvals->initialLambda(FreeEnergyPerturbationCouplingType::Fep));
     if (ir->pbcType != PbcType::No)
     {
         gpbc = gmx_rmpbc_init(idef, ir->pbcType, natoms);

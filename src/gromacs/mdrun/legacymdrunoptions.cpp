@@ -52,10 +52,10 @@
 #include <filesystem>
 
 #include "gromacs/fileio/oenv.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/vectypes.h"
 
 namespace gmx
@@ -87,6 +87,9 @@ int LegacyMdrunOptions::updateFromCommandLine(int argc, char** argv, ArrayRef<co
         PCA_Flags |= PCA_DISABLE_INPUT_FILE_CHECKING;
     }
 
+    // This can be called repeatedly, e.g. by gmxapi when re-launching
+    output_env_done(oenv);
+    oenv = nullptr;
     if (!parse_common_args(&argc,
                            argv,
                            PCA_Flags,

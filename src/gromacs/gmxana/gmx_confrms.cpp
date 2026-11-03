@@ -50,7 +50,6 @@
 #include "gromacs/fileio/pdbio.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/math/do_fit.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/pbcutil/rmpbc.h"
 #include "gromacs/topology/atoms.h"
@@ -61,6 +60,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -517,8 +517,8 @@ int gmx_confrms(int argc, char* argv[])
         "(use [TT]rasmol -nmrpdb[tt]). Also in a [REF].pdb[ref] file, B-factors",
         "calculated from the atomic MSD values can be written with [TT]-bfac[tt].",
     };
-    static gmx_bool bOne = FALSE, bRmpbc = FALSE, bMW = TRUE, bName = FALSE, bBfac = FALSE,
-                    bFit = TRUE, bLabel = FALSE;
+    gmx_bool bOne = FALSE, bRmpbc = FALSE, bMW = TRUE, bName = FALSE, bBfac = FALSE, bFit = TRUE,
+             bLabel = FALSE;
 
     t_pargs pa[] = {
         { "-one", FALSE, etBOOL, { &bOne }, "Only write the fitted structure to file" },

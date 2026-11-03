@@ -1,4 +1,0 @@
-#ifndef COLVARS_VERSION
-#define COLVARS_VERSION "2025-10-13"
-#define COLVARS_PATCH_VERSION 0
-#endif

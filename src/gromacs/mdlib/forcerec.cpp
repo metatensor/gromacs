@@ -61,7 +61,6 @@
 #include "gromacs/listed_forces/listed_forces.h"
 #include "gromacs/listed_forces/listed_forces_gpu.h"
 #include "gromacs/listed_forces/pairs.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdlib/dispersioncorrection.h"
 #include "gromacs/mdlib/force.h"
@@ -98,6 +97,7 @@
 #include "gromacs/utility/enumerationhelpers.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/listoflists.h"
 #include "gromacs/utility/logger.h"
@@ -168,7 +168,8 @@ std::vector<real> makeNonBondedParameterLists(const int                      num
     return nbfp;
 }
 
-std::vector<real> makeLJPmeC6GridCorrectionParameters(const int                      numAtomTypes,
+std::vector<real> makeLJPmeC6GridCorrectionParameters(const int  numAtomTypes,
+                                                      const bool addFillerAtomType,
                                                       gmx::ArrayRef<const t_iparams> iparams,
                                                       LongRangeVdW ljpme_combination_rule)
 {
@@ -177,7 +178,9 @@ std::vector<real> makeLJPmeC6GridCorrectionParameters(const int                 
      * access to the C6-values used on the reciprocal grid in pme.c
      */
 
-    std::vector<real> grid(2 * numAtomTypes * numAtomTypes, 0.0);
+    const int numAtomTypesGrid = numAtomTypes + (addFillerAtomType ? 1 : 0);
+
+    std::vector<real> grid(2 * gmx::square(numAtomTypesGrid), 0.0);
     for (int i = 0; (i < numAtomTypes); i++)
     {
         for (int j = 0; (j < numAtomTypes); j++)
@@ -199,7 +202,7 @@ std::vector<real> makeLJPmeC6GridCorrectionParameters(const int                 
             /* Store the elements at the same relative positions as C6 in nbfp in order
              * to simplify access in the kernels
              */
-            grid[2 * (numAtomTypes * i + j)] = c6 * 6.0;
+            grid[2 * (i * numAtomTypesGrid + j)] = c6 * 6.0;
         }
     }
     return grid;
@@ -280,7 +283,7 @@ makeAtomInfoForEachMoleculeBlock(const gmx_mtop_t& mtop, const t_forcerec* fr)
         std::vector<ConstraintTypeForAtom> constraintTypeOfAtom(molt.atoms.nr, ConstraintTypeForAtom::None);
         for (const auto ftype : gmx::EnumerationWrapper<InteractionFunction>{})
         {
-            if (interaction_function[ftype].flags & IF_CONSTRAINT)
+            if (interaction_function[ftype].categories & sc_ifcConstraint)
             {
                 const int nral = NRAL(ftype);
                 for (int ia = 0; ia < molt.ilist[ftype].size(); ia += 1 + nral)
@@ -940,8 +943,9 @@ void init_forcerec(FILE*                            fplog,
             mtop.ffparams.atnr, true, mtop.ffparams.iparams, forcerec->haveBuckingham);
     if (usingLJPme(interactionConst->vdw.type))
     {
-        forcerec->ljpme_c6grid = makeLJPmeC6GridCorrectionParameters(
-                mtop.ffparams.atnr, mtop.ffparams.iparams, forcerec->ljpme_combination_rule);
+        const bool addFillerType = true;
+        forcerec->ljpme_c6grid   = makeLJPmeC6GridCorrectionParameters(
+                mtop.ffparams.atnr, addFillerType, mtop.ffparams.iparams, forcerec->ljpme_combination_rule);
     }
 
     /* Copy the energy group exclusions */
@@ -1086,7 +1090,7 @@ void init_forcerec(FILE*                            fplog,
                     interactionSelection,
                     commrec->dd,
                     commMultiSim,
-                    fplog,
+                    mdlog,
                     wcycle,
                     *forcerec,
                     nrnb);
@@ -1103,7 +1107,7 @@ void init_forcerec(FILE*                            fplog,
                 ListedForces::interactionSelectionAll(),
                 commrec->dd,
                 commMultiSim,
-                fplog,
+                mdlog,
                 wcycle,
                 *forcerec,
                 nrnb);

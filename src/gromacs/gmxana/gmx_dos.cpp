@@ -55,7 +55,6 @@
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/mdtypes/md_enums.h"
@@ -68,6 +67,7 @@
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/pleasecite.h"
 #include "gromacs/utility/real.h"
@@ -304,10 +304,10 @@ int gmx_dos(int argc, char* argv[])
     double            invNormalize;
     gmx_bool          normalizeAutocorrelation;
 
-    static gmx_bool bVerbose = TRUE, bAbsolute = FALSE, bNormalizeDos = FALSE;
-    static gmx_bool bRecip = FALSE;
-    static real     Temp = 298.15, toler = 1e-6;
-    int             min_frames = 100;
+    gmx_bool bVerbose = TRUE, bAbsolute = FALSE, bNormalizeDos = FALSE;
+    gmx_bool bRecip = FALSE;
+    real     Temp = 298.15, toler = 1e-6;
+    int      min_frames = 100;
 
     t_pargs pa[] = {
         { "-v", FALSE, etBOOL, { &bVerbose }, "Be loud and noisy." },

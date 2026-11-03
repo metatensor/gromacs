@@ -52,7 +52,6 @@
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/pbcutil/rmpbc.h"
 #include "gromacs/topology/atoms.h"
@@ -63,6 +62,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -203,9 +203,9 @@ int gmx_mdmat(int argc, char* argv[])
         "residues over the whole trajectory can be made.",
         "The output can be processed with [gmx-xpm2ps] to make a PostScript (tm) plot."
     };
-    static real truncate = 1.5;
-    static int  nlevels  = 40;
-    t_pargs     pa[]     = {
+    real    truncate = 1.5;
+    int     nlevels  = 40;
+    t_pargs pa[]     = {
         { "-t", FALSE, etREAL, { &truncate }, "trunc distance" },
         { "-nlevels", FALSE, etINT, { &nlevels }, "Discretize distance in this number of levels" }
     };
@@ -228,7 +228,8 @@ int gmx_mdmat(int argc, char* argv[])
     int               i, j, nres, natoms, nframes, trxnat;
     t_trxstatus*      status;
     gmx_bool          bCalcN, bFrames;
-    real              t, ratio;
+    double            t;
+    real              ratio;
     char              label[234];
     t_rgb             rlo, rhi;
     rvec*             x;
@@ -395,7 +396,8 @@ int gmx_mdmat(int argc, char* argv[])
             totmdmat[i][j] /= nframes;
         }
     }
-    write_xpm(opt2FILE("-mean", NFILE, fnm, "w"),
+    FILE* meanFile = opt2FILE("-mean", NFILE, fnm, "w");
+    write_xpm(meanFile,
               0,
               "Mean smallest distance",
               "Distance (nm)",
@@ -411,6 +413,7 @@ int gmx_mdmat(int argc, char* argv[])
               rlo,
               rhi,
               &nlevels);
+    gmx_ffclose(meanFile);
 
     if (bCalcN)
     {

@@ -87,7 +87,6 @@
 #include "gromacs/math/paddedvector.h"
 #include "gromacs/mdlib/tests/watersystem.h"
 #include "gromacs/mdtypes/md_enums.h"
-#include "gromacs/mdtypes/mdatom.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/topology/idef.h"
 #include "gromacs/topology/ifunc.h"
@@ -167,6 +166,15 @@ void applySettleGpu(const DeviceContext& deviceContext,
     deviceContext.activate();
 
     auto settleGpu = std::make_unique<SettleGpu>(testData->mtop_, deviceContext, deviceStream);
+
+    const int currentNumSettles = testData->numAtoms_ / testData->atomsPerSettle_;
+    {
+        SCOPED_TRACE("Preliminary call to set() to cover resizing edge cases");
+        // Use one SETTLE more, so the call under test shrinks an object that holds a topology
+        SettleTestData largerData(currentNumSettles + 1);
+        settleGpu->set(*largerData.idef_);
+        deviceStream.synchronize();
+    }
 
     settleGpu->set(*testData->idef_);
     PbcAiuc pbcAiuc;

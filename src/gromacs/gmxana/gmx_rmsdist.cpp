@@ -52,7 +52,6 @@
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/topology/atoms.h"
@@ -62,6 +61,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -722,8 +722,8 @@ int gmx_rmsdist(int argc, char* argv[])
 
     };
 
-    int  i, teller;
-    real t;
+    int    i, teller;
+    double t;
 
     t_topology top;
     PbcType    pbcType;
@@ -745,10 +745,10 @@ int gmx_rmsdist(int argc, char* argv[])
     t_rgb        rlo, rhi;
     gmx_bool     bRMS, bScale, bMean, bNOE, bNMR3, bNMR6, bNMR;
 
-    static int        nlevels  = 40;
-    static real       scalemax = -1.0;
-    static gmx_bool   bSumH    = TRUE;
-    static gmx_bool   bPBC     = TRUE;
+    int               nlevels  = 40;
+    real              scalemax = -1.0;
+    gmx_bool          bSumH    = TRUE;
+    gmx_bool          bPBC     = TRUE;
     gmx_output_env_t* oenv;
     gmx::TimeControl  timeControl;
 
@@ -913,7 +913,8 @@ int gmx_rmsdist(int argc, char* argv[])
 
     if (bRMS)
     {
-        write_xpm(opt2FILE("-rms", NFILE, fnm, "w"),
+        FILE* rmsFile = opt2FILE("-rms", NFILE, fnm, "w");
+        write_xpm(rmsFile,
                   0,
                   "RMS of distance",
                   "RMS (nm)",
@@ -929,11 +930,13 @@ int gmx_rmsdist(int argc, char* argv[])
                   rlo,
                   rhi,
                   &nlevels);
+        gmx_ffclose(rmsFile);
     }
 
     if (bScale)
     {
-        write_xpm(opt2FILE("-scl", NFILE, fnm, "w"),
+        FILE* scaledFile = opt2FILE("-scl", NFILE, fnm, "w");
+        write_xpm(scaledFile,
                   0,
                   "Relative RMS",
                   "RMS",
@@ -949,11 +952,13 @@ int gmx_rmsdist(int argc, char* argv[])
                   rlo,
                   rhi,
                   &nlevels);
+        gmx_ffclose(scaledFile);
     }
 
     if (bMean)
     {
-        write_xpm(opt2FILE("-mean", NFILE, fnm, "w"),
+        FILE* meanFile = opt2FILE("-mean", NFILE, fnm, "w");
+        write_xpm(meanFile,
                   0,
                   "Mean Distance",
                   "Distance (nm)",
@@ -969,11 +974,13 @@ int gmx_rmsdist(int argc, char* argv[])
                   rlo,
                   rhi,
                   &nlevels);
+        gmx_ffclose(meanFile);
     }
 
     if (bNMR3)
     {
-        write_xpm(opt2FILE("-nmr3", NFILE, fnm, "w"),
+        FILE* nmr3File = opt2FILE("-nmr3", NFILE, fnm, "w");
+        write_xpm(nmr3File,
                   0,
                   "1/r^3 averaged distances",
                   "Distance (nm)",
@@ -989,10 +996,12 @@ int gmx_rmsdist(int argc, char* argv[])
                   rlo,
                   rhi,
                   &nlevels);
+        gmx_ffclose(nmr3File);
     }
     if (bNMR6)
     {
-        write_xpm(opt2FILE("-nmr6", NFILE, fnm, "w"),
+        FILE* nmr6File = opt2FILE("-nmr6", NFILE, fnm, "w");
+        write_xpm(nmr6File,
                   0,
                   "1/r^6 averaged distances",
                   "Distance (nm)",
@@ -1008,11 +1017,14 @@ int gmx_rmsdist(int argc, char* argv[])
                   rlo,
                   rhi,
                   &nlevels);
+        gmx_ffclose(nmr6File);
     }
 
     if (bNOE)
     {
-        write_noe(opt2FILE("-noe", NFILE, fnm, "w"), gnr, noe, noe_gr, scalemax);
+        FILE* noeFile = opt2FILE("-noe", NFILE, fnm, "w");
+        write_noe(noeFile, gnr, noe, noe_gr, scalemax);
+        gmx_ffclose(noeFile);
     }
 
     do_view(oenv, ftp2fn(efXVG, NFILE, fnm), nullptr);

@@ -54,7 +54,6 @@
 #include "gromacs/gmxana/cmat.h"
 #include "gromacs/gmxana/gmx_ana.h"
 #include "gromacs/gmxana/gstat.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/math/utilities.h"
 #include "gromacs/pbcutil/pbc.h"
@@ -69,6 +68,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/real.h"
@@ -297,7 +297,7 @@ static void calc_tetra_order_parm(const char*             fnNDX,
     PbcType      pbcType;
     t_trxstatus* status;
     int          natoms;
-    real         t;
+    double       t;
     rvec *       xtop, *x;
     matrix       box;
     real         sg, sk;
@@ -434,11 +434,11 @@ static void calc_order(const char*                     fn,
             Sx, Sy, Sz,        /* the three molecular axes                       */
             tmp1, tmp2,        /* temp. rvecs for calculating dot products       */
             frameorder;        /* order parameters for one frame                 */
-    real* slFrameorder;        /* order parameter for one frame, per slice      */
-    real  length,              /* total distance between two atoms               */
-            t,                 /* time from trajectory                           */
-            z_ave, z1, z2;     /* average z, used to det. which slice atom is in */
-    int natoms,                /* nr. atoms in trj                               */
+    real*  slFrameorder;       /* order parameter for one frame, per slice      */
+    real   length;             /* total distance between two atoms               */
+    double t;                  /* time from trajectory                           */
+    real   z_ave, z1, z2;      /* average z, used to det. which slice atom is in */
+    int    natoms,             /* nr. atoms in trj                               */
             nr_tails,          /* nr tails, to check if index file is correct    */
             size = 0,          /* nr. of atoms in group. same as nr_tails        */
             i, j, m, k, slice; /* current slice number                           */
@@ -734,6 +734,7 @@ static void calc_order(const char*                     fn,
 
     } while (read_next_x(oenv, status, &t, x0, box));
     /*********** done with status file **********/
+    close_trx(status);
 
     fprintf(stderr, "\nRead trajectory. Printing parameters to file\n");
     gmx_rmpbc_done(gpbc);
@@ -971,36 +972,36 @@ int gmx_order(int argc, char* argv[])
         "worked ever since it was added and has thus been removed."
     };
 
-    static int         nslices       = 1;     /* nr of slices defined       */
-    static gmx_bool    bSzonly       = FALSE; /* True if only Sz is wanted  */
-    static bool        bUnsatRemoved = false; /* Removed because it doesn't work. */
-    static const char* normal_axis[] = { nullptr, "z", "x", "y", nullptr };
-    static gmx_bool    permolecule   = FALSE; /*compute on a per-molecule basis */
-    static gmx_bool    radial        = FALSE; /*compute a radial membrane normal */
-    static gmx_bool    distcalc      = FALSE; /*calculate distance from a reference group */
-    t_pargs            pa[]          = {
+    int         nslices       = 1;     /* nr of slices defined       */
+    gmx_bool    bSzonly       = FALSE; /* True if only Sz is wanted  */
+    bool        bUnsatRemoved = false; /* Removed because it doesn't work. */
+    const char* normal_axis[] = { nullptr, "z", "x", "y", nullptr };
+    gmx_bool    permolecule   = FALSE; /*compute on a per-molecule basis */
+    gmx_bool    radial        = FALSE; /*compute a radial membrane normal */
+    gmx_bool    distcalc      = FALSE; /*calculate distance from a reference group */
+    t_pargs     pa[]          = {
         { "-d", FALSE, etENUM, { normal_axis }, "Direction of the normal on the membrane" },
         { "-sl",
-                              FALSE,
-                              etINT,
-                              { &nslices },
-                              "Calculate order parameter as function of box length, dividing the box"
-                                                  " into this number of slices." },
+                       FALSE,
+                       etINT,
+                       { &nslices },
+                       "Calculate order parameter as function of box length, dividing the box"
+                                    " into this number of slices." },
         { "-szonly",
-                              FALSE,
-                              etBOOL,
-                              { &bSzonly },
-                              "Only give Sz element of order tensor. (axis can be specified with [TT]-d[tt])" },
+                       FALSE,
+                       etBOOL,
+                       { &bSzonly },
+                       "Only give Sz element of order tensor. (axis can be specified with [TT]-d[tt])" },
         { "-unsat",
-                              FALSE,
-                              etBOOL,
-                              { &bUnsatRemoved },
-                              "HIDDENThis option has been removed as it didn't ever properly work." },
+                       FALSE,
+                       etBOOL,
+                       { &bUnsatRemoved },
+                       "HIDDENThis option has been removed as it didn't ever properly work." },
         { "-permolecule",
-                              FALSE,
-                              etBOOL,
-                              { &permolecule },
-                              "Compute per-molecule Scd order parameters" },
+                       FALSE,
+                       etBOOL,
+                       { &permolecule },
+                       "Compute per-molecule Scd order parameters" },
         { "-radial", FALSE, etBOOL, { &radial }, "Compute a radial membrane normal" },
         { "-calcdist", FALSE, etBOOL, { &distcalc }, "Compute distance from a reference" },
     };

@@ -46,11 +46,11 @@
 #include "gromacs/fileio/filetypes.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/arraysize.h"
 #include "gromacs/utility/basedefinitions.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/real.h"
 
 struct gmx_output_env_t;
@@ -79,9 +79,9 @@ int gmx_sigeps(int argc, char* argv[])
         "in  file. In addition, it makes an approximation of a Buckingham potential",
         "to a Lennard-Jones potential."
     };
-    static real       c6 = 1.0e-3, cn = 1.0e-6, qi = 0, qj = 0, sig = 0.3, eps = 1, sigfac = 0.7;
-    static real       Abh = 1e5, Bbh = 32, Cbh = 1e-3;
-    static int        npow  = 12;
+    real              c6 = 1.0e-3, cn = 1.0e-6, qi = 0, qj = 0, sig = 0.3, eps = 1, sigfac = 0.7;
+    real              Abh = 1e5, Bbh = 32, Cbh = 1e-3;
+    int               npow  = 12;
     t_pargs           pa[]  = { { "-c6", FALSE, etREAL, { &c6 }, "C6" },
                                 { "-cn", FALSE, etREAL, { &cn }, "Constant for repulsion" },
                                 { "-pow", FALSE, etINT, { &npow }, "Power of the repulsion term" },

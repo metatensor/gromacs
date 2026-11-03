@@ -139,6 +139,8 @@ Standard CMake mechanism for specifying the compiler flags is to use
 ``CMAKE_C_FLAGS``/``CMAKE_CXX_FLAGS`` for flags that affect all build types,
 and :samp:`CMAKE_C_FLAGS_{buildtype}`/:samp:`CMAKE_CXX_FLAGS_{buildtype}` for
 flags that only affect a specific build type.  CMake provides some default flags.
+The C++ flags are not used when compiling CUDA or HIP sources; use
+``CMAKE_CUDA_FLAGS``/``CMAKE_HIP_FLAGS`` and their per-build-type variants for those.
 
 |Gromacs| determines its own set of default flags, grouped into two categories:
 
@@ -393,7 +395,7 @@ Variables affecting the ``all`` target
 .. cmake:: GMX_DEVELOPER_BUILD
 
    If set ``ON``, the ``all`` target will include also the test binaries using
-   Google Test (if :cmake:`GMX_BUILD_UNITTESTS` is ``ON``), while ``webpage``
+   Google Test (if :cmake:`BUILD_TESTING` is ``ON``), while ``webpage``
    target will also include Reference manual in PDF format.
    Also, :cmake:`GMX_COMPILER_WARNINGS` and
    `CMAKE_EXPORT_COMPILE_COMMANDS <https://cmake.org/cmake/help/latest/variable/CMAKE_EXPORT_COMPILE_COMMANDS.html>`__
@@ -469,15 +471,6 @@ Variables affecting special targets
    documentation generated from this build is suitable for releasing (on the
    web page and/or in the source distribution package).
    Defaults to ``OFF``.
-
-.. cmake:: GMX_BUILD_UNITTESTS
-
-   If ``ON``, test binaries using Google Test are built (either as the separate
-   ``tests`` target, or also as part of the ``all`` target, depending on
-   :cmake:`GMX_DEVELOPER_BUILD`).  All dependencies required for building the
-   tests (Google Test and Google Mock frameworks, and tinyxml2) are
-   included in :file:`src/external/`.
-   Defaults to ``ON`` if :cmake:`BUILD_TESTING` is ``ON``.
 
 .. cmake:: GMX_COMPACT_DOXYGEN
 

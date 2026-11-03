@@ -51,7 +51,6 @@
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/math/units.h"
 #include "gromacs/trajectory/energyframe.h"
 #include "gromacs/utility/arrayref.h"
@@ -59,6 +58,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/futil.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -141,25 +141,25 @@ int gmx_enemat(int argc, char* argv[])
         "(e.g. residue number) in the [TT]-groups[tt] will be ignored",
         "in the comparison."
     };
-    static gmx_bool bSum      = FALSE;
-    static gmx_bool bMeanEmtx = TRUE;
-    static int      skip = 0, nlevels = 20;
-    static real     cutmax = 1e20, cutmin = -1e20, reftemp = 300.0;
-    static gmx_bool bCoulSR = TRUE, bCoul14 = FALSE;
-    static gmx_bool bLJSR = TRUE, bLJ14 = FALSE, bBhamSR = FALSE, bFree = TRUE;
-    t_pargs         pa[] = {
+    gmx_bool bSum      = FALSE;
+    gmx_bool bMeanEmtx = TRUE;
+    int      skip = 0, nlevels = 20;
+    real     cutmax = 1e20, cutmin = -1e20, reftemp = 300.0;
+    gmx_bool bCoulSR = TRUE, bCoul14 = FALSE;
+    gmx_bool bLJSR = TRUE, bLJ14 = FALSE, bBhamSR = FALSE, bFree = TRUE;
+    t_pargs  pa[] = {
         { "-sum",
-                  FALSE,
-                  etBOOL,
-                  { &bSum },
-                  "Sum the energy terms selected rather than display them all" },
+           FALSE,
+           etBOOL,
+           { &bSum },
+           "Sum the energy terms selected rather than display them all" },
         { "-skip", FALSE, etINT, { &skip }, "Skip number of frames between data points" },
         { "-mean",
-                  FALSE,
-                  etBOOL,
-                  { &bMeanEmtx },
-                  "with [TT]-groups[tt] extracts matrix of mean energies instead of "
-                          "matrix for each timestep" },
+           FALSE,
+           etBOOL,
+           { &bMeanEmtx },
+           "with [TT]-groups[tt] extracts matrix of mean energies instead of "
+            "matrix for each timestep" },
         { "-nlevels", FALSE, etINT, { &nlevels }, "number of levels for matrix colors" },
         { "-max", FALSE, etREAL, { &cutmax }, "max value for energies" },
         { "-min", FALSE, etREAL, { &cutmin }, "min value for energies" },
@@ -170,10 +170,10 @@ int gmx_enemat(int argc, char* argv[])
         { "-bhamsr", FALSE, etBOOL, { &bBhamSR }, "extract Buckingham SR energies" },
         { "-free", FALSE, etBOOL, { &bFree }, "calculate free energy" },
         { "-temp",
-                  FALSE,
-                  etREAL,
-                  { &reftemp },
-                  "reference temperature for free energy calculation" }
+           FALSE,
+           etREAL,
+           { &reftemp },
+           "reference temperature for free energy calculation" }
     };
     /* We will define egSP more energy-groups:
        egTotal (total energy) */
@@ -292,12 +292,10 @@ int gmx_enemat(int argc, char* argv[])
     fprintf(stderr, "\n");
     if (n == 0)
     {
-        // Return an error, can't do what the user asked for
-        fprintf(stderr,
-                "None of the specified energy groups were found in this .edr file.\n"
-                "Perhaps you used the wrong groups, the wrong files, or didn't use a .tpr\n"
-                "that was made from an .mdp file that specified these energy groups.\n");
-        return 1;
+        gmx_fatal(FARGS,
+                  "None of the specified energy groups were found in this .edr file.\n"
+                  "Perhaps you used the wrong groups, the wrong files, or didn't use a .tpr\n"
+                  "that was made from an .mdp file that specified these energy groups.\n");
     }
     nset = n;
     snew(eneset, nset + 1);
@@ -693,7 +691,7 @@ int gmx_enemat(int argc, char* argv[])
             gmx_ffclose(out);
          */
     }
-    close_enx(in);
+    done_ener_file(in);
 
     return 0;
 }

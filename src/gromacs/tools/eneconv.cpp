@@ -52,7 +52,6 @@
 #include "gromacs/fileio/filetypes.h"
 #include "gromacs/fileio/trxio.h"
 #include "gromacs/listed_forces/disre.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/trajectory/energyframe.h"
 #include "gromacs/utility/arrayref.h"
@@ -60,6 +59,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/int64_to_int.h"
 #include "gromacs/utility/real.h"
 #include "gromacs/utility/smalloc.h"
@@ -187,7 +187,7 @@ static int scan_ene_files(const std::vector<std::string>& files, double* readtim
             t2          = fr->t;
             *timestep   = t2 - t1;
             readtime[f] = t1;
-            close_enx(in);
+            done_ener_file(in);
         }
         else
         {
@@ -219,7 +219,7 @@ static int scan_ene_files(const std::vector<std::string>& files, double* readtim
             }
             do_enx(in, fr);
             readtime[f] = fr->t;
-            close_enx(in);
+            done_ener_file(in);
         }
         fprintf(stderr, "\n");
     }
@@ -489,15 +489,15 @@ int gmx_eneconv(int argc, char* argv[])
     };
 
 #define NFILE asize(fnm)
-    gmx_bool        bWrite;
-    static double   delta_t  = 0.0;
-    static double   toffset  = 0;
-    static real     scalefac = 1;
-    static gmx_bool bSetTime = FALSE;
-    static gmx_bool bSort = TRUE, bError = TRUE;
-    static double   begin     = -1;
-    static double   end       = -1;
-    gmx_bool        remove_dh = FALSE;
+    gmx_bool bWrite;
+    double   delta_t  = 0.0;
+    double   toffset  = 0;
+    real     scalefac = 1;
+    gmx_bool bSetTime = FALSE;
+    gmx_bool bSort = TRUE, bError = TRUE;
+    double   begin     = -1;
+    double   end       = -1;
+    gmx_bool remove_dh = FALSE;
 
     t_pargs pa[] = {
         { "-b", FALSE, etTIME, { &begin }, "First time to use" },
@@ -805,10 +805,11 @@ int gmx_eneconv(int argc, char* argv[])
         }
 
         /* move energies to lastee */
-        close_enx(in);
+        done_ener_file(in);
 
         fprintf(stderr, "\n");
     }
+    done_ener_file(out);
     if (noutfr == 0)
     {
         fprintf(stderr, "No frames written.\n");

@@ -167,14 +167,19 @@ void pme_gpu_free_energy_virial(PmeGpu* pmeGpu)
     }
 }
 
-void pme_gpu_clear_energy_virial(const PmeGpu* pmeGpu, const bool gpuGraphWithSeparatePmeRank)
+void pme_gpu_clear_energy_virial(const PmeGpu* pmeGpu,
+                                 const bool    gpuGraphWithSeparatePmeRank,
+                                 const bool    computedEnergyAndVirial)
 {
-    for (int gridIndex = 0; gridIndex < pmeGpu->common->ngrids; gridIndex++)
+    if (computedEnergyAndVirial)
     {
-        clearDeviceBufferAsync(&pmeGpu->kernelParams->constants.d_virialAndEnergy[gridIndex],
-                               0,
-                               c_virialAndEnergyCount,
-                               pmeGpu->archSpecific->pmeStream_);
+        for (int gridIndex = 0; gridIndex < pmeGpu->common->ngrids; gridIndex++)
+        {
+            clearDeviceBufferAsync(&pmeGpu->kernelParams->constants.d_virialAndEnergy[gridIndex],
+                                   0,
+                                   c_virialAndEnergyCount,
+                                   pmeGpu->archSpecific->pmeStream_);
+        }
     }
     if (pmeGpu->settings.useGpuForceReduction && gpuGraphWithSeparatePmeRank)
     {
@@ -1420,7 +1425,8 @@ void pme_gpu_reinit(PmeGpu* pmeGpu, gmx_pme_t* pme, const bool useMdGpuGraph)
     pme_gpu_reinit_grids(pmeGpu);
     // Note: if timing the reinit launch overhead becomes more relevant
     // (e.g. with regular PP-PME re-balancing), we should pass wcycle here.
-    pme_gpu_finish_step(pmeGpu, useMdGpuGraph, nullptr);
+    const bool clearEnergyAndVirial = true;
+    pme_gpu_finish_step(pmeGpu, useMdGpuGraph, clearEnergyAndVirial, nullptr);
 }
 
 PmeGpu::~PmeGpu()
@@ -1799,29 +1805,27 @@ static auto selectSpreadKernelPtr(const PmeGpu*  pmeGpu,
 /*! \brief
  * Manages synchronization with remote GPU's PP coordinate sender, for a stage of the communication operation.
  *
- * For thread-MPI, an event associated with a stage of the operation is enqueued to the GPU stream that will be used by the consumer.
- * For lib-MPI, the CPU task executing this function will wait for a stage to be completed.
- * In each case, the index of the sending PP rank associated with the corresponding stage is returned.
+ * Waits for coordinate data (lib-MPI) or a coordinate-transfer event
+ * pointer (thread-MPI) from one of the PP ranks.
+ * With thread-MPI, the event is enqueued into the device stream that will consume the coordinates.
+ * With lib-MPI, the wait itself ensures that the data has arrived.
  *
  * \param[in]  pmeGpu                    The PME GPU structure.
  * \param[in]  pmeCoordinateReceiverGpu  The PME coordinate receiver GPU object
  * \param[in]  usePipeline               Whether pipelining is in use for PME-PP communication
- * \param[in]  senderIndex               Index of the sender within the set of PP ranks (when
- *                                       \p usePipeline is false) or pipeline stage (otherwise)
  *
- * \return An index of a sender within the set of PP ranks that is transferring
- * a non-zero amount of particles this step.
+ * \return The index, within the set of PP ranks, of a sender whose
+ *         coordinate receive has completed. Its domain may be empty.
  */
 static int manageSyncWithPpCoordinateSenderGpu(const PmeGpu* pmeGpu,
                                                gmx::PmeCoordinateReceiverGpu* pmeCoordinateReceiverGpu,
-                                               bool usePipeline,
-                                               int  senderIndex)
+                                               bool usePipeline)
 {
+    const auto [senderIndex, event] = pmeCoordinateReceiverGpu->waitForCoordinatesFromAnyPpRank();
+    GMX_ASSERT(senderIndex >= 0, "Must get a useful sender index back");
     if (GMX_THREAD_MPI)
     {
-        GpuEventSynchronizer* event;
-        std::tie(senderIndex, event) = pmeCoordinateReceiverGpu->receivePpCoordinateSendEvent(senderIndex);
-        GMX_ASSERT(senderIndex >= 0, "Must get a useful sender index back");
+        GMX_ASSERT(event != nullptr, "Must get a useful event pointer back");
         if (usePipeline)
         {
             event->enqueueWaitEvent(*(pmeCoordinateReceiverGpu->ppCommStream(senderIndex)));
@@ -1830,10 +1834,6 @@ static int manageSyncWithPpCoordinateSenderGpu(const PmeGpu* pmeGpu,
         {
             event->enqueueWaitEvent(pmeGpu->archSpecific->pmeStream_);
         }
-    }
-    else
-    {
-        senderIndex = pmeCoordinateReceiverGpu->waitForCoordinatesFromAnyPpRank();
     }
     return senderIndex;
 }
@@ -1952,12 +1952,10 @@ void pme_gpu_spread(PmeGpu*                        pmeGpu,
         auto* timingEvent = pme_gpu_fetch_timing_event(pmeGpu, timingId);
 
         // Decide whether to pipeline spread kernels when allowed,
-        // implemented, and there is more than one PP rank sending
-        // particles.
-        const int numStagesInPipeline =
-                useGpuDirectComm ? pmeCoordinateReceiverGpu->ppCommNumRanksSendingParticles() : -1;
+        // implemented, and there is more than one such rank.
+        const int numPpRanks = useGpuDirectComm ? pmeCoordinateReceiverGpu->ppCommNumRanks() : -1;
         kernelParamsPtr->usePipeline = char(computeSplines && spreadCharges && useGpuDirectComm
-                                            && (numStagesInPipeline > 1) && !writeGlobalOrSaveSplines);
+                                            && (numPpRanks > 1) && !writeGlobalOrSaveSplines);
         if (kernelParamsPtr->usePipeline != 0)
         {
             GpuEventSynchronizer* gridsReadyForSpread = &pmeGpu->archSpecific->pmeGridsReadyForSpread;
@@ -1967,14 +1965,14 @@ void pme_gpu_spread(PmeGpu*                        pmeGpu,
             if (!useMdGpuGraph)
             {
                 gridsReadyForSpread->markEvent(pmeGpu->archSpecific->pmeStream_);
-                gridsReadyForSpread->setConsumptionLimits(numStagesInPipeline, numStagesInPipeline);
+                gridsReadyForSpread->setConsumptionLimits(numPpRanks, numPpRanks);
             }
 
-            for (int i = 0; i < numStagesInPipeline; i++)
+            for (int i = 0; i < numPpRanks; i++)
             {
                 wallcycle_start(wcycle, WallCycleCounter::WaitGpuPmePPRecvX);
                 const int senderIndex =
-                        manageSyncWithPpCoordinateSenderGpu(pmeGpu, pmeCoordinateReceiverGpu, true, i);
+                        manageSyncWithPpCoordinateSenderGpu(pmeGpu, pmeCoordinateReceiverGpu, true);
                 wallcycle_stop(wcycle, WallCycleCounter::WaitGpuPmePPRecvX);
 
                 wallcycle_start(wcycle, WallCycleCounter::LaunchGpuPme);
@@ -1987,41 +1985,44 @@ void pme_gpu_spread(PmeGpu*                        pmeGpu,
                 // set kernel configuration options specific to this stage of the pipeline
                 std::tie(kernelParamsPtr->pipelineAtomStart, kernelParamsPtr->pipelineAtomEnd) =
                         pmeCoordinateReceiverGpu->ppCommAtomRange(senderIndex);
-                GMX_RELEASE_ASSERT(kernelParamsPtr->pipelineAtomStart != kernelParamsPtr->pipelineAtomEnd,
-                                   "Cannot launch pipelined PME spread kernel with zero particles");
+
                 const int pipelineBlockCount = static_cast<int>(std::ceil(
                         static_cast<float>(kernelParamsPtr->pipelineAtomEnd - kernelParamsPtr->pipelineAtomStart)
                         / atomsPerBlock));
-                auto      pipelineDimGrid    = pmeGpuCreateGrid(pmeGpu, pipelineBlockCount);
-                config.gridSize[0]           = pipelineDimGrid.first;
-                config.gridSize[1]           = pipelineDimGrid.second;
-
-                const auto kernelArgs = [&]()
+                if (pipelineBlockCount > 0)
                 {
-                    if constexpr (c_canEmbedBuffers)
-                    {
-                        return prepareGpuKernelArguments(kernelPtr, config, kernelParamsPtr);
-                    }
-                    else
-                    {
-                        return prepareGpuKernelArguments(
-                                kernelPtr,
-                                config,
-                                kernelParamsPtr,
-                                &kernelParamsPtr->atoms.d_theta,
-                                &kernelParamsPtr->atoms.d_dtheta,
-                                &kernelParamsPtr->atoms.d_gridlineIndices,
-                                &kernelParamsPtr->grid.d_realGrid[FEP_STATE_A],
-                                &kernelParamsPtr->grid.d_realGrid[FEP_STATE_B],
-                                &kernelParamsPtr->grid.d_fractShiftsTable,
-                                &kernelParamsPtr->grid.d_gridlineIndicesTable,
-                                &kernelParamsPtr->atoms.d_coefficients[FEP_STATE_A],
-                                &kernelParamsPtr->atoms.d_coefficients[FEP_STATE_B],
-                                &kernelParamsPtr->atoms.d_coordinates);
-                    }
-                }();
+                    auto pipelineDimGrid = pmeGpuCreateGrid(pmeGpu, pipelineBlockCount);
+                    config.gridSize[0]   = pipelineDimGrid.first;
+                    config.gridSize[1]   = pipelineDimGrid.second;
 
-                launchGpuKernel(kernelPtr, config, *launchStream, timingEvent, "PME spline/spread", kernelArgs);
+                    const auto kernelArgs = [&]()
+                    {
+                        if constexpr (c_canEmbedBuffers)
+                        {
+                            return prepareGpuKernelArguments(kernelPtr, config, kernelParamsPtr);
+                        }
+                        else
+                        {
+                            return prepareGpuKernelArguments(
+                                    kernelPtr,
+                                    config,
+                                    kernelParamsPtr,
+                                    &kernelParamsPtr->atoms.d_theta,
+                                    &kernelParamsPtr->atoms.d_dtheta,
+                                    &kernelParamsPtr->atoms.d_gridlineIndices,
+                                    &kernelParamsPtr->grid.d_realGrid[FEP_STATE_A],
+                                    &kernelParamsPtr->grid.d_realGrid[FEP_STATE_B],
+                                    &kernelParamsPtr->grid.d_fractShiftsTable,
+                                    &kernelParamsPtr->grid.d_gridlineIndicesTable,
+                                    &kernelParamsPtr->atoms.d_coefficients[FEP_STATE_A],
+                                    &kernelParamsPtr->atoms.d_coefficients[FEP_STATE_B],
+                                    &kernelParamsPtr->atoms.d_coordinates);
+                        }
+                    }();
+
+                    launchGpuKernel(
+                            kernelPtr, config, *launchStream, timingEvent, "PME spline/spread", kernelArgs);
+                }
                 wallcycle_stop(wcycle, WallCycleCounter::LaunchGpuPme);
             }
             wallcycle_start(wcycle, WallCycleCounter::LaunchGpuPme);
@@ -2038,7 +2039,7 @@ void pme_gpu_spread(PmeGpu*                        pmeGpu,
             // kernel-execution time of compute kernels in other
             // pipeline streams. It simplifies the GROMACS code if we
             // do not keep track of where kernels were launched.
-            for (int senderIndex = 0; senderIndex < numStagesInPipeline; senderIndex++)
+            for (int senderIndex = 0; senderIndex < numPpRanks; senderIndex++)
             {
                 pmeCoordinateReceiverGpu->insertAsDependencyIntoStream(
                         senderIndex, pmeGpu->archSpecific->pmeStream_);
@@ -2050,9 +2051,9 @@ void pme_gpu_spread(PmeGpu*                        pmeGpu,
             if (useGpuDirectComm) // Sync all PME-PP communications to PME stream
             {
                 wallcycle_start(wcycle, WallCycleCounter::WaitGpuPmePPRecvX);
-                for (int i = 0; i < numStagesInPipeline; i++)
+                for (int i = 0; i < numPpRanks; i++)
                 {
-                    manageSyncWithPpCoordinateSenderGpu(pmeGpu, pmeCoordinateReceiverGpu, false, i);
+                    manageSyncWithPpCoordinateSenderGpu(pmeGpu, pmeCoordinateReceiverGpu, false);
                 }
                 wallcycle_stop(wcycle, WallCycleCounter::WaitGpuPmePPRecvX);
             }

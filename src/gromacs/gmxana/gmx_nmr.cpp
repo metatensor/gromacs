@@ -57,7 +57,6 @@
 #include "gromacs/fileio/xdr_datatype.h"
 #include "gromacs/fileio/xvgr.h"
 #include "gromacs/gmxana/gmx_ana.h"
-#include "gromacs/math/functions.h"
 #include "gromacs/mdlib/energyoutput.h"
 #include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/mdtypes/md_enums.h"
@@ -73,6 +72,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/cstringutil.h"
 #include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/functions.h"
 #include "gromacs/utility/gmxassert.h"
 #include "gromacs/utility/pleasecite.h"
 #include "gromacs/utility/real.h"
@@ -399,18 +399,18 @@ int gmx_nmr(int argc, char* argv[])
 
 
     };
-    static gmx_bool bPrAll = FALSE;
-    static gmx_bool bDp = FALSE, bOrinst = FALSE, bOvec = FALSE;
-    static int      skip = 0;
-    t_pargs         pa[] = {
+    gmx_bool bPrAll = FALSE;
+    gmx_bool bDp = FALSE, bOrinst = FALSE, bOvec = FALSE;
+    int      skip = 0;
+    t_pargs  pa[] = {
         { "-dp", FALSE, etBOOL, { &bDp }, "Print energies in high precision" },
         { "-skip", FALSE, etINT, { &skip }, "Skip number of frames between data points" },
         { "-aver",
-                  FALSE,
-                  etBOOL,
-                  { &bPrAll },
-                  "Also print the exact average and rmsd stored in the energy frames (only when 1 term is "
-                          "requested)" },
+           FALSE,
+           etBOOL,
+           { &bPrAll },
+           "Also print the exact average and rmsd stored in the energy frames (only when 1 term is "
+            "requested)" },
         { "-orinst", FALSE, etBOOL, { &bOrinst }, "Analyse instantaneous orientation data" },
         { "-ovec", FALSE, etBOOL, { &bOvec }, "Also plot the eigenvectors with [TT]-oten[tt]" }
     };
