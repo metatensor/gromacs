@@ -10,7 +10,7 @@ on:
   # Branches under review run through their pull request; a push trigger for
   # them too would run every job twice per push.
   push:
-    branches: [metatomic]
+    branches: [metatomic, metatomic-next/main]
   pull_request:
   workflow_dispatch:
 
