@@ -378,28 +378,13 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                      data_->sparseThreshold);
     }
 
-    std::string deviceName = options_.params_.device;
-    if (const char* env = std::getenv("GMX_METATOMIC_DEVICE"))
-    {
-        deviceName = env;
-    }
-    if (!deviceName.empty() && deviceName != "cpu")
-    {
-        GMX_LOG(logger_.warning)
-                .asParagraph()
-                .appendTextFormatted(
-                        "Metatomic device '%s' is a plugin concern. This engine "
-                        "submits CPU DLPack buffers.",
-                        deviceName.c_str());
-    }
-
     try
     {
-        if (!options_.params_.extensionsDirectory.empty())
+        if (!options_.params_.pluginPath.empty())
         {
             try
             {
-                metatomic::load_plugin(options_.params_.extensionsDirectory);
+                metatomic::load_plugin(options_.params_.pluginPath);
             }
             catch (const metatomic::Error& e)
             {

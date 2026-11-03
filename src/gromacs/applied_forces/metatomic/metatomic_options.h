@@ -75,14 +75,11 @@ struct MetatomicParameters
     //! model to load: the path of an exported model file, or what a plugin loads
     std::string modelPath_;
     //! path of a metatomic plugin library registered before loading the model
-    std::string extensionsDirectory;
+    std::string pluginPath;
     //! JSON object of string options passed to the plugin that loads the model
     std::string modelOptions;
     //! should metatomic run additional checks on the models inputs & outputs?
     bool checkConsistency = false;
-    //! Torch device to use to run the model. If left empty, this is defined
-    //! based on the model declared preferences
-    std::string device;
     //! specifies which variant of the model outputs should be uses for making
     //! predictions
     std::string variant;

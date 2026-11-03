@@ -3858,7 +3858,7 @@ the topology, as for :mdp:`nnpot-input-group`.
    The model to load: the path of a model file, or the name a plugin loads
    its model from. The string is passed unchanged to metatomic-core.
 
-.. mdp:: metatomic-extensions
+.. mdp:: metatomic-plugin
 
    Path of a metatomic-core plugin library, registered before the model is
    loaded. Leave empty when a plugin already registered with metatomic-core
@@ -3868,12 +3868,6 @@ the topology, as for :mdp:`nnpot-input-group`.
 
    JSON object with string keys and values, passed to the plugin that loads
    the model, for example ``{"cutoff": "5.0"}``. Empty means no options.
-
-.. mdp:: metatomic-device
-
-   Device the model should run on. |Gromacs| hands the model CPU buffers, so
-   anything other than ``cpu`` is left to the plugin and reported in the log.
-   The environment variable ``GMX_METATOMIC_DEVICE`` overrides it.
 
 .. mdp:: metatomic-check-consistency
 

@@ -99,10 +99,9 @@ public:
                 METATOMIC_MODULE_NAME + "-model",
                 gmx::test::TestFileManager::getInputFilePath("model.pt").string());
 
-        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-extensions", std::string("./ext"));
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-plugin", std::string("./ext"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-check-consistency",
                                               std::string("false"));
-        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-device", std::string("cpu"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant",
                                               std::string(""));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-uncertainty-threshold",
@@ -140,8 +139,7 @@ TEST_F(MetatomicOptionsTest, DefaultParameters)
     checker.checkBoolean(defaultParams.active, "active");
     checker.checkString(defaultParams.inputGroup, "inputGroup");
     checker.checkString(defaultParams.modelPath_, "modelPath");
-    checker.checkString(defaultParams.extensionsDirectory, "extensionsDirectory");
-    checker.checkString(defaultParams.device, "device");
+    checker.checkString(defaultParams.pluginPath, "pluginPath");
     checker.checkBoolean(defaultParams.checkConsistency, "checkConsistency");
 }
 
