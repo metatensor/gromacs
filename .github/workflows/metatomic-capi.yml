@@ -18,8 +18,8 @@ permissions:
   contents: read
 
 env:
-  # Keep in sync with src/gromacs/applied_forces/metatomic/docs/dependencies.md
-  METATOMIC_CORE_COMMIT: 07cb8766af9c28fed4e232f911a24ec3b11a3840
+  # Includes the positions-gradient unit conversion fix (metatomic#369).
+  METATOMIC_CORE_COMMIT: 19a1a57594f6b7f2631f034a94149c2d2fcef3e8
   METATENSOR_CORE_VERSION: 0.2.6
   GMX_TESTS: >-
     mta_applied_forces-test mdrunutility-test nbnxm-test topology-test

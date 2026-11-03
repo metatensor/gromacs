@@ -12,7 +12,6 @@ The classical Lennard-Jones parameters are zero, so only the plugin can produce
 the expected energy and forces. Only the Python standard library and the built
 GROMACS executable are needed.
 """
-import json
 import math
 import os
 from pathlib import Path
@@ -96,7 +95,7 @@ def main():
                             for i, p in enumerate(x))
             (root / f'{name}.gro').write_text(
                 f'Two argon atoms\n2\n{atoms}{box[0]:10.5f}{box[1]:10.5f}{box[2]:10.5f}\n')
-            options = dict(length_unit=unit, energy_unit='kJ/mol')
+            options = f'length_unit={unit} energy_unit=\"kJ/mol\"'
             (root / f'{name}.mdp').write_text(f'''integrator = md
 nsteps = 0
 dt = 0.001
@@ -120,8 +119,8 @@ comm-mode = none
 metatomic-active = true
 metatomic-input-group = System
 metatomic-model = gromacs-test-pair-model
-metatomic-extensions = {plugin}
-metatomic-model-options = {json.dumps(options)}
+metatomic-plugin = {plugin}
+metatomic-model-options = {options}
 metatomic-check-consistency = true
 ''' + (walls if pbc == 'xy' else ''))
             run([gmx, 'grompp', '-f', f'{name}.mdp', '-c', f'{name}.gro', '-p', 'topol.top',
