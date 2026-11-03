@@ -88,6 +88,9 @@ public:
     //! Returns the list of requested ranges
     ArrayRef<const real> ranges() const { return ranges_; }
 
+    //! Returns the range of the normal pairlist, the upper limit for any requested range
+    real pairlistCutoff() const;
+
 private:
     //! Reference to the global topology
     const gmx_mtop_t& mtop_;

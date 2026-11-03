@@ -43,7 +43,13 @@
 
 #include "metatomic_options.h"
 
+#include "config.h"
+
+#include <algorithm>
+#include <cctype>
+#include <iomanip>
 #include <set>
+#include <sstream>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/fileio/warninp.h"
@@ -61,6 +67,7 @@
 #include "gromacs/utility/strconvert.h"
 #include "gromacs/utility/stringutil.h"
 
+
 namespace gmx
 {
 
@@ -74,9 +81,9 @@ static const std::string ACTIVE_TAG      = "active";
 static const std::string INPUT_GROUP_TAG = "input-group";
 
 static const std::string MODEL_PATH_TAG           = "model";
-static const std::string EXTENSIONS_DIRECTORY_TAG = "extensions";
+static const std::string PLUGIN_TAG = "plugin";
+static const std::string MODEL_OPTIONS_TAG        = "model-options";
 static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
-static const std::string DEVICE_TAG               = "device";
 static const std::string VARIANT_TAG              = "variant";
 static const std::string UNCERTAINTY_THRESHOLD_TAG = "uncertainty-threshold";
 static const std::string VARIANT_ENERGY_UQ_TAG     = "variant-energy-uq";
@@ -128,7 +135,119 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
     // finalize topology
     mtop->finalize();
 }
+//! metatomic-uncertainty-threshold is auto, off, or a non-negative number of kJ/mol.
+void checkUncertaintyThreshold(const std::string& value)
+{
+    if (value == "auto" || value == "off")
+    {
+        return;
+    }
+    try
+    {
+        if (doubleFromString(value.c_str()) >= 0)
+        {
+            return;
+        }
+    }
+    catch (const InvalidInputError&)
+    {
+    }
+    GMX_THROW(InconsistentInputError(formatString(
+            "metatomic-uncertainty-threshold must be auto, off or a non-negative number in kJ/mol, "
+            "not '%s'.",
+            value.c_str())));
+}
+
+[[noreturn]] void modelOptionsError(const char* reason)
+{
+    GMX_THROW(InconsistentInputError(std::string("Invalid metatomic-model-options: ") + reason));
+}
 } // namespace
+
+std::map<std::string, std::string> parseMetatomicModelOptions(const std::string& text)
+{
+    std::map<std::string, std::string> options;
+    size_t position = 0;
+    const auto isSpace = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    const auto skipSpace = [&]()
+    {
+        while (position < text.size() && isSpace(text[position]))
+        {
+            ++position;
+        }
+    };
+    skipSpace();
+    while (position < text.size())
+    {
+        const size_t start = position;
+        while (position < text.size())
+        {
+            const unsigned char c = static_cast<unsigned char>(text[position]);
+            if (!std::isalnum(c) && c != '_' && c != '-' && c != '.')
+            {
+                break;
+            }
+            ++position;
+        }
+        const std::string key = text.substr(start, position - start);
+        skipSpace();
+        if (key.empty() || position == text.size() || text[position] != '=')
+        {
+            modelOptionsError("expected key=value with an alphanumeric, underscore, hyphen or dot key.");
+        }
+        ++position;
+        skipSpace();
+        if (position == text.size())
+        {
+            modelOptionsError("missing value; use an empty quoted string for an empty value.");
+        }
+        std::string value;
+        if (text[position] == '\'' || text[position] == '"')
+        {
+            const char quote = text[position++];
+            while (position < text.size() && text[position] != quote)
+            {
+                char c = text[position++];
+                if (c == '\\')
+                {
+                    if (position == text.size()
+                        || (text[position] != quote && text[position] != '\\'))
+                    {
+                        modelOptionsError("inside quotes, escape only the matching quote or a backslash.");
+                    }
+                    c = text[position++];
+                }
+                value += c;
+            }
+            if (position == text.size())
+            {
+                modelOptionsError("unterminated quoted value.");
+            }
+            ++position;
+            if (position < text.size() && !isSpace(text[position]))
+            {
+                modelOptionsError("expected whitespace after a quoted value.");
+            }
+        }
+        else
+        {
+            while (position < text.size() && !isSpace(text[position]))
+            {
+                if (text[position] == '\'' || text[position] == '"')
+                {
+                    modelOptionsError("quotes must enclose the entire value.");
+                }
+                value += text[position++];
+            }
+        }
+        if (!options.emplace(key, value).second)
+        {
+            modelOptionsError("duplicate option key.");
+        }
+        skipSpace();
+    }
+    return options;
+}
 
 void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
 {
@@ -140,10 +259,11 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_PATH_TAG);
     addMdpTransformFromString<std::string>(
-            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, EXTENSIONS_DIRECTORY_TAG);
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, PLUGIN_TAG);
+    addMdpTransformFromString<std::string>(
+            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_OPTIONS_TAG);
     addMdpTransformFromString<bool>(
             rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG);
-    addMdpTransformFromString<std::string>(rules, stringIdentityTransform, METATOMIC_MODULE_NAME, DEVICE_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_TAG);
     addMdpTransformFromString<std::string>(
@@ -165,8 +285,8 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(StringOption(INPUT_GROUP_TAG.c_str()).store(&params_.inputGroup));
 
     section.addOption(StringOption(MODEL_PATH_TAG.c_str()).store(&params_.modelPath_));
-    section.addOption(StringOption(EXTENSIONS_DIRECTORY_TAG.c_str()).store(&params_.extensionsDirectory));
-    section.addOption(StringOption(DEVICE_TAG.c_str()).store(&params_.device));
+    section.addOption(StringOption(PLUGIN_TAG.c_str()).store(&params_.pluginPath));
+    section.addOption(StringOption(MODEL_OPTIONS_TAG.c_str()).store(&params_.modelOptions));
     section.addOption(BooleanOption(CHECK_CONSISTENCY_TAG.c_str()).store(&params_.checkConsistency));
     section.addOption(StringOption(VARIANT_TAG.c_str()).store(&params_.variant));
     section.addOption(StringOption(UNCERTAINTY_THRESHOLD_TAG.c_str()).store(&params_.uncertaintyThreshold));
@@ -194,8 +314,9 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
 
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, MODEL_PATH_TAG, params_.modelPath_);
         addMdpOutputValue<std::string>(
-                builder, METATOMIC_MODULE_NAME, EXTENSIONS_DIRECTORY_TAG, params_.extensionsDirectory);
-        addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, DEVICE_TAG, params_.device);
+                builder, METATOMIC_MODULE_NAME, PLUGIN_TAG, params_.pluginPath);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, MODEL_OPTIONS_TAG, params_.modelOptions);
         addMdpOutputValue<bool>(
                 builder, METATOMIC_MODULE_NAME, CHECK_CONSISTENCY_TAG, params_.checkConsistency);
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, VARIANT_TAG, params_.variant);
@@ -254,6 +375,14 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
     {
         return;
     }
+    // grompp rejects what mdrun would only find when it loads the model
+    checkUncertaintyThreshold(params_.uncertaintyThreshold);
+    const auto modelOptions = parseMetatomicModelOptions(params_.modelOptions);
+    auto modelOptionsObject = treeBuilder.addObject("metatomic-model-loading-options");
+    for (const auto& [key, value] : modelOptions)
+    {
+        modelOptionsObject.addValue(key, value);
+    }
 
     auto GroupIndexAdder =
             treeBuilder.addUniformArray<std::int64_t>(METATOMIC_MODULE_NAME + "-" + INPUT_GROUP_TAG);
@@ -284,6 +413,17 @@ void MetatomicOptions::readParamsFromKvt(const KeyValueTreeObject& tree)
                    std::end(kvtIndexArray),
                    std::begin(params_.mtaIndices_),
                    [](const KeyValueTreeValue& val) { return val.cast<std::int64_t>(); });
+
+    if (!tree.keyExists("metatomic-model-loading-options"))
+    {
+        GMX_THROW(InconsistentInputError("Cannot find metatomic model-loading options in the tpr file."));
+    }
+    std::ostringstream options;
+    for (const auto& property : tree["metatomic-model-loading-options"].asObject().properties())
+    {
+        options << property.key() << '=' << std::quoted(property.value().cast<std::string>()) << ' ';
+    }
+    params_.modelOptions = options.str();
 }
 
 

@@ -6,8 +6,8 @@
 metatomic-active         = true
 metatomic-input-group    = System
 metatomic-model          = 
-metatomic-extensions     = 
-metatomic-device         = 
+metatomic-plugin         = 
+metatomic-model-options  = 
 metatomic-check-consistency = false
 metatomic-variant        = 
 metatomic-uncertainty-threshold = auto
