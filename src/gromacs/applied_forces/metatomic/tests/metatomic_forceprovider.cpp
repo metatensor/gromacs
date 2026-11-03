@@ -421,11 +421,7 @@ TEST_F(MetatomicForceProviderTest, ModelInNanometre)
     checkAgainstLennardJones();
 }
 
-/* The system is handed to metatomic in the model's length unit and the positions
- * gradient converted to kJ/mol/nm here. Converting it again in GROMACS for a system
- * passed in nm (the workaround metatensor/metatomic#369 makes wrong) would give
- * forces 10x too large with #369, and keeping the system in nm without converting
- * would give them 10x too small without it. */
+// metatomic converts model gradients from eV/Angstrom to kJ/mol/nm.
 TEST_F(MetatomicForceProviderTest, ModelInAngstromAndElectronvolt)
 {
     setModelUnits("Angstrom", "eV");
