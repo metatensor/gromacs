@@ -62,9 +62,8 @@
 
 #include <cmath>
 
-#if GMX_TORCH
-#    include <metatensor/torch.hpp>
-#    include <metatomic/torch.hpp>
+#if GMX_METATOMIC_ACTIVE
+#    include <metatomic.hpp>
 #endif
 
 namespace gmx
@@ -182,20 +181,33 @@ public:
         { energyOutputRequest->energyOutputToMetatomicPot_ = true; };
         notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
 
-#if GMX_TORCH
+#if GMX_METATOMIC_ACTIVE
         const auto setPlainPairlistRangeFunction = [this](PlainPairlistRanges* ranges)
         {
-            // Temporary: Load model just to peek at cutoff.
-            // TODO: can the whole model be loaded earlier..?
+            // Load the model once to convert its cutoff into nm.
             double max_cutoff{ 0.0 };
             try
             {
-                auto model = metatomic_torch::load_atomistic_model(options_.parameters().modelPath_);
-
-                // Check strict interaction range
-                auto capabilities =
-                        model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
-                double interaction_range = capabilities->engine_interaction_range("nm");
+                if (!options_.parameters().extensionsDirectory.empty())
+                {
+                    try
+                    {
+                        metatomic::load_plugin(options_.parameters().extensionsDirectory);
+                    }
+                    catch (const metatomic::Error& e)
+                    {
+                        const std::string message = e.what();
+                        if (message.find("already registered") == std::string::npos)
+                        {
+                            throw;
+                        }
+                    }
+                }
+                auto model = metatomic::ExternalModel(
+                        metatomic::load_model(options_.parameters().modelPath_));
+                const auto   capabilities = model.capabilities();
+                const double toNm = metatomic::unit_conversion_factor(capabilities.length_unit(), "nm");
+                const double interaction_range = capabilities.interaction_range() * toNm;
 
                 if (interaction_range < 0.0)
                 {
@@ -212,22 +224,16 @@ public:
                                 "interaction_range is infinite for this model; "
                                 "using multiple MPI domains is not supported."));
                     }
-                    // For infinite range, check if specific NLs were requested
-                    // effectively falling through to the loop below.
                 }
                 else
                 {
                     max_cutoff = interaction_range;
                 }
 
-                // Check requested neighbor lists
-                auto requested_nl = model.run_method("requested_neighbor_lists");
-                for (const auto& ivalue : requested_nl.toList())
+                // Every declared output bounds the pair lists the provider requests.
+                for (const auto& pairs : model.requested_pair_lists(capabilities.outputs()))
                 {
-                    auto options =
-                            ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
-                    double cutoff = options->engine_cutoff("nm");
-                    max_cutoff    = std::max(max_cutoff, cutoff);
+                    max_cutoff = std::max(max_cutoff, pairs.cutoff() * toNm);
                 }
             }
             catch (const std::exception& e)
@@ -246,9 +252,8 @@ public:
             }
             ranges->addRange(max_cutoff);
         };
-        // Register the callback
         notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);
-#endif // GMX_TORCH
+#endif // GMX_METATOMIC_ACTIVE
     }
 
     /*! \brief Requests to be notified during the simulation.

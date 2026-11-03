@@ -61,7 +61,10 @@
 #include <cstdio>
 
 #include <algorithm>
+#include <array>
+#include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -70,7 +73,6 @@
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/math/boxmatrix.h"
 #include "gromacs/mdlib/broadcaststructs.h"
-#include "gromacs/mdlib/gmx_omp_nthreads.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/mdtypes/forceoutput.h"
@@ -88,97 +90,316 @@
 #    undef DIM
 #endif
 
-#include <metatensor/torch.hpp>
-#include <metatomic/torch.hpp>
-
-#if GMX_GPU_CUDA || (GMX_SYCL_ACPP && GMX_ACPP_HAVE_CUDA_TARGET)
-#    include <cuda_runtime.h>
-#endif
+#include <metatensor.hpp>
+#include <metatensor/dlpack/dlpack.h>
+#include <metatomic.hpp>
 
 
 namespace gmx
 {
 
-// ModelOutput sample granularity: per-atom when sample_kind == "atom"
-// (get_per_atom/set_per_atom are being removed from metatomic-torch).
-template<typename OutputPtr>
-bool modelOutputIsAtomSample(const OutputPtr& out)
-{
-    return out->sample_kind() == "atom";
-}
-
 /*! \brief Normalizes the variant string for Metatomic output selection. */
-static torch::optional<std::string> normalize_variant(std::string variant_string)
+static std::optional<std::string> normalize_variant(std::string variant_string)
 {
     if (variant_string == "no" || variant_string.empty())
     {
-        return torch::nullopt;
+        return std::nullopt;
+    }
+    return variant_string;
+}
+
+static std::string quantity_name(const std::string& base, const std::optional<std::string>& variant)
+{
+    if (variant.has_value())
+    {
+        return base + "/" + variant.value();
+    }
+    return base;
+}
+
+static const metatomic::Quantity* find_output(const std::vector<metatomic::Quantity>& outputs,
+                                              const std::string&                     name)
+{
+    for (const auto& output : outputs)
+    {
+        if (output.name() == name)
+        {
+            return &output;
+        }
+    }
+    return nullptr;
+}
+
+struct DlpackShape
+{
+    std::vector<int64_t> shape;
+    std::vector<int64_t> strides;
+};
+
+static void dlpack_deleter(DLManagedTensorVersioned* self)
+{
+    delete static_cast<DlpackShape*>(self->manager_ctx);
+    delete self;
+}
+
+//! Wrap a caller-owned contiguous CPU buffer. The deleter frees the header only.
+static metatomic::DLPackTensor wrap_dlpack(void* data, std::vector<int64_t> shape, DLDataType dtype)
+{
+    auto* ctx   = new DlpackShape;
+    ctx->shape  = std::move(shape);
+    ctx->strides.resize(ctx->shape.size());
+    int64_t stride = 1;
+    for (int axis = static_cast<int>(ctx->shape.size()) - 1; axis >= 0; --axis)
+    {
+        ctx->strides[axis] = stride;
+        stride *= ctx->shape[axis];
+    }
+
+    auto* tensor                 = new DLManagedTensorVersioned{};
+    tensor->version.major        = DLPACK_MAJOR_VERSION;
+    tensor->version.minor        = DLPACK_MINOR_VERSION;
+    tensor->manager_ctx          = ctx;
+    tensor->deleter              = dlpack_deleter;
+    tensor->flags                = DLPACK_FLAG_BITMASK_READ_ONLY;
+    tensor->dl_tensor.data       = data;
+    tensor->dl_tensor.byte_offset = 0;
+    tensor->dl_tensor.device     = { kDLCPU, 0 };
+    tensor->dl_tensor.dtype      = dtype;
+    tensor->dl_tensor.ndim       = static_cast<int32_t>(ctx->shape.size());
+    tensor->dl_tensor.shape      = ctx->shape.data();
+    tensor->dl_tensor.strides    = ctx->strides.data();
+    return metatomic::DLPackTensor(tensor);
+}
+
+static void pbc_flags(const PbcType* pbcType, std::array<uint8_t, 3>* flags)
+{
+    if (pbcType != nullptr && *pbcType == PbcType::XY)
+    {
+        *flags = { 1, 1, 0 };
+    }
+    else if (pbcType != nullptr && *pbcType == PbcType::No)
+    {
+        *flags = { 0, 0, 0 };
     }
     else
     {
-        return variant_string;
+        *flags = { 1, 1, 1 };
     }
 }
 
-/*! \brief Converts GROMACS PbcType to a boolean tensor for Metatomic. */
-static torch::Tensor preparePbcType(PbcType* pbcType, torch::Device device)
+template<typename T>
+void apply_link_caps(std::vector<LinkFrontierAtom>& links, T* positions, int32_t* types, int32_t nAtoms)
 {
-    auto options = torch::TensorOptions().dtype(torch::kBool).device(device);
+    for (auto& link : links)
+    {
+        const int emb = link.getInputIndexEmb();
+        const int mm  = link.getInputIndexMM();
+        if (emb < 0 || mm < 0 || emb >= nAtoms || mm >= nAtoms)
+        {
+            continue;
+        }
+        RVec posEmb, posMM;
+        for (int d = 0; d < 3; ++d)
+        {
+            posEmb[d] = static_cast<real>(positions[3 * emb + d]);
+            posMM[d]  = static_cast<real>(positions[3 * mm + d]);
+        }
+        link.setPositions(posEmb, posMM);
+        const RVec cap = link.getLinkPosition();
+        for (int d = 0; d < 3; ++d)
+        {
+            positions[3 * mm + d] = static_cast<T>(cap[d]);
+        }
+        types[mm] = link.linkAtomNumber();
+    }
+}
 
-    if (*pbcType == PbcType::XY)
+static void spread_link_caps(const std::vector<LinkFrontierAtom>& links,
+                             double*                              forces,
+                             int32_t                              nAtoms,
+                             const matrix                         box,
+                             PbcType                              pbcType)
+{
+    if (links.empty())
     {
-        return torch::tensor({ true, true, false }, options);
+        return;
     }
-    else if (*pbcType == PbcType::No)
+    t_pbc pbc;
+    set_pbc(&pbc, pbcType, box);
+    for (const auto& link : links)
     {
-        return torch::tensor({ false, false, false }, options);
+        const int emb = link.getInputIndexEmb();
+        const int mm  = link.getInputIndexMM();
+        if (emb < 0 || mm < 0 || emb >= nAtoms || mm >= nAtoms)
+        {
+            continue;
+        }
+        RVec forceOnLink;
+        for (int d = 0; d < 3; ++d)
+        {
+            forceOnLink[d] = static_cast<real>(forces[3 * mm + d]);
+        }
+        const auto [forceOnEmbedded, forceOnMM] = link.spreadForce(forceOnLink, pbc);
+        for (int d = 0; d < 3; ++d)
+        {
+            forces[3 * mm + d] = static_cast<double>(forceOnMM[d]);
+            forces[3 * emb + d] += static_cast<double>(forceOnEmbedded[d]);
+        }
     }
-    return torch::tensor({ true, true, true }, options);
+}
+
+template<typename T>
+static int64_t count_above(metatensor::TensorBlock& block, double threshold)
+{
+    auto   values = block.values<T>();
+    size_t n      = 1;
+    for (size_t extent : values.shape())
+    {
+        n *= extent;
+    }
+    const T* data   = values.data();
+    int64_t  nAbove = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (static_cast<double>(data[i]) > threshold)
+        {
+            ++nAbove;
+        }
+    }
+    return nAbove;
+}
+
+template<typename T>
+static double sum_block(metatensor::TensorBlock& block)
+{
+    auto          values = block.values<T>();
+    size_t        n      = 1;
+    for (size_t extent : values.shape())
+    {
+        n *= extent;
+    }
+    const T* data = values.data();
+    double   sum  = 0.0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        sum += static_cast<double>(data[i]);
+    }
+    return sum;
+}
+
+//! Add `scale * values` into `forces`, indexing atoms by a sample column.
+template<typename T>
+static void add_atom_rows(metatensor::TensorBlock& block,
+                          int                      atomColumn,
+                          int32_t                  nAtoms,
+                          double                   scale,
+                          std::vector<double>*     forces)
+{
+    auto       sampleLabels = block.samples();
+    const auto samples      = sampleLabels.values_cpu();
+    auto       values       = block.values<T>();
+    const auto shape        = values.shape();
+    for (size_t row = 0; row < sampleLabels.count(); ++row)
+    {
+        const int32_t atom = samples(row, static_cast<size_t>(atomColumn));
+        if (atom < 0 || atom >= nAtoms)
+        {
+            GMX_THROW(APIError("Metatomic output names an atom outside the local set"));
+        }
+        for (int d = 0; d < 3; ++d)
+        {
+            const double component = shape.size() >= 3
+                                             ? static_cast<double>(values(row, static_cast<size_t>(d), 0))
+                                             : static_cast<double>(values(row, static_cast<size_t>(d)));
+            (*forces)[3 * atom + d] += scale * component;
+        }
+    }
+}
+
+//! `virial += 0.5 * strain_gradient`. Strain values are V*sigma.
+template<typename T>
+static void add_strain(metatensor::TensorBlock& block, matrix virial)
+{
+    auto       sampleLabels = block.samples();
+    auto       values       = block.values<T>();
+    const auto shape        = values.shape();
+    const size_t nRows      = shape.size() >= 3 ? sampleLabels.count() : 1;
+    for (size_t row = 0; row < nRows; ++row)
+    {
+        for (int a = 0; a < 3; ++a)
+        {
+            for (int b = 0; b < 3; ++b)
+            {
+                double component = 0.0;
+                if (shape.size() == 4)
+                {
+                    component = static_cast<double>(values(row, static_cast<size_t>(a), static_cast<size_t>(b), 0));
+                }
+                else if (shape.size() == 3)
+                {
+                    component = static_cast<double>(values(row, static_cast<size_t>(a), static_cast<size_t>(b)));
+                }
+                else
+                {
+                    component = static_cast<double>(values(static_cast<size_t>(a), static_cast<size_t>(b)));
+                }
+                virial[a][b] += static_cast<real>(0.5 * component);
+            }
+        }
+    }
 }
 
 /*! \brief Internal data structure for Metatomic runtime states. */
 struct MetatomicData
 {
-    metatensor_torch::Module           model = metatensor_torch::Module(torch::jit::Module());
-    metatomic_torch::ModelCapabilities capabilities;
-    std::vector<metatomic_torch::NeighborListOptions> nl_requests;
-    metatomic_torch::ModelEvaluationOptions           evaluations_options;
-    torch::ScalarType                                 dtype             = torch::kFloat32;
-    bool                                              check_consistency = false;
-    torch::Device                                     device            = torch::kCPU;
+    std::unique_ptr<metatomic::ExternalModel> model;
+    metatomic::ModelCapabilities              capabilities = metatomic::ModelCapabilities::builder()
+                                                      .atomic_types({})
+                                                      .interaction_range(0.0)
+                                                      .length_unit("nm")
+                                                      .supported_devices({ metatomic::ModelCapabilities::Device::CPU })
+                                                      .dtype(metatomic::ModelCapabilities::DType::Float64)
+                                                      .outputs({})
+                                                      .build();
+    std::vector<metatomic::PairListOptions> pairLists;
+    //! Each pair-list cutoff converted to nm at init.
+    std::vector<double> cutoffNm;
+    double              lengthToNm      = 1.0;
+    bool                useFloat64      = true;
+    bool                checkConsistency = false;
 
-    //! Cached NL Labels that are identical every step (created once in constructor).
-    metatensor_torch::Labels cachedNLComponent;
-    metatensor_torch::Labels cachedNLProperties;
-    //! Cached sample column names (avoids heap-allocating string vector every step).
     std::vector<std::string> nlSampleNames = {
-            "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c"
+        "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c"
     };
 
-    //! Cached types and PBC tensors (re-created on AtomsRedistributed).
-    torch::Tensor cachedTypes;
-    torch::Tensor cachedPbc;
+    std::array<uint8_t, 3> pbc = { 1, 1, 1 };
 
     //! Sparse/dense force exchange threshold (atom count). Env: GMX_METATOMIC_SPARSE_THRESHOLD.
     int32_t sparseThreshold = 1000;
 
-    //! Energy output key, including the variant suffix (e.g. "energy/pbe0").
-    std::string energy_key;
-    //! Energy uncertainty output key (empty if disabled or model lacks it).
-    std::string energy_uq_key;
-    //! Requested uncertainty output (nullptr if disabled).
-    metatomic_torch::ModelOutput uncertainty_output;
+    //! Outputs passed to execute_model, in request order.
+    std::vector<metatomic::Quantity> requested;
+    std::size_t                      energyIndex = 0;
+    std::optional<std::size_t>       uqIndex;
+    std::optional<std::size_t>       ncForceIndex;
+    std::optional<std::size_t>       ncStressIndex;
+    std::string                      energyName;
+    std::string                      uqName;
     //! Uncertainty threshold in kJ/mol. Atoms above this trigger a warning.
     double uncertaintyThreshold = 0.0;
 
-    //! Non-conservative mode: forces/stress predicted directly, no backward pass.
+    //! Non-conservative mode: forces/stress are outputs, not energy gradients.
     bool nonConservative = false;
-    //! Output keys for non-conservative forces and stress.
-    std::string nc_forces_key;
-    std::string nc_stress_key;
-    //! Requested outputs for non-conservative mode.
-    metatomic_torch::ModelOutput nc_forces_output;
-    metatomic_torch::ModelOutput nc_stress_output;
+
+    //! Home-atom selection. Rebuilt when numHomeMta_ changes.
+    std::optional<metatensor::Labels> selectedAtoms;
+    int32_t                           selectedCount = -1;
+
+    //! Buffers used when GROMACS `real` is not the model dtype.
+    std::vector<double> positions64;
+    std::vector<float>  positions32;
+    std::vector<double> cell64;
+    std::vector<float>  cell32;
 };
 
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
@@ -206,288 +427,211 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                      data_->sparseThreshold);
     }
 
+    std::string deviceName = options_.params_.device;
+    if (const char* env = std::getenv("GMX_METATOMIC_DEVICE"))
+    {
+        deviceName = env;
+    }
+    if (!deviceName.empty() && deviceName != "cpu")
+    {
+        GMX_LOG(logger_.warning)
+                .asParagraph()
+                .appendTextFormatted(
+                        "Metatomic device '%s' is a plugin concern. This engine "
+                        "submits CPU DLPack buffers.",
+                        deviceName.c_str());
+    }
+
     try
     {
-        torch::optional<std::string> extensions_directory = torch::nullopt;
         if (!options_.params_.extensionsDirectory.empty())
         {
-            extensions_directory = options_.params_.extensionsDirectory;
+            try
+            {
+                metatomic::load_plugin(options_.params_.extensionsDirectory);
+            }
+            catch (const metatomic::Error& e)
+            {
+                // The cutoff peek loads the same plugin during simulation setup.
+                const std::string message = e.what();
+                if (message.find("already registered") == std::string::npos)
+                {
+                    throw;
+                }
+            }
         }
-
-        data_->model = metatomic_torch::load_atomistic_model(options_.params_.modelPath_,
-                                                             extensions_directory);
+        data_->model = std::make_unique<metatomic::ExternalModel>(
+                metatomic::load_model(options_.params_.modelPath_));
+        data_->capabilities = data_->model->capabilities();
     }
     catch (const std::exception& e)
     {
         GMX_THROW(APIError("Failed to load metatomic model: " + std::string(e.what())));
     }
 
-    data_->capabilities =
-            data_->model.run_method("capabilities").toCustomClass<metatomic_torch::ModelCapabilitiesHolder>();
-
-    torch::optional<std::string> desiredDevice = torch::nullopt;
-    if (!options_.params_.device.empty())
+    data_->lengthToNm = metatomic::unit_conversion_factor(data_->capabilities.length_unit(), "nm");
+    data_->useFloat64 = data_->capabilities.dtype() == metatomic::ModelCapabilities::DType::Float64;
+    if (data_->capabilities.dtype() != metatomic::ModelCapabilities::DType::Float64
+        && data_->capabilities.dtype() != metatomic::ModelCapabilities::DType::Float32)
     {
-        desiredDevice = options_.params_.device;
+        GMX_THROW(APIError("Unsupported dtype from model capabilities"));
     }
-    if (const char* env = std::getenv("GMX_METATOMIC_DEVICE"))
-    {
-        desiredDevice = std::string(env);
-    }
-
-    const auto deviceType =
-            metatomic_torch::pick_device(data_->capabilities->supported_devices, desiredDevice);
-    data_->device = torch::Device(deviceType);
-
-    // Set PyTorch intra-op thread count based on device and MPI mode.
-    // For GPU devices, CPU overhead is minimal so we keep 1 thread to avoid
-    // oversubscription with GROMACS threads.  For CPU devices, model inference
-    // (matmuls, convolutions) benefits from multi-threading.
-    if (data_->device.is_cpu())
-    {
-#if GMX_THREAD_MPI
-        // Thread-MPI: ranks share a process.  PyTorch's global thread pool
-        // would be contended by all ranks calling forward() concurrently,
-        // so keep at 1 to avoid oversubscription.
-        if (mpiComm_.isParallel())
-        {
-            at::set_num_threads(1);
-        }
-#else
-        // Real MPI (or no MPI): each rank is a separate process.
-        // Use the GROMACS-assigned OpenMP thread count so that PyTorch
-        // can parallelize matrix operations within each rank's allocation.
-        if (mpiComm_.isParallel())
-        {
-            int ntomp = gmx_omp_nthreads_get(ModuleMultiThread::Default);
-            at::set_num_threads(std::max(1, ntomp));
-        }
-        // Serial: let PyTorch use its default (all cores)
-#endif
-    }
-    else
-    {
-        // GPU/other device: model runs on accelerator, CPU work is minimal.
-        if (mpiComm_.isParallel())
-        {
-            at::set_num_threads(1);
-        }
-    }
-
-    // JIT fusion: dynamic strategy with depth limit of 10 improves CPU
-    // inference throughput (matches LAMMPS pair_metatomic).
-    torch::jit::FusionStrategy strategy = { { torch::jit::FusionBehavior::DYNAMIC, 10 } };
-    torch::jit::setFusionStrategy(strategy);
-
-    // Allow disabling graph optimization when it is counterproductive.
-    if (const char* jitEnv = std::getenv("GMX_METATOMIC_DISABLE_TORCH_JIT_OPTIMIZATION"))
-    {
-        if (std::string(jitEnv) == "1")
-        {
-            torch::jit::setGraphExecutorOptimize(false);
-            GMX_LOG(logger_.info)
-                    .asParagraph()
-                    .appendText("Metatomic TorchScript graph optimization disabled");
-        }
-    }
+    data_->checkConsistency = options_.params_.checkConsistency;
+    pbc_flags(options_.params_.pbcType_.get(), &data_->pbc);
 
     GMX_LOG(logger_.info)
             .asParagraph()
-            .appendTextFormatted("Metatomic PyTorch threads: %d", at::get_num_threads());
+            .appendTextFormatted("Metatomic C API, length unit %s, model dtype %s",
+                                 data_->capabilities.length_unit().c_str(),
+                                 data_->useFloat64 ? "float64" : "float32");
 
-    // Cache NL Labels that are constant across steps (avoids per-step
-    // string vector + tensor allocation for component and properties).
-    auto devIntOpts = torch::TensorOptions().dtype(torch::kInt32).device(data_->device);
-    data_->cachedNLComponent = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{ "xyz" },
-            torch::tensor({ 0, 1, 2 }, devIntOpts).reshape({ 3, 1 }));
-    data_->cachedNLProperties = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-            std::vector<std::string>{ "distance" },
-            torch::zeros({ 1, 1 }, devIntOpts));
-
-    GMX_LOG(logger_.info)
-            .asParagraph()
-            .appendTextFormatted("Metatomic using device: %s", data_->device.str().c_str());
-
-    auto requests_ivalue = data_->model.run_method("requested_neighbor_lists");
-    for (const auto& request_ivalue : requests_ivalue.toList())
+    const auto& modelOutputs = data_->capabilities.outputs();
+    const auto  vEnergy      = normalize_variant(options_.params_.variant);
+    data_->energyName        = quantity_name("energy", vEnergy);
+    const auto* energyCap    = find_output(modelOutputs, data_->energyName);
+    if (energyCap == nullptr)
     {
-        auto nl_opt = request_ivalue.get().toCustomClass<metatomic_torch::NeighborListOptionsHolder>();
-        data_->nl_requests.push_back(nl_opt);
+        GMX_THROW(APIError(formatString(
+                "The model at '%s' does not provide an '%s' output. "
+                "Metatomic interface cannot proceed.",
+                options_.params_.modelPath_.c_str(),
+                data_->energyName.c_str())));
     }
-
-    data_->model.to(data_->device);
-
-    if (data_->capabilities->dtype() == "float64")
-    {
-        data_->dtype = torch::kFloat64;
-    }
-    else if (data_->capabilities->dtype() == "float32")
-    {
-        data_->dtype = torch::kFloat32;
-    }
-    else
-    {
-        GMX_THROW(APIError("Unsupported dtype from model capabilities: " + data_->capabilities->dtype()));
-    }
-
-    data_->evaluations_options = torch::make_intrusive<metatomic_torch::ModelEvaluationOptionsHolder>();
-    data_->evaluations_options->set_length_unit("nm");
-
-    auto outputs    = data_->capabilities->outputs();
-    auto v_energy   = normalize_variant(options_.params_.variant);
-    data_->energy_key = pick_output("energy", outputs, v_energy);
-    const auto& energy_key = data_->energy_key;
-
-    if (!outputs.contains(energy_key))
-    {
-        GMX_THROW(
-                APIError(formatString("The model at '%s' does not provide an '%s' output. "
-                                      "Metatomic interface cannot proceed.",
-                                      options_.params_.modelPath_.c_str(),
-                                      energy_key.c_str())));
-    }
-
-    auto model_output     = outputs.at(energy_key);
-    auto requested_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-    // Request the same sample granularity the model declares (atom vs system).
-    requested_output->set_sample_kind(model_output->sample_kind());
-    if (!modelOutputIsAtomSample(model_output))
+    if (energyCap->sample_kind() != metatomic::SampleKind::Atom)
     {
         GMX_LOG(logger_.warning)
                 .asParagraph()
-                .appendText(
-                        "Metatomic model does not support per-atom energy output "
-                        "(sample_kind != \"atom\"). Energy decomposition in domain "
-                        "decomposition may be less accurate.");
+                .appendText("Metatomic model does not support per-atom energy output "
+                            "(sample_kind != \"atom\"). Energy decomposition in domain "
+                            "decomposition may be less accurate.");
     }
-    requested_output->explicit_gradients = {};
-    requested_output->set_quantity("energy");
-    requested_output->set_unit("kJ/mol");
 
-    data_->evaluations_options->outputs.insert(energy_key, requested_output);
-    data_->check_consistency = options_.params_.checkConsistency;
+    data_->nonConservative = options_.params_.nonConservative;
+    {
+        // The plugin computes the gradients, and backends such as metatomic-torch's
+        // LegacyModel only differentiate a per-system energy. selected_atoms already
+        // restricts that sum to home atoms under domain decomposition.
+        auto energy = metatomic::Quantity::builder()
+                              .name(data_->energyName)
+                              .unit("kJ/mol")
+                              .sample_kind(data_->nonConservative ? energyCap->sample_kind()
+                                                                  : metatomic::SampleKind::System);
+        if (!data_->nonConservative)
+        {
+            energy.add_gradient(metatomic::Gradients::Positions)
+                    .add_gradient(metatomic::Gradients::Strain);
+        }
+        data_->energyIndex = data_->requested.size();
+        data_->requested.push_back(energy.build());
+    }
 
-    // Uncertainty checking: auto-detect energy_uncertainty output from model
     if (options_.params_.uncertaintyThreshold != "off")
     {
-        auto v_energy_uq = normalize_variant(options_.params_.variantEnergyUq);
-        bool has_uncertainty = false;
-        for (const auto& entry : outputs)
+        const auto  vUq   = normalize_variant(options_.params_.variantEnergyUq);
+        const auto  uqName = quantity_name("energy_uncertainty", vUq);
+        const auto* uqCap  = find_output(modelOutputs, uqName);
+        if (uqCap != nullptr && uqCap->sample_kind() == metatomic::SampleKind::Atom)
         {
-            if (entry.key().find("energy_uncertainty") == 0)
+            data_->uqName  = uqName;
+            data_->uqIndex = data_->requested.size();
+            data_->requested.push_back(metatomic::Quantity::builder()
+                                               .name(uqName)
+                                               .unit("kJ/mol")
+                                               .sample_kind(metatomic::SampleKind::Atom)
+                                               .build());
+            if (options_.params_.uncertaintyThreshold == "auto")
             {
-                has_uncertainty = true;
-                break;
+                data_->uncertaintyThreshold = 0.1 * metatomic::unit_conversion_factor("eV", "kJ/mol");
             }
-        }
-
-        if (has_uncertainty)
-        {
-            data_->energy_uq_key = pick_output("energy_uncertainty", outputs, v_energy_uq);
-            auto uq_cap = outputs.at(data_->energy_uq_key);
-
-            if (modelOutputIsAtomSample(uq_cap))
+            else
             {
-                data_->uncertainty_output =
-                        torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-                data_->uncertainty_output->set_quantity("energy");
-                data_->uncertainty_output->set_unit("kJ/mol");
-                data_->uncertainty_output->set_sample_kind("atom");
-
-                if (options_.params_.uncertaintyThreshold == "auto")
-                {
-                    // Default: 100 meV/atom converted to kJ/mol
-                    data_->uncertaintyThreshold =
-                            0.1 * metatomic_torch::unit_conversion_factor("energy", "eV", "kJ/mol");
-                }
-                else
-                {
-                    data_->uncertaintyThreshold =
-                            std::stod(options_.params_.uncertaintyThreshold);
-                }
-
-                data_->evaluations_options->outputs.insert(
-                        data_->energy_uq_key, data_->uncertainty_output);
-
-                GMX_LOG(logger_.info)
-                        .asParagraph()
-                        .appendTextFormatted(
-                                "Metatomic: found '%s' output, will check for atoms with "
-                                "high uncertainty (threshold: %.4f kJ/mol)",
-                                data_->energy_uq_key.c_str(),
-                                data_->uncertaintyThreshold);
+                data_->uncertaintyThreshold = std::stod(options_.params_.uncertaintyThreshold);
             }
+            GMX_LOG(logger_.info)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "Metatomic: found '%s' output, will check for atoms with "
+                            "high uncertainty (threshold: %.4f kJ/mol)",
+                            uqName.c_str(),
+                            data_->uncertaintyThreshold);
         }
     }
 
-    // Non-conservative mode: model predicts forces/stress directly
-    data_->nonConservative = options_.params_.nonConservative;
     if (data_->nonConservative)
     {
-        auto v_nc_forces = normalize_variant(options_.params_.variantNcForces);
-        auto v_nc_stress = normalize_variant(options_.params_.variantNcStress);
-
-        // Both variant overrides must match if both are set (LAMMPS convention)
-        if (v_nc_forces.has_value() && v_nc_stress.has_value()
-            && v_nc_forces.value() != v_nc_stress.value())
+        const auto vForces = normalize_variant(options_.params_.variantNcForces);
+        const auto vStress = normalize_variant(options_.params_.variantNcStress);
+        if (vForces.has_value() && vStress.has_value() && vForces.value() != vStress.value())
         {
-            GMX_THROW(APIError(
-                    "if both 'variant-nc-forces' and 'variant-nc-stress' are present, "
-                    "they must have the same value"));
+            GMX_THROW(APIError("if both 'variant-nc-forces' and 'variant-nc-stress' are present, "
+                               "they must have the same value"));
         }
-
-        data_->nc_forces_key = pick_output("non_conservative_forces", outputs, v_nc_forces);
-        if (!outputs.contains(data_->nc_forces_key))
+        const auto  forceName = quantity_name("non_conservative_force", vForces);
+        const auto* forceCap  = find_output(modelOutputs, forceName);
+        if (forceCap == nullptr)
         {
             GMX_THROW(APIError(formatString(
                     "The model does not provide '%s' output, "
                     "we can not enable non-conservative simulations",
-                    data_->nc_forces_key.c_str())));
+                    forceName.c_str())));
         }
-        auto nc_forces_cap = outputs.at(data_->nc_forces_key);
-        if (!modelOutputIsAtomSample(nc_forces_cap))
+        if (forceCap->sample_kind() != metatomic::SampleKind::Atom)
         {
             GMX_THROW(APIError(formatString(
                     "The model's '%s' output can not produce per-atom output "
                     "(sample_kind != \"atom\"), we can not enable non-conservative "
                     "simulations",
-                    data_->nc_forces_key.c_str())));
+                    forceName.c_str())));
         }
+        data_->ncForceIndex = data_->requested.size();
+        data_->requested.push_back(metatomic::Quantity::builder()
+                                           .name(forceName)
+                                           .unit("kJ/mol/nm")
+                                           .sample_kind(metatomic::SampleKind::Atom)
+                                           .build());
 
-        data_->nc_forces_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-        data_->nc_forces_output->set_quantity("force");
-        data_->nc_forces_output->set_unit("kJ/mol/nm");
-        data_->nc_forces_output->set_sample_kind("atom");
-
-        data_->evaluations_options->outputs.insert(
-                data_->nc_forces_key, data_->nc_forces_output);
-
-        data_->nc_stress_key = pick_output("non_conservative_stress", outputs, v_nc_stress);
-        if (outputs.contains(data_->nc_stress_key))
+        const auto  stressName = quantity_name("non_conservative_stress", vStress);
+        const auto* stressCap  = find_output(modelOutputs, stressName);
+        if (stressCap != nullptr)
         {
-            data_->nc_stress_output = torch::make_intrusive<metatomic_torch::ModelOutputHolder>();
-            data_->nc_stress_output->set_quantity("stress");
-            data_->nc_stress_output->set_unit("kJ/mol/nm^3");
-            // System-level stress samples (not per-atom).
-            data_->nc_stress_output->set_sample_kind("system");
-
-            data_->evaluations_options->outputs.insert(
-                    data_->nc_stress_key, data_->nc_stress_output);
+            data_->ncStressIndex = data_->requested.size();
+            data_->requested.push_back(metatomic::Quantity::builder()
+                                               .name(stressName)
+                                               .unit("kJ/mol/nm^3")
+                                               .sample_kind(metatomic::SampleKind::System)
+                                               .build());
         }
-
         GMX_LOG(logger_.info)
                 .asParagraph()
                 .appendTextFormatted(
-                        "Metatomic: non-conservative mode enabled. Forces from '%s', "
-                        "stress from '%s'",
-                        data_->nc_forces_key.c_str(),
-                        data_->nc_stress_key.c_str());
+                        "Metatomic: non-conservative mode enabled. Forces from '%s'%s",
+                        forceName.c_str(),
+                        data_->ncStressIndex.has_value() ? ", with stress" : "");
+    }
+
+    // Pair lists depend on the requested outputs, so ask once they are known.
+    try
+    {
+        data_->pairLists = data_->model->requested_pair_lists(data_->requested);
+    }
+    catch (const std::exception& e)
+    {
+        GMX_THROW(APIError("Failed to get the metatomic model pair lists: " + std::string(e.what())));
+    }
+    data_->cutoffNm.reserve(data_->pairLists.size());
+    for (const auto& pairs : data_->pairLists)
+    {
+        data_->cutoffNm.push_back(pairs.cutoff() * data_->lengthToNm);
     }
 
     GMX_LOG(logger_.info)
             .asParagraph()
             .appendText("MetatomicForceProvider initialization complete.");
+}
+
+void MetatomicForceProvider::setLinkFrontiers(std::vector<LinkFrontierAtom> frontiers)
+{
+    linkFrontiers_ = std::move(frontiers);
 }
 
 MetatomicForceProvider::~MetatomicForceProvider() = default;
@@ -664,10 +808,7 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     GMX_RELEASE_ASSERT(std::count(atomNumbers_.begin(), atomNumbers_.end(), 0) == 0,
                        "Some atom numbers not set.");
 
-    // Update cached tensors for the new atom distribution
-    data_->cachedTypes =
-            torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
-    data_->cachedPbc = preparePbcType(options_.params_.pbcType_.get(), data_->device);
+    pbc_flags(options_.params_.pbcType_.get(), &data_->pbc);
 
 }
 
@@ -680,12 +821,16 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
     }
 }
 
-/*! \brief Convert GROMACS excluded pairlist to MTA model indices.
+/*! \brief Convert GROMACS pairlists to MTA model indices.
  *
  * Called on every PairlistConstructed signal. Maps GROMACS local buffer
- * indices in excludedPairlist_ to MTA model indices via gmxLocalToMtaIdx_,
- * and negates cell shifts (GROMACS shifts first atom, metatensor shifts
- * second atom).
+ * indices in the plain interacting pairlist and the excluded pairlist to
+ * MTA model indices via gmxLocalToMtaIdx_, and negates cell shifts
+ * (GROMACS shifts the first atom, metatensor shifts the second).
+ *
+ * The plain list is what the model needs inside its cutoff. The excluded
+ * list is only 1-2 / 1-3 / 1-4 pairs. Reading exclusions alone drops every
+ * non-bonded neighbor (the neighbor-list capacity bug).
  */
 void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& signal)
 {
@@ -698,20 +843,24 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
     // Sign convention: GROMACS shifts atom I (first): d = x[I]+shift - x[J].
     // Metatensor shifts atom J (second): r_ij = x[J]+cell·box - x[I].
     // So metatensor cell shift = -GROMACS cell shift.
-    for (const auto& entry : signal.excludedPairlist_)
-    {
-        const auto& [atomPair, shiftIndex] = entry;
-        const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
-        const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
-
-        if (idxA != -1 && idxB != -1)
+    const auto appendPairlistEntries = [this](const auto& pairlistEntries) {
+        for (const auto& entry : pairlistEntries)
         {
-            pairlistMta_.push_back(idxA);
-            pairlistMta_.push_back(idxB);
-            const IVec gmxShift = shiftIndexToXYZ(shiftIndex);
-            cellShiftsMta_.push_back(IVec(-gmxShift[XX], -gmxShift[YY], -gmxShift[ZZ]));
+            const auto& [atomPair, shiftIndex] = entry;
+            const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
+            const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
+
+            if (idxA != -1 && idxB != -1)
+            {
+                pairlistMta_.push_back(idxA);
+                pairlistMta_.push_back(idxB);
+                const IVec gmxShift = shiftIndexToXYZ(shiftIndex);
+                cellShiftsMta_.push_back(IVec(-gmxShift[XX], -gmxShift[YY], -gmxShift[ZZ]));
+            }
         }
-    }
+    };
+    appendPairlistEntries(signal.pairlist_);
+    appendPairlistEntries(signal.excludedPairlist_);
 }
 
 
@@ -1108,9 +1257,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         // Compute max cutoff across all NL requests (used by both ghost
         // exchange and ring hop limit).
         double maxCutoff = 0.0;
-        for (const auto& req : data_->nl_requests)
+        for (double cutoff : data_->cutoffNm)
         {
-            maxCutoff = std::max(maxCutoff, req->engine_cutoff("nm"));
+            maxCutoff = std::max(maxCutoff, cutoff);
         }
 
         // Step 1: Exchange backward ghost atoms to fill the backward gap
@@ -1120,10 +1269,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             MetatomicTimer timer("exchangeBackwardGhosts", mpiComm_);
             exchangeBackwardGhosts(inputs.dd_, inputs.box_, maxCutoff);
         }
-
-        // Rebuild cachedTypes after backward ghost exchange extended atomNumbers_
-        data_->cachedTypes =
-                torch::tensor(atomNumbers_, torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
 
         // Step 2: Exchange backward-direction pairs.  Discovers pairs from
         // other ranks' pairlists that involve this rank's home atoms.
@@ -1161,223 +1306,225 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
 
     // Model inference
-    torch::Tensor forceTensor;
-    torch::Tensor virialTensor;
-    double        energy = 0.0;
+    double energy = 0.0;
+    matrix virialMatrix;
+    clear_mat(virialMatrix);
 
     {
         MetatomicTimer modelTimer("model inference", mpiComm_);
-
         MetatomicTimer tensorPrepTimer("tensorPrep", mpiComm_);
 
-        auto gromacs_scalar_type = torch::kFloat32;
-        if (std::is_same_v<real, double>)
+        const int32_t       nAtoms       = numLocalMta_;
+        const bool          modelIsDouble = data_->useFloat64;
+        const DLDataType    floatType    = modelIsDouble ? DLDataType{ kDLFloat, 64, 1 }
+                                                         : DLDataType{ kDLFloat, 32, 1 };
+        const bool          gromacsIsDouble = std::is_same_v<real, double>;
+        std::vector<int32_t> types(atomNumbers_.begin(), atomNumbers_.begin() + nAtoms);
+
+        void* positionData = nullptr;
+        void* cellData     = nullptr;
+        // Pair vectors below are built from positions_. Link caps must not
+        // overwrite that buffer, so a direct wrap is only valid with no caps
+        // and a matching dtype.
+        const bool wrapDirect = (modelIsDouble == gromacsIsDouble) && linkFrontiers_.empty();
+        if (wrapDirect)
         {
-            gromacs_scalar_type = torch::kFloat64;
+            positionData = positions_.data();
+            cellData     = &box_[0][0];
         }
-        auto cpu_blob_options = torch::TensorOptions().dtype(gromacs_scalar_type).device(torch::kCPU);
+        else if (modelIsDouble)
+        {
+            data_->positions64.resize(static_cast<size_t>(nAtoms) * 3);
+            data_->cell64.resize(9);
+            for (int32_t i = 0; i < nAtoms; ++i)
+            {
+                for (int d = 0; d < 3; ++d)
+                {
+                    data_->positions64[3 * i + d] = static_cast<double>(positions_[i][d]);
+                }
+            }
+            for (int a = 0; a < 3; ++a)
+            {
+                for (int b = 0; b < 3; ++b)
+                {
+                    data_->cell64[3 * a + b] = static_cast<double>(box_[a][b]);
+                }
+            }
+            apply_link_caps(linkFrontiers_, data_->positions64.data(), types.data(), nAtoms);
+            positionData = data_->positions64.data();
+            cellData     = data_->cell64.data();
+        }
+        else
+        {
+            data_->positions32.resize(static_cast<size_t>(nAtoms) * 3);
+            data_->cell32.resize(9);
+            for (int32_t i = 0; i < nAtoms; ++i)
+            {
+                for (int d = 0; d < 3; ++d)
+                {
+                    data_->positions32[3 * i + d] = static_cast<float>(positions_[i][d]);
+                }
+            }
+            for (int a = 0; a < 3; ++a)
+            {
+                for (int b = 0; b < 3; ++b)
+                {
+                    data_->cell32[3 * a + b] = static_cast<float>(box_[a][b]);
+                }
+            }
+            apply_link_caps(linkFrontiers_, data_->positions32.data(), types.data(), nAtoms);
+            positionData = data_->positions32.data();
+            cellData     = data_->cell32.data();
+        }
 
-        auto torch_positions = torch::from_blob(positions_.data()->as_vec(), { static_cast<int64_t>(numLocalMta_), 3 }, cpu_blob_options)
-                                       .to(data_->device, data_->dtype)
-                                       .set_requires_grad(!data_->nonConservative);
-
-        auto torch_cell =
-                torch::from_blob(&box_, { 3, 3 }, cpu_blob_options).to(data_->device, data_->dtype);
-
-        auto strain = torch::eye(
-                3, torch::TensorOptions().dtype(data_->dtype).device(data_->device)
-                           .requires_grad(!data_->nonConservative));
-
-        auto strained_cell      = torch::matmul(torch_cell, strain);
-        auto strained_positions = torch::matmul(torch_positions, strain);
-
-        auto system = torch::make_intrusive<metatomic_torch::SystemHolder>(
-                data_->cachedTypes, strained_positions, strained_cell, data_->cachedPbc);
-
+        auto system = metatomic::System(
+                "nm",
+                wrap_dlpack(types.data(), { nAtoms }, { kDLInt, 32, 1 }),
+                wrap_dlpack(positionData, { nAtoms, 3 }, floatType),
+                wrap_dlpack(cellData, { 3, 3 }, floatType),
+                wrap_dlpack(data_->pbc.data(), { 3 }, { kDLBool, 8, 1 }));
         tensorPrepTimer.stop();
 
-        // Build NL directly into raw buffers, then wrap with from_blob.
-        // Component and properties Labels are cached (identical every step).
         MetatomicTimer buildNLTimer("buildNL", mpiComm_);
-
-        for (const auto& request : data_->nl_requests)
+        for (size_t requestIndex = 0; requestIndex < data_->pairLists.size(); ++requestIndex)
         {
-            int64_t nPairs;
+            const auto&   request = data_->pairLists[requestIndex];
+            const bool    full    = request.full_list();
+            const bool    strict  = request.strict();
+            const double  cutoff  = data_->cutoffNm[requestIndex];
+            const double  cutoff2 = cutoff * cutoff;
+            const int64_t nHalf   = static_cast<int64_t>(pairlistMta_.size() / 2);
+            const int64_t maxPairs = full ? 2 * nHalf : nHalf;
+            nlSamplesBuffer_.resize(static_cast<size_t>(maxPairs) * 5);
+            nlVectorsBuffer_.resize(static_cast<size_t>(maxPairs) * 3);
 
+            int64_t outIdx = 0;
+            for (int64_t k = 0; k < nHalf; ++k)
             {
-                // Build NL from GROMACS pairlist (+ backward pairs in newton mode).
-                // Both modes use the same code path; newton mode just has extra
-                // pairs appended to pairlistMta_ from exchangeBackwardPairs().
-                //
-                // GROMACS pairlist uses rlist (verlet buffer) which is typically
-                // larger than the model's cutoff. Filter pairs by the model's
-                // cutoff to avoid sending excess pairs that waste GPU memory.
-                const int64_t nHalf  = static_cast<int64_t>(pairlistMta_.size() / 2);
-                const bool    full   = request->full_list();
-                const double  cutoff = request->engine_cutoff("nm");
-                const double  cutoff2 = cutoff * cutoff;
-
-                // Pre-allocate for worst case (all pairs within cutoff)
-                const int64_t maxPairs = full ? 2 * nHalf : nHalf;
-                nlSamplesBuffer_.resize(maxPairs * 5);
-                nlVectorsBuffer_.resize(maxPairs * 3);
-
-                int64_t outIdx = 0; // running output index for filtered pairs
-
-                for (int64_t k = 0; k < nHalf; k++)
+                const int32_t ai = pairlistMta_[2 * k];
+                const int32_t aj = pairlistMta_[2 * k + 1];
+                const IVec&   n  = cellShiftsMta_[k];
+                RVec          shift;
+                shift[XX] = n[XX] * inputs.box_[XX][XX] + n[YY] * inputs.box_[YY][XX]
+                            + n[ZZ] * inputs.box_[ZZ][XX];
+                shift[YY] = n[YY] * inputs.box_[YY][YY] + n[ZZ] * inputs.box_[ZZ][YY];
+                shift[ZZ] = n[ZZ] * inputs.box_[ZZ][ZZ];
+                const double dx = static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
+                const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
+                const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
+                if (strict && dx * dx + dy * dy + dz * dz > cutoff2)
                 {
-                    const int32_t ai = pairlistMta_[2 * k];
-                    const int32_t aj = pairlistMta_[2 * k + 1];
-
-                    // Compute shift vector from cell shift and current box
-                    RVec shift;
-                    const IVec& n = cellShiftsMta_[k];
-                    shift[XX] = n[XX] * inputs.box_[XX][XX] + n[YY] * inputs.box_[YY][XX]
-                                + n[ZZ] * inputs.box_[ZZ][XX];
-                    shift[YY] = n[YY] * inputs.box_[YY][YY] + n[ZZ] * inputs.box_[ZZ][YY];
-                    shift[ZZ] = n[ZZ] * inputs.box_[ZZ][ZZ];
-
-                    // Displacement: r_ij = pos[j] - pos[i] + shift  (metatensor convention)
-                    const double dx = static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
-                    const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
-                    const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
-
-                    const double dist2 = dx * dx + dy * dy + dz * dz;
-                    if (dist2 > cutoff2)
-                    {
-                        continue;
-                    }
-
-                    nlSamplesBuffer_[5 * outIdx + 0] = ai;
-                    nlSamplesBuffer_[5 * outIdx + 1] = aj;
-                    nlSamplesBuffer_[5 * outIdx + 2] = cellShiftsMta_[k][0];
-                    nlSamplesBuffer_[5 * outIdx + 3] = cellShiftsMta_[k][1];
-                    nlSamplesBuffer_[5 * outIdx + 4] = cellShiftsMta_[k][2];
-                    nlVectorsBuffer_[3 * outIdx + 0] = dx;
-                    nlVectorsBuffer_[3 * outIdx + 1] = dy;
-                    nlVectorsBuffer_[3 * outIdx + 2] = dz;
-                    outIdx++;
-
-                    if (full)
-                    {
-                        // Reverse pair (j,i) with negated shifts and displacement
-                        nlSamplesBuffer_[5 * outIdx + 0] = aj;
-                        nlSamplesBuffer_[5 * outIdx + 1] = ai;
-                        nlSamplesBuffer_[5 * outIdx + 2] = -cellShiftsMta_[k][0];
-                        nlSamplesBuffer_[5 * outIdx + 3] = -cellShiftsMta_[k][1];
-                        nlSamplesBuffer_[5 * outIdx + 4] = -cellShiftsMta_[k][2];
-                        nlVectorsBuffer_[3 * outIdx + 0] = -dx;
-                        nlVectorsBuffer_[3 * outIdx + 1] = -dy;
-                        nlVectorsBuffer_[3 * outIdx + 2] = -dz;
-                        outIdx++;
-                    }
+                    continue;
                 }
-
-                nPairs = outIdx;
-                nlSamplesBuffer_.resize(nPairs * 5);
-                nlVectorsBuffer_.resize(nPairs * 3);
+                nlSamplesBuffer_[5 * outIdx + 0] = ai;
+                nlSamplesBuffer_[5 * outIdx + 1] = aj;
+                nlSamplesBuffer_[5 * outIdx + 2] = n[0];
+                nlSamplesBuffer_[5 * outIdx + 3] = n[1];
+                nlSamplesBuffer_[5 * outIdx + 4] = n[2];
+                nlVectorsBuffer_[3 * outIdx + 0] = dx;
+                nlVectorsBuffer_[3 * outIdx + 1] = dy;
+                nlVectorsBuffer_[3 * outIdx + 2] = dz;
+                ++outIdx;
+                if (full)
+                {
+                    nlSamplesBuffer_[5 * outIdx + 0] = aj;
+                    nlSamplesBuffer_[5 * outIdx + 1] = ai;
+                    nlSamplesBuffer_[5 * outIdx + 2] = -n[0];
+                    nlSamplesBuffer_[5 * outIdx + 3] = -n[1];
+                    nlSamplesBuffer_[5 * outIdx + 4] = -n[2];
+                    nlVectorsBuffer_[3 * outIdx + 0] = -dx;
+                    nlVectorsBuffer_[3 * outIdx + 1] = -dy;
+                    nlVectorsBuffer_[3 * outIdx + 2] = -dz;
+                    ++outIdx;
+                }
             }
+            const int64_t nPairs = outIdx;
+            nlSamplesBuffer_.resize(static_cast<size_t>(nPairs) * 5);
+            nlVectorsBuffer_.resize(static_cast<size_t>(nPairs) * 3);
 
-            // Wrap raw buffers as tensors (zero-copy on CPU, then move to device)
-            MetatomicTimer fromBlobTimer("fromBlob", mpiComm_);
-            auto samples_tensor = torch::from_blob(
-                    nlSamplesBuffer_.data(), { nPairs, 5 },
-                    torch::TensorOptions().dtype(torch::kInt32)).to(data_->device);
-            auto vectors_tensor = torch::from_blob(
-                    nlVectorsBuffer_.data(), { nPairs, 3, 1 },
-                    torch::TensorOptions().dtype(torch::kFloat64)).to(data_->device, data_->dtype);
-            fromBlobTimer.stop();
+            auto samples = metatensor::Labels(
+                    data_->nlSampleNames,
+                    nPairs == 0 ? nullptr : nlSamplesBuffer_.data(),
+                    static_cast<size_t>(nPairs));
+            const int32_t                   xyzValues[3] = { 0, 1, 2 };
+            const int32_t                   distanceValue = 0;
+            std::vector<metatensor::Labels> components;
+            components.push_back(metatensor::Labels({ "xyz" }, xyzValues, 3));
+            auto properties = metatensor::Labels({ "distance" }, &distanceValue, 1);
 
-            MetatomicTimer labelsTimer("makeSampleLabels", mpiComm_);
-            metatensor_torch::Labels neighbor_samples;
-            if (data_->check_consistency)
+            std::unique_ptr<metatensor::DataArrayBase> values;
+            const auto shape = std::vector<uintptr_t>{ static_cast<uintptr_t>(nPairs), 3, 1 };
+            if (modelIsDouble)
             {
-                neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-                        data_->nlSampleNames, samples_tensor);
+                std::vector<double> packed(static_cast<size_t>(nPairs) * 3);
+                for (size_t i = 0; i < packed.size(); ++i)
+                {
+                    packed[i] = nlVectorsBuffer_[i];
+                }
+                values = std::make_unique<metatensor::SimpleDataArray<double>>(shape, std::move(packed));
             }
             else
             {
-                neighbor_samples = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-                        data_->nlSampleNames, samples_tensor,
-                        metatensor::assume_unique{});
+                std::vector<float> packed(static_cast<size_t>(nPairs) * 3);
+                for (size_t i = 0; i < packed.size(); ++i)
+                {
+                    packed[i] = static_cast<float>(nlVectorsBuffer_[i]);
+                }
+                values = std::make_unique<metatensor::SimpleDataArray<float>>(shape, std::move(packed));
             }
-            labelsTimer.stop();
-
-            MetatomicTimer blockTimer("makeTensorBlock", mpiComm_);
-            auto neighbors = torch::make_intrusive<metatensor_torch::TensorBlockHolder>(
-                    vectors_tensor,
-                    neighbor_samples,
-                    std::vector<metatensor_torch::Labels>{ data_->cachedNLComponent },
-                    data_->cachedNLProperties);
-            blockTimer.stop();
-
-            MetatomicTimer autogradTimer("registerAutograd", mpiComm_);
-            metatomic_torch::register_autograd_neighbors(system, neighbors, data_->check_consistency);
-            autogradTimer.stop();
-
-            MetatomicTimer addNLTimer("addNeighborList", mpiComm_);
-            system->add_neighbor_list(request, neighbors);
-            addNLTimer.stop();
+            system.add_pairs(request,
+                             metatensor::TensorBlock(std::move(values), samples, components, properties));
         }
-
         buildNLTimer.stop();
 
+        std::optional<metatensor::Labels> selected;
         if (useNewtonNL)
         {
-            // Restrict output to home atoms only [0, numHomeMta_).
-            // Following the LAMMPS pair_metatomic pattern (selected_atoms = nlocal).
-            // The model computes per-atom energies for ALL local atoms internally,
-            // but only returns results for home atoms.  This is important because
-            // models are free to return output samples in arbitrary order when
-            // selected_atoms is nullopt, but the order is deterministic when
-            // selected_atoms is set.
-            auto sa_values = torch::zeros({ numHomeMta_, 2 },
-                                          torch::TensorOptions().dtype(torch::kInt32));
-            sa_values.index_put_({ torch::indexing::Slice(), 1 },
-                                 torch::arange(numHomeMta_, torch::kInt32));
-            sa_values = sa_values.to(data_->device);
-            auto selected = torch::make_intrusive<metatensor_torch::LabelsHolder>(
-                    std::vector<std::string>{ "system", "atom" }, sa_values);
-            data_->evaluations_options->set_selected_atoms(selected);
+            if (data_->selectedCount != numHomeMta_)
+            {
+                std::vector<int32_t> rows(static_cast<size_t>(numHomeMta_) * 2);
+                for (int32_t atom = 0; atom < numHomeMta_; ++atom)
+                {
+                    rows[2 * atom]     = 0;
+                    rows[2 * atom + 1] = atom;
+                }
+                data_->selectedAtoms = metatensor::Labels(
+                        { "system", "atom" },
+                        numHomeMta_ == 0 ? nullptr : rows.data(),
+                        static_cast<size_t>(numHomeMta_));
+                data_->selectedCount = numHomeMta_;
+            }
+            selected = data_->selectedAtoms;
         }
 
-        MetatomicTimer forwardTimer("forward", mpiComm_);
-
-        metatensor_torch::TensorMap output_map;
-        c10::IValue                 ivalue_output;
+        MetatomicTimer forwardTimer("execute_model", mpiComm_);
+        std::vector<metatomic::System> systems;
+        systems.push_back(std::move(system));
+        std::vector<metatensor::TensorMap> modelOutputs;
         try
         {
-            std::vector<metatomic_torch::System> systems;
-            systems.push_back(system);
-
-            ivalue_output = data_->model.forward(
-                    { systems, data_->evaluations_options, data_->check_consistency });
-            auto dict_output = ivalue_output.toGenericDict();
-            output_map = dict_output.at(data_->energy_key).toCustomClass<metatensor_torch::TensorMapHolder>();
+            modelOutputs = metatomic::execute_model(
+                    *data_->model, systems, selected, data_->requested, data_->checkConsistency);
         }
         catch (const std::exception& e)
         {
             GMX_THROW(APIError("[Metatomic] Model evaluation failed: " + std::string(e.what())));
         }
-        // Re-extract dict for uncertainty and NC access (auto type avoids GenericDict issues)
-        auto dict_output = ivalue_output.toGenericDict();
-
         forwardTimer.stop();
 
-        // Check uncertainty if the model provides it
-        if (data_->uncertainty_output != nullptr
-            && dict_output.contains(data_->energy_uq_key))
+        if (data_->uqIndex.has_value())
         {
-            auto uq_map = dict_output.at(data_->energy_uq_key)
-                                  .toCustomClass<metatensor_torch::TensorMapHolder>();
-            auto uq_block = metatensor_torch::TensorMapHolder::block_by_id(uq_map, 0);
-            auto uq_values = uq_block->values().reshape({ -1 });
-            auto atoms_above = uq_values > data_->uncertaintyThreshold;
-
-            if (torch::any(atoms_above).to(torch::kCPU).item<bool>())
+            auto&      uqMap   = modelOutputs[data_->uqIndex.value()];
+            const auto nBlocks = uqMap.keys().count();
+            int64_t    nAbove  = 0;
+            for (size_t blockId = 0; blockId < nBlocks; ++blockId)
             {
-                int64_t nAbove = torch::sum(atoms_above.to(torch::kInt64))
-                                         .to(torch::kCPU).item<int64_t>();
+                auto block = uqMap.block_by_id(blockId);
+                nAbove += modelIsDouble ? count_above<double>(block, data_->uncertaintyThreshold)
+                                        : count_above<float>(block, data_->uncertaintyThreshold);
+            }
+            if (nAbove > 0)
+            {
                 GMX_LOG(logger_.warning)
                         .asParagraph()
                         .appendTextFormatted(
@@ -1389,126 +1536,121 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
         }
 
-        auto energy_block  = metatensor_torch::TensorMapHolder::block_by_id(output_map, 0);
-        auto energy_tensor = energy_block->values();
-
-        // Sum all returned per-atom energies.
-        // In parallel, selected_atoms restricts output to home atoms only,
-        // so this sums only home atom energies (each home atom has a complete NL).
-        energy = energy_tensor.sum().item<double>();
-
-        if (data_->nonConservative)
+        auto&               energyMap     = modelOutputs[data_->energyIndex];
+        const auto          nEnergyBlocks = energyMap.keys().count();
+        std::vector<double> forces(static_cast<size_t>(nAtoms) * 3, 0.0);
+        for (size_t blockId = 0; blockId < nEnergyBlocks; ++blockId)
         {
-            // Non-conservative: extract forces directly from model output
-            MetatomicTimer ncTimer("ncExtract", mpiComm_);
-
-            auto forces_map =
-                    dict_output.at(data_->nc_forces_key)
-                            .toCustomClass<metatensor_torch::TensorMapHolder>();
-            auto forces_block =
-                    metatensor_torch::TensorMapHolder::block_by_id(forces_map, 0);
-            forceTensor = forces_block->values().squeeze(-1)
-                                  .to(torch::kCPU).to(torch::kFloat64);
-
-            // Virial from stress if available
-            if (data_->nc_stress_output != nullptr)
+            auto block = energyMap.block_by_id(blockId);
+            energy += modelIsDouble ? sum_block<double>(block) : sum_block<float>(block);
+            if (data_->nonConservative)
             {
-                auto stress_map =
-                        dict_output.at(data_->nc_stress_key)
-                                .toCustomClass<metatensor_torch::TensorMapHolder>();
-                auto stress_block =
-                        metatensor_torch::TensorMapHolder::block_by_id(stress_map, 0);
-                auto stress_tensor = stress_block->values().squeeze(0).squeeze(-1);
-
-                // Compute volume from box
-                double volume = inputs.box_[XX][XX]
-                                * (inputs.box_[YY][YY] * inputs.box_[ZZ][ZZ]
-                                   - inputs.box_[YY][ZZ] * inputs.box_[ZZ][YY])
-                                - inputs.box_[XX][YY]
-                                          * (inputs.box_[YY][XX] * inputs.box_[ZZ][ZZ]
-                                             - inputs.box_[YY][ZZ] * inputs.box_[ZZ][XX])
-                                + inputs.box_[XX][ZZ]
-                                          * (inputs.box_[YY][XX] * inputs.box_[ZZ][YY]
-                                             - inputs.box_[YY][YY] * inputs.box_[ZZ][XX]);
-
-                // 1/2 for GROMACS' virial convention
-                virialTensor = (0.5 * stress_tensor * volume)
-                                       .to(torch::kCPU).to(torch::kFloat64);
+                continue;
+            }
+            bool hasPositions = false;
+            bool hasStrain    = false;
+            for (const auto& name : block.gradients_list())
+            {
+                hasPositions = hasPositions || name == "positions";
+                hasStrain    = hasStrain || name == "strain";
+            }
+            if (!hasPositions || !hasStrain)
+            {
+                GMX_THROW(APIError(
+                        "Conservative Metatomic evaluation requires 'positions' and "
+                        "'strain' gradients on the energy block"));
+            }
+            auto posGrad    = block.gradient("positions");
+            auto strainGrad = block.gradient("strain");
+            if (modelIsDouble)
+            {
+                add_atom_rows<double>(posGrad, 2, nAtoms, -1.0, &forces);
+                add_strain<double>(strainGrad, virialMatrix);
             }
             else
             {
-                virialTensor = torch::zeros({ 3, 3 }, torch::kFloat64);
+                add_atom_rows<float>(posGrad, 2, nAtoms, -1.0, &forces);
+                add_strain<float>(strainGrad, virialMatrix);
             }
+        }
 
-            ncTimer.stop();
+        if (data_->nonConservative)
+        {
+            auto&      forceMap = modelOutputs[data_->ncForceIndex.value()];
+            const auto nBlocks  = forceMap.keys().count();
+            for (size_t blockId = 0; blockId < nBlocks; ++blockId)
+            {
+                auto block = forceMap.block_by_id(blockId);
+                if (modelIsDouble)
+                {
+                    add_atom_rows<double>(block, 1, nAtoms, 1.0, &forces);
+                }
+                else
+                {
+                    add_atom_rows<float>(block, 1, nAtoms, 1.0, &forces);
+                }
+            }
+            if (data_->ncStressIndex.has_value())
+            {
+                const double volume = inputs.box_[XX][XX]
+                                              * (inputs.box_[YY][YY] * inputs.box_[ZZ][ZZ]
+                                                 - inputs.box_[YY][ZZ] * inputs.box_[ZZ][YY])
+                                      - inputs.box_[XX][YY]
+                                                * (inputs.box_[YY][XX] * inputs.box_[ZZ][ZZ]
+                                                   - inputs.box_[YY][ZZ] * inputs.box_[ZZ][XX])
+                                      + inputs.box_[XX][ZZ]
+                                                * (inputs.box_[YY][XX] * inputs.box_[ZZ][YY]
+                                                   - inputs.box_[YY][YY] * inputs.box_[ZZ][XX]);
+                auto&      stressMap = modelOutputs[data_->ncStressIndex.value()];
+                const auto nStress   = stressMap.keys().count();
+                matrix     stressVirial;
+                clear_mat(stressVirial);
+                for (size_t blockId = 0; blockId < nStress; ++blockId)
+                {
+                    auto block = stressMap.block_by_id(blockId);
+                    if (modelIsDouble)
+                    {
+                        add_strain<double>(block, stressVirial);
+                    }
+                    else
+                    {
+                        add_strain<float>(block, stressVirial);
+                    }
+                }
+                for (int a = 0; a < 3; ++a)
+                {
+                    for (int b = 0; b < 3; ++b)
+                    {
+                        virialMatrix[a][b] = static_cast<real>(stressVirial[a][b] * volume);
+                    }
+                }
+            }
+        }
+
+        const PbcType pbcType =
+                options_.params_.pbcType_ ? *options_.params_.pbcType_ : PbcType::Xyz;
+        spread_link_caps(linkFrontiers_, forces.data(), nAtoms, inputs.box_, pbcType);
+
+        MetatomicTimer forceScatterTimer("forceScatter", mpiComm_);
+        const double*  forceData = forces.data();
+        if (data_->nonConservative || !mpiComm_.isParallel())
+        {
+            const int32_t nApply = data_->nonConservative ? numHomeMta_ : nAtoms;
+            for (int32_t i = 0; i < nApply; ++i)
+            {
+                const int32_t gmxIdx = mtaToGmxLocal_[i];
+                outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceData[3 * i]);
+                outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceData[3 * i + 1]);
+                outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceData[3 * i + 2]);
+            }
         }
         else
         {
-            // Conservative: backward pass for forces and virial via autograd
-            MetatomicTimer backwardTimer("backward", mpiComm_);
-
-            torch_positions.mutable_grad() = torch::Tensor();
-            strain.mutable_grad()          = torch::Tensor();
-
-            // Backpropagate through all returned per-atom energies.
-            // In parallel, output is restricted to home atoms via selected_atoms.
-            // Forces propagate to ALL local atoms (home + halo) via the NL autograd.
-            energy_tensor.backward(-torch::ones_like(energy_tensor));
-
-            backwardTimer.stop();
-
-            MetatomicTimer toCPUTimer("toCPU", mpiComm_);
-
-            forceTensor = torch_positions.grad().to(torch::kCPU).to(torch::kFloat64);
-            // 1/2 for GROMACS' virial convention; "-" since backward ran on -E
-            virialTensor = (-0.5 * strain.grad()).to(torch::kCPU).to(torch::kFloat64);
-
-            toCPUTimer.stop();
+            distributeNonHomeForces(forceData, outputs);
         }
+        forceScatterTimer.stop();
     }
 
-    // Force distribution: home forces applied directly, non-home forces
-    // exchanged via sparse indexed communication (or dense fallback for
-    // small systems). ForceWithVirial is NOT communicated by dd_move_f.
-    // In non-conservative mode, the model returns forces for home atoms
-    // only (via selected_atoms), so we skip halo force exchange.
-    MetatomicTimer forceScatterTimer("forceScatter", mpiComm_);
-
-    const double* forceData = forceTensor.data_ptr<double>();
-    const int32_t nForceAtoms = static_cast<int32_t>(forceTensor.size(0));
-
-    if (data_->nonConservative)
-    {
-        // NC mode: forces are for home atoms only (or all atoms in serial).
-        // Apply directly, no halo exchange needed.
-        for (int32_t i = 0; i < nForceAtoms; i++)
-        {
-            int32_t gmxIdx = mtaToGmxLocal_[i];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceData[3 * i]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceData[3 * i + 1]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceData[3 * i + 2]);
-        }
-    }
-    else if (mpiComm_.isParallel())
-    {
-        distributeNonHomeForces(forceData, outputs);
-    }
-    else
-    {
-        // Serial: apply forces directly
-        for (int32_t i = 0; i < numLocalMta_; i++)
-        {
-            int32_t gmxIdx = mtaToGmxLocal_[i];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forceData[3 * i]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forceData[3 * i + 1]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forceData[3 * i + 2]);
-        }
-    }
-
-    forceScatterTimer.stop();
-
-    // Restore original state.  Backward ghost atoms have no GROMACS local
-    // buffer index, and backward pairs should not persist across steps.
     if (useNewtonNL)
     {
         if (numLocalMta_ != origNumLocalMta)
@@ -1522,21 +1664,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         cellShiftsMta_.resize(origShiftsSize);
     }
 
-    // Energy: each rank's energy is the sum of per-atom energies for all local
-    // atoms (home + halo) from the pairs assigned to this rank.  GROMACS
-    // global_stat sums across ranks to get the system total.
     outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] = static_cast<real>(energy);
-
-    // Virial: same decomposition as energy — per-rank portion, summed by GROMACS.
-    matrix virialMatrix;
-    auto   virialAccessor = virialTensor.accessor<double, 2>();
-    for (int32_t i = 0; i < 3; ++i)
-    {
-        for (int32_t j = 0; j < 3; ++j)
-        {
-            virialMatrix[i][j] = virialAccessor[i][j];
-        }
-    }
     outputs->forceWithVirial_.addVirialContribution(virialMatrix);
 }
 

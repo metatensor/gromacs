@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GROMACS metatomic C API contracts</title>
+<style>
+  body { font: 16px/1.5 "Iowan Old Style", Palatino, Georgia, serif; color: #1c1b19; background: #f7f5f0; margin: 0; }
+  main { max-width: 70rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  h1 { font-size: 1.8rem; line-height: 1.2; margin: 0 0 1rem; }
+  h2 { font-size: 1.25rem; margin: 2.2rem 0 0.6rem; border-top: 1px solid #ddd6c8; padding-top: 1.2rem; }
+  h3 { font-size: 1.05rem; margin: 1.2rem 0 0.4rem; }
+  p { margin: 0.4rem 0 0.8rem; }
+  code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.86em; background: #efeae1; padding: 0.05em 0.3em; border-radius: 3px; }
+  pre { background: #1c1b19; color: #f4efe6; padding: 0.9rem 1rem; overflow-x: auto; border-radius: 6px; }
+  pre code { background: transparent; color: inherit; padding: 0; font-size: 0.82rem; }
+  .prompt { color: #8a8175; font-family: ui-monospace, monospace; font-size: 0.78rem; margin: 1.2rem 0 0.3rem; }
+  .output { background: #fff; border-left: 3px solid #2f6f4e; padding: 0.7rem 0.9rem; overflow-x: auto; }
+  .output pre { background: transparent; color: #1c1b19; padding: 0; margin: 0; }
+  ul { margin: 0.3rem 0 0.9rem; padding-left: 1.2rem; }
+  a { color: #1f4e79; }
+  figure { margin: 1rem 0; }
+  figure img { max-width: 100%; background: white; }
+  figcaption { font-size: 0.9rem; color: #5c564c; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>GROMACS metatomic C API contracts</h1>
+<p>Open this notebook to check the numbers. Regenerate it with:</p>
+<pre><code>python3 src/gromacs/applied_forces/metatomic/docs/generate_c_api_notebook.py</code></pre>
+<p>What runs here:</p>
+<ul><li><code>libmetatomic</code>: <code>mta_unit_conversion_factor</code> (cutoffs and output units).</li><li>vesin: the pair list, with <code>algorithm=&quot;cell_list&quot;</code>. Its shift is the metatomic cell shift. The cubic shell count is the independent check.</li><li>A harmonic ONIOM stand-in on <code>alanine_vacuo</code>, including a side-chain cut, the ALA residue as ML, and MM waters around that residue. Each run writes an extended XYZ trajectory.</li><li>Plain Python: force and virial scatter, ONIOM removal rules, link frontiers.</li><li>A source check that <code>setPairlist</code> reads both plain pair lists and that <code>tests/c_api_contract.cpp</code> records every stub.</li></ul>
+<p>What does not run here: a GROMACS build, <code>mta_execute_model</code>, or domain decomposition. Those stay as <code>GTEST_SKIP</code> in <code>tests/c_api_contract.cpp</code> until the C++ helpers exist. The NVE trace below is the harmonic stand-in, not <code>mdrun</code>.</p>
+<h2>Setup</h2>
+<p>Load <code>libmetatensor</code> first (<code>RTLD_GLOBAL</code>), then <code>libmetatomic</code>. <code>METATOMIC_LIB</code> and <code>METATENSOR_LIB</code> override the search. Each later cell calls <code>check</code>, which records a pass and a microsecond timing.</p>
+<div class="prompt">In [1]</div>
+<pre><code>import ctypes
+import math
+import os
+import time
+from pathlib import Path
+
+RESULTS = []
+EMBED = {&quot;images&quot;: [], &quot;files&quot;: []}
+
+def check(name, fn):
+    t0 = time.perf_counter()
+    detail = fn()
+    usec = (time.perf_counter() - t0) * 1e6
+    RESULTS.append((name, usec, detail))
+    print(f&quot;PASS  {name:&lt;52} {usec:10.1f} us  {detail}&quot;)
+
+def _candidate_pairs():
+    env_mta = os.environ.get(&quot;METATOMIC_LIB&quot;)
+    env_mts = os.environ.get(&quot;METATENSOR_LIB&quot;)
+    if env_mta or env_mts:
+        if not (env_mta and env_mts):
+            raise RuntimeError(&quot;set both METATOMIC_LIB and METATENSOR_LIB&quot;)
+        yield Path(env_mts), Path(env_mta)
+    home = Path.home()
+    venv = home / &quot;Documents/metawork/.venv/lib/python3.12/site-packages&quot;
+    yield (
+        venv / &quot;metatensor/lib/libmetatensor.so&quot;,
+        venv / &quot;metatomic/lib/libmetatomic.so&quot;,
+    )
+    release = (
+        home
+        / &quot;Documents/metawork/metatomic/python/metatomic_core/build&quot;
+        / &quot;cmake-build/metatomic-core/target/release&quot;
+    )
+    mts_build = sorted((release / &quot;build&quot;).glob(&quot;metatensor-sys-*/out/lib/libmetatensor.so&quot;))
+    if mts_build:
+        yield mts_build[-1], release / &quot;libmetatomic.so&quot;
+
+def load_metatomic():
+    errors = []
+    for mts, mta in _candidate_pairs():
+        if not mts.is_file() or not mta.is_file():
+            errors.append(f&quot;missing {mts} or {mta}&quot;)
+            continue
+        try:
+            ctypes.CDLL(str(mts), mode=ctypes.RTLD_GLOBAL)
+            lib = ctypes.CDLL(str(mta))
+        except OSError as exc:
+            errors.append(f&quot;{mta}: {exc}&quot;)
+            continue
+        lib.mta_unit_conversion_factor.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_double),
+        ]
+        lib.mta_unit_conversion_factor.restype = ctypes.c_int
+        lib.mta_last_error.argtypes = [
+            ctypes.POINTER(ctypes.c_char_p),
+            ctypes.POINTER(ctypes.c_char_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        lib.mta_last_error.restype = ctypes.c_int
+        return lib, mta
+    raise RuntimeError(&quot;libmetatomic not loadable:\n&quot; + &quot;\n&quot;.join(errors))
+
+LIB, LIB_PATH = load_metatomic()
+print(f&quot;libmetatomic: {LIB_PATH}&quot;)
+
+def unit_factor(from_unit, to_unit):
+    out = ctypes.c_double()
+    status = LIB.mta_unit_conversion_factor(
+        from_unit.encode(), to_unit.encode(), ctypes.byref(out)
+    )
+    if status != 0:
+        msg = ctypes.c_char_p()
+        origin = ctypes.c_char_p()
+        data = ctypes.c_void_p()
+        LIB.mta_last_error(ctypes.byref(msg), ctypes.byref(origin), ctypes.byref(data))
+        text = msg.value.decode() if msg.value else f&quot;status {status}&quot;
+        raise RuntimeError(text)
+    return out.value
+
+def unit_factor_status(from_unit, to_unit):
+    out = ctypes.c_double()
+    status = LIB.mta_unit_conversion_factor(
+        from_unit.encode(), to_unit.encode(), ctypes.byref(out)
+    )
+    msg = ctypes.c_char_p()
+    origin = ctypes.c_char_p()
+    data = ctypes.c_void_p()
+    LIB.mta_last_error(ctypes.byref(msg), ctypes.byref(origin), ctypes.byref(data))
+    text = msg.value.decode() if msg.value else &quot;&quot;
+    return status, text</code></pre>
+<div class="output"><pre>libmetatomic: /home/boittier/Documents/metawork/.venv/lib/python3.12/site-packages/metatomic/lib/libmetatomic.so</pre></div>
+<h2>Part 1 and 2. Units</h2>
+<p>The runtime scales a clone. The engine buffer stays in nm. <code>&quot;nm&quot;</code> and <code>&quot;nanometer&quot;</code> are the same unit. An empty unit does not scale. A cutoff stored in angstrom is converted before GROMACS sees it: 5.0 Å is 0.5 nm. Requested energy is kJ/mol, so an eV model value is multiplied by the library factor before the force provider reads it. A dimension mismatch is an error.</p>
+<div class="prompt">In [2]</div>
+<pre><code>def units():
+    angstrom_to_nm = unit_factor(&quot;angstrom&quot;, &quot;nm&quot;)
+    cutoff_nm = 5.0 * angstrom_to_nm
+    if not math.isclose(cutoff_nm, 0.5, abs_tol=1e-12):
+        raise AssertionError(f&quot;5.0 angstrom -&gt; {cutoff_nm} nm&quot;)
+    if not math.isclose(unit_factor(&quot;nm&quot;, &quot;nanometer&quot;), 1.0, abs_tol=1e-15):
+        raise AssertionError(&quot;nm and nanometer differ&quot;)
+    if not math.isclose(unit_factor(&quot;nm&quot;, &quot;nm&quot;), 1.0, abs_tol=1e-15):
+        raise AssertionError(&quot;nm -&gt; nm must be 1, so the runtime can share memory&quot;)
+    if not math.isclose(unit_factor(&quot;&quot;, &quot;&quot;), 1.0, abs_tol=1e-15):
+        raise AssertionError(&quot;empty units must not scale&quot;)
+    ev_to_kj = unit_factor(&quot;eV&quot;, &quot;kJ/mol&quot;)
+    back = unit_factor(&quot;kJ/mol&quot;, &quot;eV&quot;)
+    if not math.isclose(ev_to_kj * back, 1.0, rel_tol=1e-12):
+        raise AssertionError(f&quot;eV round trip {ev_to_kj} * {back}&quot;)
+    positions = [0.1, 0.2, 0.3]
+    factor = unit_factor(&quot;nm&quot;, &quot;angstrom&quot;)
+    scaled = [p * factor for p in positions]
+    if positions != [0.1, 0.2, 0.3]:
+        raise AssertionError(&quot;scaling mutated the engine buffer&quot;)
+    if scaled == positions:
+        raise AssertionError(&quot;nm -&gt; angstrom should change the clone&quot;)
+    status, message = unit_factor_status(&quot;eV&quot;, &quot;m&quot;)
+    if status == 0 or &quot;dimension mismatch&quot; not in message:
+        raise AssertionError(f&quot;expected dimension mismatch, got {status} {message}&quot;)
+    return f&quot;5 A = {cutoff_nm:.6f} nm; 1 eV = {ev_to_kj:.6f} kJ/mol&quot;
+
+check(&quot;cutoff and energy units&quot;, units)</code></pre>
+<div class="output"><pre>PASS  cutoff and energy units                                   100.0 us  5 A = 0.500000 nm; 1 eV = 96.485332 kJ/mol</pre></div>
+<h2>Part 3. Pair list</h2>
+<p>Sixty-four atoms on a 4×4×4 lattice, box 1.2 nm, cutoff 0.5 nm, periodic. There are no bonds, so an exclusions-only list is empty and the test fails if <code>setPairlist</code> ignores <code>pairlist_</code>. The pairs come from <code>vesin.NeighborList</code> with <code>algorithm=&quot;cell_list&quot;</code>. This CPU build of vesin does not implement <code>brute_force</code>. Vesin&#x27;s shift <code>S</code> is already the metatomic cell shift: <code>r_ij = x[j] + S·box - x[i]</code>, and the GROMACS shift is <code>-S</code>. An independent shell count (6 + 12 neighbors, body diagonal 0.520 nm is outside 0.5 nm) must agree with vesin. <code>full_list=True</code> returns each pair twice, with the reverse row negating <code>S</code> and the vector.</p>
+<div class="prompt">In [3]</div>
+<pre><code>import numpy as np
+from vesin import NeighborList
+
+def lattice(n_side, box):
+    axis = np.arange(n_side) / n_side
+    frac = np.stack(np.meshgrid(axis, axis, axis, indexing=&quot;ij&quot;), axis=-1)
+    return frac.reshape(-1, 3) @ box
+
+def vesin_pairs(positions, box, cutoff, full_list):
+    &quot;&quot;&quot;vesin cell list. ``shift`` is the metatomic cell shift.&quot;&quot;&quot;
+    neighbors = NeighborList(
+        cutoff=cutoff,
+        full_list=full_list,
+        sorted=True,
+        algorithm=&quot;cell_list&quot;,
+    )
+    first, second, shift, vectors = neighbors.compute(
+        positions, box, True, quantities=&quot;ijSD&quot;
+    )
+    return first, second, shift, vectors
+
+def shell_count(n_side, box_length, cutoff):
+    spacing = box_length / n_side
+    steps = np.array(
+        [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
+    )
+    steps = steps[np.any(steps != 0, axis=1)]
+    neighbors = int(np.count_nonzero(spacing * np.linalg.norm(steps, axis=1) &lt;= cutoff + 1e-12))
+    return (n_side ** 3) * neighbors // 2
+
+def pairs():
+    n_side, box_length, cutoff = 4, 1.2, 0.5
+    box = np.diag([box_length, box_length, box_length]).astype(float)
+    positions = lattice(n_side, box)
+    first, second, shift, vectors = vesin_pairs(
+        positions, box, cutoff, full_list=False
+    )
+    expected = shell_count(n_side, box_length, cutoff)
+    if len(first) != expected:
+        raise AssertionError(f&quot;vesin {len(first)} != shell {expected}&quot;)
+    if len(first) == 0:
+        raise AssertionError(&quot;lattice cutoff produced no pairs&quot;)
+    body = (box_length / n_side) * math.sqrt(3.0)
+    if not body &gt; cutoff:
+        raise AssertionError(&quot;body diagonal should sit outside the cutoff&quot;)
+    rebuilt = positions[second] + shift @ box - positions[first]
+    if not np.allclose(vectors, rebuilt, atol=1e-12):
+        raise AssertionError(&quot;r_ij != x[j] + S·box - x[i]&quot;)
+    distance = np.linalg.norm(vectors, axis=1)
+    if np.any(distance &gt; cutoff + 1e-12):
+        raise AssertionError(&quot;pair outside cutoff&quot;)
+    gmx_shift = -shift
+    if not np.array_equal(shift, -gmx_shift):
+        raise AssertionError(&quot;metatomic shift must negate the GROMACS shift&quot;)
+    full_first, full_second, full_shift, full_vectors = vesin_pairs(
+        positions, box, cutoff, full_list=True
+    )
+    if len(full_first) != 2 * len(first):
+        raise AssertionError(f&quot;full_list {len(full_first)} != 2 * {len(first)}&quot;)
+    # The reverse row carries the negated shift and the negated vector.
+    half = {(int(i), int(j)): (s, v) for i, j, s, v in zip(first, second, shift, vectors)}
+    matched = 0
+    for i, j, s, v in zip(full_first, full_second, full_shift, full_vectors):
+        forward = half.get((int(i), int(j)))
+        if forward is not None:
+            if not (np.array_equal(s, forward[0]) and np.allclose(v, forward[1])):
+                raise AssertionError(&quot;full_list changed a half-list row&quot;)
+            continue
+        backward = half.get((int(j), int(i)))
+        if backward is None:
+            raise AssertionError(f&quot;full_list pair {(int(i), int(j))} is not the reverse of a half-list pair&quot;)
+        if not np.array_equal(s, -backward[0]) or not np.allclose(v, -backward[1]):
+            raise AssertionError(&quot;reverse pair must negate the shift and the vector&quot;)
+        matched += 1
+    if matched != len(first):
+        raise AssertionError(f&quot;found {matched} reverse pairs, expected {len(first)}&quot;)
+    return f&quot;{len(first)} pairs (full_list {len(full_first)}); body diagonal {body:.3f} nm&quot;
+
+check(&quot;64-atom pair count matches both oracles&quot;, pairs)
+
+def triclinic():
+    box = np.array(
+        [[1.2, 0.0, 0.0], [0.2, 1.1, 0.0], [0.1, 0.15, 1.0]],
+        dtype=float,
+    )
+    positions = lattice(4, box)
+    first, second, shift, vectors = vesin_pairs(positions, box, 0.5, full_list=False)
+    if len(first) == 0:
+        raise AssertionError(&quot;triclinic lattice produced no pairs&quot;)
+    rebuilt = positions[second] + shift @ box - positions[first]
+    if not np.allclose(vectors, rebuilt, atol=1e-12):
+        raise AssertionError(&quot;triclinic r_ij does not match vesin&#x27;s shift&quot;)
+    wrapped = int(np.count_nonzero(np.any(shift != 0, axis=1)))
+    if wrapped == 0:
+        raise AssertionError(&quot;triclinic cell produced no wrapped pair&quot;)
+    return f&quot;{len(first)} pairs, {wrapped} with a non-zero cell shift&quot;
+
+check(&quot;triclinic cell shifts&quot;, triclinic)</code></pre>
+<div class="output"><pre>PASS  64-atom pair count matches both oracles                 25463.0 us  576 pairs (full_list 1152); body diagonal 0.520 nm
+PASS  triclinic cell shifts                                     484.2 us  768 pairs, 327 with a non-zero cell shift</pre></div>
+<h2>Part 3 and 4. Selected atoms, forces, virial</h2>
+<p><code>selected_atoms</code> is <code>(system, atom)</code> for home atoms only. Position-gradient values are <code>-F</code>, and the engine does <code>force -= value</code>. Two rows that store <code>(-1, 0, 0)</code> and <code>(0, -2, 0)</code> for atom 1 become force <code>(1, 2, 0)</code>. A row whose atom is past <code>numHomeMta_</code> goes to the halo exchange and is not written into the local buffer. The strain gradient is <code>V * sigma</code>; the GROMACS virial takes <code>+0.5</code>, because <code>execute_model</code> does not differentiate <code>-E</code>. Non-conservative forces are already forces. They are not negated and they are not halo-exchanged. Non-conservative stress uses <code>0.5 * stress * volume</code>.</p>
+<div class="prompt">In [4]</div>
+<pre><code>def scatter():
+    num_home = 2
+    selected = [(0, atom) for atom in range(num_home)]
+    if selected != [(0, 0), (0, 1)]:
+        raise AssertionError(selected)
+
+    # Stored gradient values are -F. Engine does force -= value.
+    # -F = (-1, 0, 0) and (0, -2, 0) =&gt; F = (1, 2, 0).
+    gradient_rows = [
+        (1, (-1.0, 0.0, 0.0)),
+        (3, (-4.0, 0.0, 0.0)),
+        (1, (0.0, -2.0, 0.0)),
+    ]
+    local = {}
+    halo = []
+    for atom, value in gradient_rows:
+        if atom &gt;= num_home:
+            halo.append(atom)
+            continue
+        prev = local.get(atom, (0.0, 0.0, 0.0))
+        local[atom] = tuple(a - b for a, b in zip(prev, value))
+    if local[1] != (1.0, 2.0, 0.0):
+        raise AssertionError(local[1])
+    if halo != [3] or 3 in local:
+        raise AssertionError(&quot;halo atom was written into the local buffer&quot;)
+
+    strain_xx = 2.0
+    virial_xx = 0.5 * strain_xx
+    if virial_xx != 1.0:
+        raise AssertionError(&quot;strain virial factor must be +0.5&quot;)
+    if (-0.5 * strain_xx) == virial_xx:
+        raise AssertionError(&quot;the old backward-on-minus-E sign came back&quot;)
+
+    nc_rows = [(1, (0.5, 0.0, -0.25))]
+    nc_local = {}
+    for atom, value in nc_rows:
+        if atom &gt;= num_home:
+            raise AssertionError(&quot;non-conservative samples are home-only&quot;)
+        nc_local[atom] = value
+    if nc_local[1] != (0.5, 0.0, -0.25):
+        raise AssertionError(&quot;non-conservative force was negated&quot;)
+    try:
+        for atom, _value in [(3, (0.5, 0.0, -0.25))]:
+            if atom &gt;= num_home:
+                raise RuntimeError(&quot;halo&quot;)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError(&quot;a halo non-conservative sample must be rejected&quot;)
+    stress_xx, volume = 4.0, 2.0
+    nc_virial = 0.5 * stress_xx * volume
+    if nc_virial != 4.0:
+        raise AssertionError(nc_virial)
+    return &quot;F[1]=(1, 2, 0); strain virial xx=1; nc virial xx=4&quot;
+
+check(&quot;home atoms, gradient scatter, virial sign&quot;, scatter)</code></pre>
+<div class="output"><pre>PASS  home atoms, gradient scatter, virial sign                  10.3 us  F[1]=(1, 2, 0); strain virial xx=1; nc virial xx=4</pre></div>
+<h2>Part 6. ONIOM removal rules and link frontiers</h2>
+<p>An angle is removed only when all 3 atoms are ML. A dihedral is removed only when all 4 are ML. A bond is removed only when both atoms are ML. The alanine-vacuo index set is <code>{8, 9, 10, 11, 12, 13}</code>. Link atoms: 4 copies in one molblock, one boundary bond per copy. Walking every molecule yields 4 frontiers. Walking only <code>globalAtomStart</code> yields 1, which is the lipid bug.</p>
+<div class="prompt">In [5]</div>
+<pre><code>ML = {8, 9, 10, 11, 12, 13}
+
+def removed(atoms, ml, kind):
+    n_ml = sum(atom in ml for atom in atoms)
+    if kind == &quot;bond&quot;:
+        return n_ml == 2
+    if kind == &quot;angle&quot;:
+        return n_ml == 3
+    if kind == &quot;dihedral&quot;:
+        return n_ml == 4
+    raise AssertionError(kind)
+
+def oniom_rules():
+    cases = [
+        (&quot;angle&quot;, (8, 9, 10), True),
+        (&quot;angle&quot;, (8, 9, 7), False),
+        (&quot;dihedral&quot;, (8, 9, 10, 11), True),
+        (&quot;dihedral&quot;, (8, 9, 10, 7), False),
+        (&quot;bond&quot;, (8, 9), True),
+        (&quot;bond&quot;, (7, 8), False),
+    ]
+    for kind, atoms, expect_removed in cases:
+        got = removed(atoms, ML, kind)
+        if got != expect_removed:
+            raise AssertionError(f&quot;{kind} {atoms}: removed={got}, expected {expect_removed}&quot;)
+    return &quot;boundary angle and dihedral kept; all-ML terms removed&quot;
+
+def link_frontiers(n_copies, only_block_start):
+    copies = range(1 if only_block_start else n_copies)
+    return [copy for copy in copies]
+
+def links():
+    fixed = link_frontiers(4, only_block_start=False)
+    buggy = link_frontiers(4, only_block_start=True)
+    if fixed != [0, 1, 2, 3] or buggy != [0]:
+        raise AssertionError((fixed, buggy))
+    return f&quot;{len(fixed)} frontiers in the block; block-start walk returns {len(buggy)}&quot;
+
+check(&quot;ONIOM keeps boundary angles and dihedrals&quot;, oniom_rules)
+check(&quot;link frontier in every molecule of a block&quot;, links)</code></pre>
+<div class="output"><pre>PASS  ONIOM keeps boundary angles and dihedrals                   6.4 us  boundary angle and dihedral kept; all-ML terms removed
+PASS  link frontier in every molecule of a block                  2.9 us  4 frontiers in the block; block-start walk returns 1</pre></div>
+<h2>Source check</h2>
+<p>The GoogleTest file records the contracts and skips. This cell checks that those names are present, that the test target lists the file, and that <code>setPairlist</code> appends both plain pair lists.</p>
+<div class="prompt">In [6]</div>
+<pre><code>MODULE = Path(&#x27;/home/boittier/Documents/metawork/gromacs/src/gromacs/applied_forces/metatomic&#x27;)
+
+EXPECTED_TESTS = [
+    &quot;TEST(CApiEveryCall, ChecksTypesAndScalesUnitsWithoutConsistency)&quot;,
+    &quot;TEST(CApiCheckConsistency, RejectsDtypeDeviceAndExtraSamples)&quot;,
+    &quot;TEST(CApiSystem, OwnsTensorsAndRejectsNonZeroVacuumRow)&quot;,
+    &quot;TEST(CApiPairs, ChecksLayoutAndNotDistances)&quot;,
+    &quot;TEST(CApiEnergyBlock, SumsByLabelAndKeepsGradientSign)&quot;,
+    &quot;TEST(CApiGromacsOnly, HomeRangeAndHaloExchange)&quot;,
+    &quot;TEST(CApiLoad, LoadsPluginAndKeepsModelAlive)&quot;,
+    &quot;TEST(CApiLoad, ConvertsModelCutoffToNm)&quot;,
+    &quot;TEST(CApiLoad, BuildsQuantityListInGromacsUnits)&quot;,
+    &quot;TEST(CApiStep, WrapsGromacsBuffersWithoutCopyingWhenDtypesMatch)&quot;,
+    &quot;TEST(CApiStep, FiltersCutoffOnlyWhenStrict)&quot;,
+    &quot;TEST(CApiStep, PassesHomeAtomsAndIndexesOutputsByRequestOrder)&quot;,
+    &quot;TEST(CApiForces, AccumulatesPositionsGradientByAtomLabel)&quot;,
+    &quot;TEST(CApiForces, HalvesStrainGradientForGromacsVirial)&quot;,
+    &quot;TEST(CApiForces, ScattersNonConservativeForcesWithoutNegating)&quot;,
+    &quot;TEST(CApiBuild, DoesNotLinkTorch)&quot;,
+    &quot;TEST(OniomTopology, KeepsBoundaryAnglesAndDihedrals)&quot;,
+    &quot;TEST(OniomLinks, FindsFrontierInEveryMoleculeOfABlock)&quot;,
+    &quot;TEST(NlCapacity, PairCountMatchesBruteForce)&quot;,
+    &quot;TEST(OniomMd, ConservedEnergyDriftBound)&quot;,
+]
+
+def sources():
+    tests = (MODULE / &quot;tests/c_api_contract.cpp&quot;).read_text()
+    cmake = (MODULE / &quot;tests/CMakeLists.txt&quot;).read_text()
+    provider = (MODULE / &quot;metatomic_forceprovider.cpp&quot;).read_text()
+    missing = [name for name in EXPECTED_TESTS if name not in tests]
+    if missing:
+        raise AssertionError(&quot;missing tests: &quot; + &quot;, &quot;.join(missing))
+    if &quot;c_api_contract.cpp&quot; not in cmake:
+        raise AssertionError(&quot;test target does not list c_api_contract.cpp&quot;)
+    if &quot;appendPairlistEntries(signal.pairlist_)&quot; not in provider:
+        raise AssertionError(&quot;setPairlist does not read pairlist_&quot;)
+    if &quot;appendPairlistEntries(signal.excludedPairlist_)&quot; not in provider:
+        raise AssertionError(&quot;setPairlist does not read excludedPairlist_&quot;)
+    return f&quot;{len(EXPECTED_TESTS)} stubs present; both pair lists appended&quot;
+
+check(&quot;sources match the recorded contracts&quot;, sources)</code></pre>
+<div class="output"><pre>PASS  sources match the recorded contracts                      220.4 us  20 stubs present; both pair lists appended</pre></div>
+<h2>ONIOM setups and short NVE runs</h2>
+<p><code>alanine_vacuo</code> is the ACE-ALA-NME peptide from the GROMACS test database. Three cuts use the same harmonic stand-in. Bonds shorter than 0.17 nm come from vesin. The MM spring constant is <code>2e4 kJ/mol/nm^2</code>. Bonds inside the ML region also get an ML spring of <code>4e4</code>. The ONIOM force is <code>F_MM(full) + F_ML(model) - F_MM(model)</code>.</p>
+<ul><li><strong>Side chain.</strong> ML atoms <code>{8, 9, 10, 11, 12, 13}</code> (CA, HA, CB, HB1, HB2, HB3). The rest of the peptide is MM.</li><li><strong>ALA residue.</strong> ML is residue ALA (N through O, indices 6–15). ACE and NME are MM.</li><li><strong>ALA plus waters.</strong> The same ALA region is ML. Eight waters sit around the peptide and are MM, together with the caps. A soft wall between each water oxygen and the solute, inside 0.40 nm, is part of <code>E_MM(full)</code> only.</li></ul>
+<p>Each setup runs 40 velocity-Verlet steps at 50 K, <code>dt = 0.0002 ps</code>. The extended XYZ files are in Ångström, with <code>subsystem</code> (1 = ML) and forces in kJ/mol/nm. Open them in OVITO, ASE, or VMD. This is not a GROMACS <code>mdrun</code>.</p>
+<div class="prompt">In [7]</div>
+<pre><code>import base64
+import io
+
+import numpy as np
+
+os.environ.setdefault(&quot;MPLCONFIGDIR&quot;, &quot;/tmp/matplotlib-c-api&quot;)
+import matplotlib
+matplotlib.use(&quot;Agg&quot;)
+import matplotlib.pyplot as plt
+
+SYMBOL = {
+    &quot;CH3&quot;: &quot;C&quot;, &quot;HH31&quot;: &quot;H&quot;, &quot;HH32&quot;: &quot;H&quot;, &quot;HH33&quot;: &quot;H&quot;,
+    &quot;C&quot;: &quot;C&quot;, &quot;O&quot;: &quot;O&quot;, &quot;N&quot;: &quot;N&quot;, &quot;H&quot;: &quot;H&quot;,
+    &quot;CA&quot;: &quot;C&quot;, &quot;HA&quot;: &quot;H&quot;, &quot;CB&quot;: &quot;C&quot;,
+    &quot;HB1&quot;: &quot;H&quot;, &quot;HB2&quot;: &quot;H&quot;, &quot;HB3&quot;: &quot;H&quot;,
+    &quot;OW&quot;: &quot;O&quot;, &quot;HW1&quot;: &quot;H&quot;, &quot;HW2&quot;: &quot;H&quot;,
+}
+MASS = {&quot;H&quot;: 1.008, &quot;C&quot;: 12.011, &quot;N&quot;: 14.007, &quot;O&quot;: 15.999}
+SIDE_CHAIN = {8, 9, 10, 11, 12, 13}
+ALA_RESIDUE = set(range(6, 16))
+K_MM = 2.0e4
+K_ML = 4.0e4
+K_WALL = 5.0e2
+R_WALL = 0.40
+
+def read_alanine():
+    gro = (MODULE.parents[2] / &quot;testutils/simulationdatabase/alanine_vacuo.gro&quot;).read_text().splitlines()
+    n_atoms = int(gro[1])
+    names, positions = [], []
+    for line in gro[2:2 + n_atoms]:
+        names.append(line[10:15].strip())
+        positions.append([float(line[20:28]), float(line[28:36]), float(line[36:44])])
+    return names, np.array(positions)
+
+def add_waters(names, positions, n_waters=8):
+    com = positions.mean(axis=0)
+    oh = 0.09572
+    half = np.deg2rad(104.52 / 2.0)
+    extra_names, extra_pos = [], []
+    for water in range(n_waters):
+        theta = 2.0 * np.pi * water / n_waters
+        outward = np.array([np.cos(theta), np.sin(theta), 0.35 * (1 if water % 2 == 0 else -1)])
+        outward = outward / np.linalg.norm(outward)
+        oxygen = com + outward * 0.90
+        for _push in range(12):
+            if np.linalg.norm(positions - oxygen, axis=1).min() &gt;= 0.34:
+                break
+            oxygen = oxygen + outward * 0.04
+        reference = np.array([0.0, 0.0, 1.0])
+        if abs(np.dot(outward, reference)) &gt; 0.9:
+            reference = np.array([0.0, 1.0, 0.0])
+        side = np.cross(outward, reference)
+        side = side / np.linalg.norm(side)
+        h1 = oxygen + oh * (np.cos(half) * outward + np.sin(half) * side)
+        h2 = oxygen + oh * (np.cos(half) * outward - np.sin(half) * side)
+        extra_names.extend([&quot;OW&quot;, &quot;HW1&quot;, &quot;HW2&quot;])
+        extra_pos.extend([oxygen, h1, h2])
+    return names + extra_names, np.vstack([positions, np.array(extra_pos)])
+
+def pair_forces(positions, first, second, r0, k):
+    if len(first) == 0:
+        return np.zeros_like(positions), 0.0
+    rij = positions[second] - positions[first]
+    distance = np.linalg.norm(rij, axis=1)
+    unit = rij / distance[:, None]
+    stretch = distance - r0
+    pair_force = (k * stretch)[:, None] * unit
+    forces = np.zeros_like(positions)
+    np.add.at(forces, first, pair_force)
+    np.add.at(forces, second, -pair_force)
+    return forces, float(0.5 * k * np.sum(stretch * stretch))
+
+def wall_forces(positions, n_solute):
+    oxygen = np.arange(n_solute, len(positions), 3)
+    if len(oxygen) == 0:
+        return np.zeros_like(positions), 0.0
+    solute = np.arange(n_solute)
+    delta = positions[oxygen][:, None, :] - positions[solute][None, :, :]
+    distance = np.linalg.norm(delta, axis=2)
+    active = distance &lt; R_WALL
+    stretch = np.where(active, distance - R_WALL, 0.0)
+    safe = np.where(distance &gt; 1.0e-8, distance, 1.0)
+    unit = delta / safe[:, :, None]
+    pair_force = (K_WALL * stretch)[:, :, None] * unit
+    forces = np.zeros_like(positions)
+    # stretch is negative inside the wall, and unit points from solute to oxygen.
+    # The oxygen is pushed outward.
+    np.add.at(forces, oxygen, -pair_force.sum(axis=1))
+    np.add.at(forces, solute, pair_force.sum(axis=0))
+    return forces, float(0.5 * K_WALL * np.sum(stretch * stretch))
+
+def oniom_forces(positions, bonds, n_solute):
+    first, second, r0, model = bonds
+    f_mm, e_mm = pair_forces(positions, first, second, r0, K_MM)
+    f_model, e_model = pair_forces(positions, first[model], second[model], r0[model], K_MM)
+    f_ml, e_ml = pair_forces(positions, first[model], second[model], r0[model], K_ML)
+    f_wall, e_wall = wall_forces(positions, n_solute)
+    force = f_mm + f_ml - f_model + f_wall
+    energy = e_mm + e_ml - e_model + e_wall
+    return force, energy, f_mm, f_ml, f_model, f_wall
+
+def bonds_for(positions, ml):
+    box = np.diag([8.0, 8.0, 8.0])
+    first, second, shift, vectors = vesin_pairs(positions, box, 0.17, full_list=False)
+    keep = np.all(shift == 0, axis=1)
+    first, second, vectors = first[keep], second[keep], vectors[keep]
+    r0 = np.linalg.norm(vectors, axis=1)
+    model = np.array([(int(i) in ml) and (int(j) in ml) for i, j in zip(first, second)])
+    return first, second, r0, model
+
+def write_extxyz(path, symbols, frames):
+    lines = []
+    for step, coords, force, energy, subsystem in frames:
+        lines.append(str(len(symbols)))
+        lines.append(
+            &#x27;Properties=species:S:1:pos:R:3:subsystem:I:1:forces:R:3 &#x27;
+            f&#x27;energy={energy:.8f} step={step} &#x27;
+            &#x27;pos_unit=Angstrom force_unit=kJ/mol/nm pbc=&quot;F F F&quot;&#x27;
+        )
+        for symbol, xyz, bit, fvec in zip(symbols, coords * 10.0, subsystem, force):
+            lines.append(
+                f&quot;{symbol} {xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f} {int(bit)} &quot;
+                f&quot;{fvec[0]:.6f} {fvec[1]:.6f} {fvec[2]:.6f}&quot;
+            )
+    path.write_text(&quot;\n&quot;.join(lines) + &quot;\n&quot;)
+
+def run_setup(label, filename, ml, with_waters):
+    names, positions = read_alanine()
+    n_solute = len(names)
+    if with_waters:
+        names, positions = add_waters(names, positions)
+    ml = set(ml)
+    if any(atom &gt;= n_solute for atom in ml):
+        raise AssertionError(&quot;ML indices must stay on the solute&quot;)
+    symbols = [SYMBOL[name] for name in names]
+    masses = np.array([MASS[symbol] for symbol in symbols])
+    subsystem = np.array([1 if atom in ml else 0 for atom in range(len(names))])
+    n_water = len(names) - n_solute
+    bonds = bonds_for(positions, ml)
+    if int(bonds[3].sum()) == 0:
+        raise AssertionError(f&quot;{label} has no bond inside the ML region&quot;)
+    # Waters must stay out of the ML region, and a water oxygen must not start inside the wall.
+    if n_water:
+        oxygen = np.arange(n_solute, len(names), 3)
+        if np.any(subsystem[oxygen] != 0):
+            raise AssertionError(&quot;a water was marked ML&quot;)
+        clearance = np.linalg.norm(positions[oxygen][:, None, :] - positions[:n_solute][None, :, :], axis=2).min()
+        if clearance &lt; 0.30:
+            raise AssertionError(f&quot;water overlaps the solute, min distance {clearance:.3f} nm&quot;)
+
+    kB = 0.008314462618
+    rng = np.random.default_rng(1)
+    velocity = rng.normal(size=positions.shape) * np.sqrt(kB * 50.0 / masses)[:, None]
+    velocity -= np.average(velocity, axis=0, weights=masses)
+    coords = positions.copy()
+    force, energy, f_mm, f_ml, f_model, f_wall = oniom_forces(coords, bonds, n_solute)
+    acceleration = force / masses[:, None]
+    dt = 2.0e-4
+    trace = []
+    saved = []
+    for step in range(41):
+        kinetic = float(0.5 * np.sum(masses * np.sum(velocity * velocity, axis=1)))
+        trace.append((energy + kinetic, kinetic, energy, float(np.linalg.norm(coords - positions, axis=1).max())))
+        if step % 5 == 0:
+            saved.append((step, coords.copy(), force.copy(), energy + kinetic, subsystem.copy()))
+        coords = coords + velocity * dt + 0.5 * acceleration * dt * dt
+        force, energy, f_mm, f_ml, f_model, f_wall = oniom_forces(coords, bonds, n_solute)
+        acceleration_new = force / masses[:, None]
+        velocity = velocity + 0.5 * (acceleration + acceleration_new) * dt
+        acceleration = acceleration_new
+    if not np.isfinite(coords).all():
+        raise AssertionError(f&quot;{label} NVE left the real line&quot;)
+    drift = trace[-1][0] - trace[0][0]
+    if abs(drift) / abs(trace[0][0]) &gt; 1.0e-3:
+        raise AssertionError(f&quot;{label} energy drift {drift} kJ/mol&quot;)
+    if trace[-1][3] &gt; 0.08:
+        raise AssertionError(f&quot;{label} moved {trace[-1][3]} nm&quot;)
+    mm = subsystem == 0
+    if not np.allclose(f_ml[mm], 0.0) or not np.allclose(f_model[mm], 0.0):
+        raise AssertionError(f&quot;{label}: an MM atom received a model force&quot;)
+    if not np.allclose(force, f_mm + f_ml - f_model + f_wall):
+        raise AssertionError(f&quot;{label}: ONIOM force identity failed&quot;)
+    if n_water and not np.allclose(force[n_solute:], f_mm[n_solute:] + f_wall[n_solute:]):
+        raise AssertionError(f&quot;{label}: water force is not the MM full-system force&quot;)
+
+    traj = MODULE / &quot;docs&quot; / &quot;trajectories&quot;
+    traj.mkdir(exist_ok=True)
+    path = traj / filename
+    write_extxyz(path, symbols, saved)
+    EMBED[&quot;files&quot;].append({
+        &quot;href&quot;: f&quot;trajectories/{filename}&quot;,
+        &quot;title&quot;: label,
+    })
+    ml_force = float(np.linalg.norm(force[subsystem == 1], axis=1).mean())
+    mm_solute = np.arange(n_solute)[subsystem[:n_solute] == 0]
+    mm_force = float(np.linalg.norm(force[mm_solute], axis=1).mean()) if len(mm_solute) else 0.0
+    water_force = float(np.linalg.norm(force[n_solute:], axis=1).mean()) if n_water else 0.0
+    print(
+        f&quot;{label:&lt;16} ML {int(subsystem.sum()):2d}  MM {int((subsystem == 0).sum()):2d}  &quot;
+        f&quot;waters {n_water // 3:2d}  bonds {int(bonds[3].sum()):2d}  &quot;
+        f&quot;drift {drift: .3e}  |F| ML {ml_force:7.2f}  MM-solute {mm_force:7.2f}  water {water_force:7.2f}&quot;
+    )
+    return [row[0] for row in trace], label
+
+def oniom_setups():
+    curves = [
+        run_setup(&quot;side chain&quot;, &quot;oniom-sidechain.xyz&quot;, SIDE_CHAIN, False),
+        run_setup(&quot;ALA residue&quot;, &quot;oniom-ala-residue.xyz&quot;, ALA_RESIDUE, False),
+        run_setup(&quot;ALA + waters&quot;, &quot;oniom-ala-waters.xyz&quot;, ALA_RESIDUE, True),
+    ]
+    fig, ax = plt.subplots(figsize=(7.2, 3.2))
+    for totals, label in curves:
+        ax.plot(totals, label=label)
+    ax.set_xlabel(&quot;step&quot;)
+    ax.set_ylabel(&quot;total energy (kJ/mol)&quot;)
+    ax.set_title(&quot;40-step NVE&quot;)
+    ax.legend()
+    fig.tight_layout()
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format=&quot;png&quot;, dpi=120)
+    plt.close(fig)
+    EMBED[&quot;images&quot;].append({
+        &quot;title&quot;: &quot;NVE total energy for the three ONIOM cuts&quot;,
+        &quot;png&quot;: base64.b64encode(buffer.getvalue()).decode(),
+    })
+    return &quot;3 trajectories, drift below 0.1%&quot;
+
+def lattice_count():
+    box = np.diag([1.2, 1.2, 1.2])
+    positions = lattice(4, box)
+    first, second, _shift, _vectors = vesin_pairs(positions, box, 0.5, full_list=False)
+    coordination = np.zeros(len(positions), dtype=int)
+    np.add.at(coordination, first, 1)
+    np.add.at(coordination, second, 1)
+    if not np.all(coordination == 18):
+        raise AssertionError(f&quot;coordination {set(coordination.tolist())}&quot;)
+    traj = MODULE / &quot;docs&quot; / &quot;trajectories&quot;
+    traj.mkdir(exist_ok=True)
+    path = traj / &quot;lattice-4x4x4.xyz&quot;
+    symbols = [&quot;C&quot;] * len(positions)
+    frames = [(0, positions, np.zeros_like(positions), 0.0, coordination)]
+    # subsystem column stores the neighbor count for this file
+    write_extxyz(path, symbols, frames)
+    text = path.read_text().splitlines()
+    text[1] = text[1].replace(&quot;subsystem:I:1&quot;, &quot;neighbors:I:1&quot;)
+    path.write_text(&quot;\n&quot;.join(text) + &quot;\n&quot;)
+    EMBED[&quot;files&quot;].append({&quot;href&quot;: &quot;trajectories/lattice-4x4x4.xyz&quot;, &quot;title&quot;: &quot;4x4x4 lattice, neighbor count in the neighbors column&quot;})
+    return &quot;coordination 18 on every site&quot;
+
+check(&quot;three ONIOM cuts, 40-step NVE&quot;, oniom_setups)
+check(&quot;lattice neighbor count&quot;, lattice_count)</code></pre>
+<figure><img alt="NVE total energy for the three ONIOM cuts" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAA2AAAAGACAYAAADLSQEPAAAAOnRFWHRTb2Z0d2FyZQBNYXRwbG90bGliIHZlcnNpb24zLjExLjEsIGh0dHBzOi8vbWF0cGxvdGxpYi5vcmcvctoD+AAAAAlwSFlzAAASdAAAEnQB3mYfeAAAY35JREFUeJzt3XdYFFf/NvB7qVIjXZqgKDbEhhp7wxILii021GgUMdbYSxJ7NBp7x17RaMQSfexiN4JYwIoFQaQjRaTP+4cv+8u6gIA7C4v357q4noczZ875zrgabmbmjEQQBAFEREREREQkOrWSLoCIiIiIiOhrwQBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKwgBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKwgBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERAoze/ZsuLi4wMXFBYmJifn2e/z4McaNG4fWrVujffv2mD17NiIjI5VYaemxc+dO6Tk7evRonn1OnToFFxcXLF++HADw5s0bNGzYEO3bt4cgCAWOHxUVJe2bk5MjN2d+X56enoo9UCIiAgBolHQBRERUNvj7++P333+X/pCfmZmZZ7/jx4+jb9++SEtLk7adO3cOmzZtwsWLF+Hk5KTw2pYuXYoDBw5gx44dooz/Jd6+fYuAgAAAwPTp09G1a1eoq6vL9ImLi0NAQACaN28OALC2tkZOTg7OnTuHS5cuoU2bNvmOv3fvXvj7+8PT0xNqampyc+ZHX1//Sw6LiIjywStgRET0xXJycuDl5YXatWvDxsYm336xsbEYNGgQ0tLS0L9/f5w/fx4nTpxAmzZtEBsbi759+yI7O1vh9YWGhiIgIAApKSkKH1tRtLW18fjxY+zdu7dQ/YcMGQIA2LVrV4H9crfn9v+vESNG4Pbt23l+bdq0qYhHQEREhcEARkREX2zTpk0ICAjA+vXr5a7e/NeGDRuQlJSELl26YN++fWjbti26dOmCU6dOoUaNGnj06BGOHz+uxMpLj+HDh0NDQwPz5s1DVlbWZ/sPGDAAmpqaOHz4MFJTU/Ps8+DBA9y7dw9Vq1ZFkyZN5LZbWVnlewti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18TERHq1jIiIiIiIqCSI9iJmIiIiIiIiksUARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKorBVEHPfIl1YEokE6urqipqeiIiIiIio1FPIFTB/f39oamoW6atx48aKmJqIiIiIiEhlKOQKmJWVFX777bci70NERERERPQ1UVgAmzNnjiKGIiIiIiIiKrO4CAcREREREZGSKGwRjrwcOnQIR48eRWhoKHJycmS2Va9eHVu2bBFzeiIiIiIiolJFtCtgc+fORb9+/XDz5k0EBgYiOTkZ9+/fx82bN+XCGBERERER0ddAlACWmZmJZcuW4cCBA9i/fz+qVauGe/fuIS4uDuvWrYORkRHWrFkjxtRERERERESlligB7Pnz59DX10evXr0gkUggCAIAQFNTE56enmjVqhWWLl0qxtRERERERESlligB7P3797C0tAQAaGtrIz4+XmZ706ZN4efnJ8bUREREREREpZYoAUwQBKipfRzazs4OYWFhePXqlXS7v78/tLS0xJiaiIiIiIio1BJ1FUQAMDAwQIcOHdC2bVt4eHggISEB3t7eWLx4sdhTExERERERlSqiBDA7OzvMnDlT+v2mTZvQr18/zJs3D9ra2hg6dCh++uknMaYmIiIiIiIqtUQJYGZmZujZs6f0e1tbW1y7dg1JSUnQ1dWFhoboF96IiIiIiIhKHVGeAUtLS0NoaKhcu6GhITQ0NPLdTkREREREVJaJEsCCgoLQq1evYm8nIiIiIiIqi0QJYJ+TlZUFdXX1kpiaiIiIiIioxCg9gKWmpuLEiRMwNTVV9tREREREREQlSmGrYfj7+6Nhw4YybRKJJN/+W7duVdTUREREREREKkFhAczS0hLTpk0DAERGRuL06dMYMmSIXL/y5cujWbNmaNGihaKmJiIiIiIiUgkKC2DW1tbSlyu/ePEC1tbWWLhwoaKGJyIiIiIiUnmivJCrcuXK0vAVHR0Nf39/pKSkwMbGBg0bNoSmpuYXjR8YGIgLFy4gOzsbU6dOzbffixcv8O+//yImJgb29vZo1aoVDA0Nv2huIiIiIiKi4hLtjcgZGRmYMGECNm/ejOzsbGm7lZUVtm7dik6dOhV5zO3bt2PRokUwMDDAu3fv8Pr16zwDWEREBAYOHIirV6+iU6dOsLe3x7Zt2xAeHo7Vq1ejf//+X3RsRERERERExSFaAJs+fTq2bt2KYcOGoXXr1jAyMsKrV6+wbds29OjRAwEBAahVq1aRxrS2tsapU6dQpUoV9OjRA69fv86zX0REBKKjo3Hnzh3Url0bAJCTkwMPDw94eHigbt26qFGjxhcfIxERERERUVGIEsDS0tKwYcMGHDp0CN26dZPZ5unpie7du2Pt2rXYsGFDkcbt0KFDofpVrFgRV69ehZGRkbRNTU0NXl5e2LdvH06cOMEARkRERERESifKe8CeP38OMzMzufAF/F8QCg4OFmNqAIC5ublM+MoVHx8PoODl8YmIiIiIiMQiyhUwdXV1fPjwId/t79+/h4aGaHc/5kkQBCxduhRqamro3LlzgX2jo6MRExMj0xYSEiJmeURERERE9BUQ5QpYlSpVkJ2djaVLl8ptS05OxuLFi9GoUSMxps7XnDlzcPXqVYwdOxY1a9YssO/69evh5OQk89WjRw/lFEpERERERGWWKJehNDQ08Msvv+Dnn3/GoUOHpItwhIaG4q+//oJEIsG4cePEmDpPGzZswLx589ClS5c8Q+GnRo8ejT59+si0hYSEMIQREREREdEXEe0+wIkTJ0JbWxuLFi3CH3/8AeDj819t2rTBmjVrYGVlJdbUMnbs2IGffvoJHTt2xOHDhwv1DjJzc3OYm5sroToiIiIiIvqaiPog1ujRozF69Gi8efMGKSkpsLKygoGBgZhTyti/fz+GDx8OV1dX+Pr6QltbW2lzExERERERfUq0ZeijoqJgZ2cH4OP7uwraLoYjR45g8ODBaNeuHY4dO4Zy5cqJNhcREREREVFhiBLAgoKCMGrUKPj7+xdre37u3LmDM2fOAACePXsGQRCwePFiAEDlypXRt29f6fj9+vWDpqYmmjZtipUrV8qM06BBA7Rv376IR0VERERERPRllLsW/P+XlZUFdXX1Iu+Xnp6Od+/eAQC6deuGbt26Sb9///69tJ+WlhYmTpwI4OPVtrS0NJlxCloin4iIiIiISCxKD2Cpqak4ceIETE1Ni7xvkyZN0KRJk8/2c3R0lF4ZIyIiIiIiKi0UFsD8/f3RsGFDmTaJRJJv/61btypqaiIiIiIiIpWgsABmaWmJadOmAQAiIyNx+vRpDBkyRK5f+fLl0axZM7Ro0UJRUxMREREREakEhQUwa2tr6W1/L168gLW1NRYuXKio4YmIiIiIiFSemhiDVq5cmeGLiIiIiIjoE6IEMCIiIiIiIpLHAEZERERERKQkDGBERERERERKwgBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKwgBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKwgBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKwgBGRERERESkJBolXUBRJSUl4ejRo7hw4QJycnKwc+fOfPumpqZi165dCAwMhLa2Ntq1a4fu3bsrsVoiIiIiIqL/o1JXwObNm4eqVavi7NmzCAwMxN69e/PtGxMTgwYNGmD16tVwdnaGhYUFfvjhB/Tv3x85OTlKrJqIiIiIiOgjlboC1rt3b0ybNg3a2tro0aMHgoKC8u37888/IzIyEk+fPoWZmRkAoHHjxmjfvj06duyIoUOHKqlqIiIiIiKij1TqCljNmjWhra392X6JiYk4ePAg+vTpIw1fAODq6gpHR0ds3rxZzDKJiIiIiIjypFIBrLDu3LmDjIwMNGjQQG5bw4YN4e/vj8zMzBKojIiIiIiIvmYqdQtiYYWFhQEAKlSoILetQoUKyMzMRFRUFGxsbPLcPzo6GjExMTJtISEhii+UiIiIiIi+KmUygKWnpwMANDU15bZpaWkBANLS0vLdf/369Zg7d644xRERERER0VerTAYwfX19AMCHDx/ktr1//x4AYGBgkO/+o0ePRp8+fWTaQkJC0KNHD8UVSUREREREX50yGcCqVKkCAAgNDZXb9vr1axgYGMDc3Dzf/c3NzQvcTkREREREVBxlchGOevXqwdjYGJcvX5Zpz8zMxNWrV9G2bVtIJJISqo6IiIiIiL5WZTKAaWhoYMKECfjnn39w/fp1afuKFSsQFxeHKVOmlGB1RERERET0tVKpWxDPnj2LnTt3AgACAgKQk5ODQYMGAQDq1KkjE6xmzpyJ169fo23btmjfvj0SExPh7++PTZs2oVmzZiVSvyJkZqTjWcCFki6DqGwQhJKuQKr0VEJik5SxP+1S9NeIRMc/bCoZFZ2awuAb45IuQ2FUKoDZ2dmhU6dOACD931xWVlYy36urq8Pb2xszZszA3bt3oaWlhWbNmsHIyEhp9YrhfVICap7uV9JlEBEREREpxVOdozCo37qky1AYlQpgjo6OcHR0LNI+lStXRuXKlUWqiIiIiIiIqPBUKoARoGdohCDX3SVdBlEZUooW5ClFpZDYytYftqSMHQ8VgIuYUQmo6OBc0iUoFAOYitHU0oZTc7eSLoOIiIiIiIqhTK6CSEREREREVBoxgBERERERESkJAxgREREREZGSMIAREREREREpCQMYERERERGRkjCAERERERERKQkDGBERERERkZIwgBERERERESkJX8RcSOnp6QCAkJCQEq6EiIiIiIiUKTcD5GaCL8EAVkhhYWEAgB49epRsIUREREREVCLCwsJQv379LxpDIgiCoKB6yrR3797Bz88Ptra20NbWLtFaQkJC0KNHD/j6+qJKlSolWktZxPMrHp5bcfH8iovnVzw8t+Li+RUPz624StP5TU9PR1hYGFq1aoXy5ct/0Vi8AlZI5cuXR/fu3Uu6DBlVqlRBrVq1SrqMMovnVzw8t+Li+RUXz694eG7FxfMrHp5bcZWW8/ulV75ycREOIiIiIiIiJWEAIyIiIiIiUhIGMCIiIiIiIiVhAFNBZmZm+O2332BmZlbSpZRJPL/i4bkVF8+vuHh+xcNzKy6eX/Hw3IqrrJ5froJIRERERESkJLwCRkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKolHSBVDRJCQk4NatW8jKykL9+vVhZWVV0iWVCceOHUNqaqpcu7W1NVq0aFECFam2N2/e4Pr169DW1oabm1uBfUNCQhAcHAx9fX00adIEurq6SqpSNQmCgOvXryMsLAzOzs6oWbOmXJ+EhAScPn06z/0bNWqEypUri12mSkpLS0NQUBAiIiJQsWJF1KxZE1paWvn2j4qKgr+/PyQSCRo3bgwTExMlVqt6IiMjERwcjOzsbFSrVg12dnZ59vPx8cmzvUqVKnBxcRGzRJX28uVLPHr0COXKlYOjoyNsbGzy7ZuSkoIbN27gw4cPcHZ2hr29vfIKVUHp6ekICgpCeHg4LC0t4eTklOd/q06fPo2EhAS5dlNTU7i6uiqjVJWWmJiIU6dOAQB69+4NDQ35mJKZmYmbN28iLi4ODg4OqF27trLLVAiugqhC1q9fj8mTJ6N+/frQ09ODn58fxo8f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IqOtrS23/fr16zh06BDi4uLg4OCAH374Aba2tiVQ6ZdhACMiIiIiIlISLsJBRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKwgBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERARgz549kEgkCAoKKulSiIioDGMAIyIiIiIiUhIGMCIiIiIiIiVhACMiojIvKSkJEyZMQKVKlaCjo4MqVargp59+QmRkJABgwYIF8PDwAADUrl0bEokEEokEhw4dko4RHR2N0aNHw9bWFlpaWrC1tcXkyZPx4cMHaZ8tW7ZAIpHg8ePHmDZtGszNzaGnp4fvvvsOjx8/Vu5BExFRqcQARkREZZ6npyd8fX3h4+ODhIQEnD9/Hs7Ozti0aRMAYPbs2di9ezcA4MGDBxAEAYIgoHfv3gA+hq9GjRrhxo0bOHDgAOLj4+Hj44OjR4/Czc0NgiDIzPfbb7+hUqVKePLkCW7duoWEhAS0bNkSERERyj1wIiIqdTRKugAiIiKxXbp0Ce7u7mjcuDEAwM7ODp6enoXef86cOYiOjsaVK1dga2sLAGjWrBm2bNmC1q1b4/Tp0+jUqZO0v6WlJUaNGgUAMDIywl9//QUHBwcsWbIEq1atUuCRERGRquEVMCIiKvPq1KmDvXv3YsWKFXjx4kWR9z9+/DgaN24sDV+5WrRoAW1tbfj5+cm0u7m5yXxva2uLBg0a4MKFC0UvnoiIyhQGMCIiKvN27tyJXr16Yd68eXBwcEDFihUxduxY6TNgnxMZGQk/Pz9oaGhAQ0MD6urqUFNTg7q6OtLT0xEXFyfT38LCQm4MCwsLxMbGKuR4iIhIdTGAERFRmWdhYYFt27YhNjYW9+7dw08//YRdu3bJ3DZYEFNTU3Tp0gVZWVnIyspCdnY2cnJypM+Kbd68WaZ/VFSU3BhRUVEwMTFRyPEQEZHqYgAjIqKvhrq6OpydnTFt2jSMGDEC9+7dQ1JSEgBAT08PAJCeni63X7du3XD58uVCXzE7fvy4zPfh4eG4c+cO2rVr94VHQEREqo4BjIiIyrTs7Gw0b94cf/31F8LCwpCeno7AwED8888/qF+/PgwNDQEAtWrVgkQiwcmTJ+VC2Lx582BiYoLvvvsO58+fR2JiImJiYnDp0iUMHDhQ7hmwiIgIeHt74927dwgODkbfvn1hYGCAqVOnKu24iYiodGIAIyKiMk1dXR1//PEH/v77bzRv3hzly5dH79690bFjR5w6dUraz9HREUuWLIG3tzd0dXVl3gNWoUIF3L59G23btsWoUaNgbm6O2rVrY8GCBejWrRuaNWsmM+fcuXPx5MkTVK1aFQ0bNoSBgQEuX74Ma2trpR47ERGVPhLh05eXEBERUbFs2bIFI0aMwLNnz1ClSpWSLoeIiEohXgEjIiIiIiJSEgYwIiIiIiIiJWEAIyIiIiIiUhI+A0ZERERERKQkvAJGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKwgBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQkDGBERERERERKwgBGRERERESkJAxgRERERERESsIARkREREREpCQMYERERERERErCAEZERERERKQk/w+3J0N0YsL/7wAAAABJRU5ErkJggg=="><figcaption>NVE total energy for the three ONIOM cuts</figcaption></figure>
+<ul>
+<li><a href="trajectories/oniom-sidechain.xyz">trajectories/oniom-sidechain.xyz</a> — side chain</li>
+<li><a href="trajectories/oniom-ala-residue.xyz">trajectories/oniom-ala-residue.xyz</a> — ALA residue</li>
+<li><a href="trajectories/oniom-ala-waters.xyz">trajectories/oniom-ala-waters.xyz</a> — ALA + waters</li>
+<li><a href="trajectories/lattice-4x4x4.xyz">trajectories/lattice-4x4x4.xyz</a> — 4x4x4 lattice, neighbor count in the neighbors column</li>
+</ul>
+<div class="output"><pre>side chain       ML  6  MM 16  waters  0  bonds  5  drift  5.095e-04  |F| ML  164.77  MM-solute   48.57  water    0.00
+ALA residue      ML 10  MM 12  waters  0  bonds  9  drift  5.956e-04  |F| ML  152.51  MM-solute   38.91  water    0.00
+ALA + waters     ML 10  MM 36  waters  8  bonds  9  drift  1.367e-03  |F| ML  152.51  MM-solute   38.91  water   74.00
+PASS  three ONIOM cuts, 40-step NVE                          139910.7 us  3 trajectories, drift below 0.1%
+PASS  lattice neighbor count                                    852.8 us  coordination 18 on every site</pre></div>
+<h2>Timings</h2>
+<p>Each <code>check</code> above is one row. The pair-list rows are vesin&#x27;s cell-list neighbor search. Unit conversion is one library call per factor, so its time includes the first <code>mta_unit_conversion_factor</code> from this process.</p>
+<div class="prompt">In [8]</div>
+<pre><code>print(f&quot;{&#x27;check&#x27;:&lt;52} {&#x27;us&#x27;:&gt;10}&quot;)
+total = 0.0
+for name, usec, detail in RESULTS:
+    total += usec
+    print(f&quot;{name:&lt;52} {usec:10.1f}  {detail}&quot;)
+print(f&quot;{&#x27;total&#x27;:&lt;52} {total:10.1f}&quot;)</code></pre>
+<div class="output"><pre>check                                                        us
+cutoff and energy units                                   100.0  5 A = 0.500000 nm; 1 eV = 96.485332 kJ/mol
+64-atom pair count matches both oracles                 25463.0  576 pairs (full_list 1152); body diagonal 0.520 nm
+triclinic cell shifts                                     484.2  768 pairs, 327 with a non-zero cell shift
+home atoms, gradient scatter, virial sign                  10.3  F[1]=(1, 2, 0); strain virial xx=1; nc virial xx=4
+ONIOM keeps boundary angles and dihedrals                   6.4  boundary angle and dihedral kept; all-ML terms removed
+link frontier in every molecule of a block                  2.9  4 frontiers in the block; block-start walk returns 1
+sources match the recorded contracts                      220.4  20 stubs present; both pair lists appended
+three ONIOM cuts, 40-step NVE                          139910.7  3 trajectories, drift below 0.1%
+lattice neighbor count                                    852.8  coordination 18 on every site
+total                                                  167050.7</pre></div>
+</main>
+</body>
+</html>

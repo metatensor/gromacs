@@ -36,13 +36,11 @@ gmx_add_libgromacs_sources(
     metatomic_mdmodule.cpp
 )
 
-# GMX_METATOMIC is the user-facing AUTO/TORCH/OFF multichoice; it stays truthy
-# even when torch was not found in AUTO mode. GMX_TORCH is the variable
-# gmxManageMetatomic.cmake sets only when Torch was actually located, so it
-# is the right gate here. Without torch, link the stub force provider; the
-# IMDModule registration in metatomic_mdmodule.cpp uses #if GMX_TORCH
-# guards around any torch-touching code paths.
-if (GMX_TORCH)
+# GMX_METATOMIC is the user-facing AUTO/TORCH/OFF multichoice. It stays set
+# even when libmetatomic was not found in AUTO mode. GMX_METATOMIC_ACTIVE is
+# set only when the C API library was found, so it is the compile gate.
+# Without it, link the stub force provider.
+if (GMX_METATOMIC_ACTIVE)
     gmx_add_libgromacs_sources(
         metatomic_forceprovider.cpp
     )

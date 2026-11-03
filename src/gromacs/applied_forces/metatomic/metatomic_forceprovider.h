@@ -42,8 +42,10 @@
 #pragma once
 
 #include <unordered_map>
+#include <vector>
 
 #include "gromacs/mdtypes/iforceprovider.h"
+#include "gromacs/topology/embedded_system_preprocessing.h"
 
 #include "metatomic_options.h"
 
@@ -66,7 +68,7 @@ class MpiComm;
  * ## Domain decomposition (DD) strategy
  *
  * Each rank evaluates the model on its local (home + halo) MTA atoms.
- * The GROMACS excluded pairlist serves as the pair source; a backward ghost
+ * The GROMACS plain pairlist (interacting pairs plus exclusions) serves as the pair source; a backward ghost
  * atom exchange followed by a backward pair exchange ensures every home atom
  * has ALL its pairs (the "newton pair ON" pattern from LAMMPS pair_metatomic).
  * Distance vectors and shifts are recomputed from local positions.
@@ -81,11 +83,14 @@ class MpiComm;
  * gmxLocalToMtaIdx_ so that the pairlist (which may reference any image) can
  * be resolved.
  *
- * **Forces**: backward() produces forces on all local atoms (home + halo).
- * Since ForceWithVirial is not communicated by dd_move_f, home forces are
- * applied directly and non-home (halo) forces are exchanged via sparse
- * indexed communication (allgatherv pattern). Falls back to dense allreduce
- * for small systems (N_total_mta < 1000).
+ * **Forces**: `execute_model` returns an explicit positions gradient (values
+ * are -F) on every local atom the model saw (home + halo). There is no
+ * autograd here. Since ForceWithVirial is not communicated by dd_move_f,
+ * home forces are applied directly and non-home (halo) forces are exchanged
+ * via sparse indexed communication (allgatherv pattern). Falls back to dense
+ * allreduce for small systems (N_total_mta < 1000). An ONIOM link cap
+ * overwrites one DLPack row before the call; `spreadForce` then splits that
+ * atom's gradient onto the embedded atom and the real MM atom.
  *
  * **Shift convention**: GROMACS shifts atom I (first):
  * d = x[I]+shift - x[J]. Metatensor convention: r_ij = x[J] + cell_shift*box
@@ -113,13 +118,22 @@ public:
     //! Store GROMACS pairlist and convert to MTA model indices.
     void setPairlist(const MDModulesPairlistConstructedSignal& signal);
 
+    /*! \brief ONIOM link caps in model-index space.
+     *
+     * Each entry's input indices are model indices. Before `execute_model`
+     * the MM row is replaced by the hydrogen cap. After the positions
+     * gradient is accumulated, `LinkFrontierAtom::spreadForce` splits that
+     * row onto the embedded atom and the MM atom. Empty means no caps.
+     */
+    void setLinkFrontiers(std::vector<LinkFrontierAtom> frontiers);
+
 private:
     //! Gather atom positions for MTA input (local only, no MPI).
     void gatherAtomPositions(ArrayRef<const RVec> positions);
 
     /*! \brief Exchange backward-direction pairs via ring-based MPI_Sendrecv.
      *
-     * In GROMACS DD, the excluded pairlist assigns each pair to exactly one
+     * In GROMACS DD, the plain pairlist assigns each pair to exactly one
      * rank (the rank whose home atom is the i-atom). For newton mode, each
      * rank needs ALL pairs involving its home atoms, including those assigned
      * to other ranks. This method discovers those missing pairs by
@@ -194,7 +208,7 @@ private:
     std::vector<int32_t> mtaToGlobalMta_;
     //! Maps ANY GROMACS local buffer index -> MTA model index.
     //! Includes ALL periodic ghost images of each atom (not just the first).
-    //! Needed because excludedPairlist_ entries can reference any image.
+    //! Needed because pairlist entries can reference any image.
     //! Initialized to -1 for non-MTA atoms.
     std::vector<int32_t> gmxLocalToMtaIdx_;
 
@@ -204,7 +218,7 @@ private:
     std::unordered_map<int32_t, int32_t> globalMtaToLocalHome_;
 
     //! Pairlist in MTA model indices, flat [i0,j0, i1,j1, ...].
-    //! Built from GROMACS excludedPairlist_ with negated cell shifts.
+    //! Built from GROMACS interacting and excluded pairlists with negated cell shifts.
     //! Used in both NL modes.
     std::vector<int32_t> pairlistMta_;
     //! Cell shifts for each pair (metatensor convention: shift applied to second atom).
@@ -219,9 +233,12 @@ private:
 
     //! Pre-allocated raw buffers for NL construction (used by both NL modes).
     //! Filled inline from pairlistMta_/cellShiftsMta_ (+ backward pairs in full mode).
-    //! Wrapped with torch::from_blob (zero-cost) before passing to metatensor.
+    //! Wrapped as a metatensor pair block and passed to `System::add_pairs`.
     std::vector<int32_t> nlSamplesBuffer_; //!< flat [n_pairs * 5]: i, j, cs_a, cs_b, cs_c
     std::vector<double>  nlVectorsBuffer_; //!< flat [n_pairs * 3]: dx, dy, dz
+
+    //! ONIOM caps. Input indices are model indices. Empty unless set.
+    std::vector<LinkFrontierAtom> linkFrontiers_;
 
     //! local copy of simulation box
     matrix box_;
