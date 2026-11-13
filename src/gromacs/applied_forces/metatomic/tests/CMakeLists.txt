@@ -1,0 +1,50 @@
+#
+# This file is part of the GROMACS molecular simulation package.
+#
+# Copyright 2024- The GROMACS Authors
+# and the project initiators Erik Lindahl, Berk Hess and David van der Spoel.
+# Consult the AUTHORS/COPYING files and https://www.gromacs.org for details.
+#
+# GROMACS is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# as published by the Free Software Foundation; either version 2.1
+# of the License, or (at your option) any later version.
+#
+# GROMACS is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with GROMACS; if not, see
+# https://www.gnu.org/licenses, or write to the Free Software Foundation,
+# Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
+#
+# If you want to redistribute modifications to GROMACS, please
+# consider that scientific software is very special. Version
+# control is crucial - bugs must be traceable. We will be happy to
+# consider code for inclusion in the official distribution, but
+# derived work must not be called official GROMACS. Details are found
+# in the README & COPYING files - if they are missing, get the
+# official version at https://www.gromacs.org.
+#
+# To help us fund GROMACS development, we humbly ask that you cite
+# the research papers on the package. Check out https://www.gromacs.org.
+
+gmx_add_unit_test(MTAAppliedForcesUnitTest mta_applied_forces-test
+    CPP_SOURCE_FILES
+        metatomic_forceprovider.cpp
+        metatomic_options.cpp
+)
+
+target_link_libraries(mta_applied_forces-test PRIVATE applied_forces math pbcutil topology)
+if (GMX_METATOMIC_ACTIVE)
+    # the force provider tests register a model plugin of their own
+    target_link_libraries(mta_applied_forces-test PRIVATE metatomic::shared)
+    add_library(metatomic-test-plugin MODULE testplugin.cpp)
+    target_link_libraries(metatomic-test-plugin PRIVATE metatomic::shared)
+    # A stable path lets the same smoke-test command run on Linux and macOS.
+    set_target_properties(metatomic-test-plugin PROPERTIES
+        PREFIX "" SUFFIX ".so"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+endif()

@@ -138,6 +138,7 @@ const gmx::EnumerationArray<InteractionFunction, t_interaction_function> interac
      {"DENSITYFIT",       "Dens. fitting",  0, 0, 0, sc_ifcNull },
      {"EQM",              "Quantum En.",    0, 0, 0, sc_ifcNull },
      {"ENNPOT",           "NN Potential",   0, 0, 0, sc_ifcNull },
+     {"EMETATOMICPOT",    "Metatomic Potential", 0, 0, 0, sc_ifcNull },
      {"EPOT",             "Potential",      0, 0, 0, sc_ifcNull },
      {"EKIN",             "Kinetic En.",    0, 0, 0, sc_ifcNull },
      {"ETOT",             "Total Energy",   0, 0, 0, sc_ifcNull },

@@ -244,6 +244,7 @@ enum class InteractionFunction : int
     DensityFitting,
     QuantumMechanicalRegionEnergy,
     NeuralNetworkPotentialEnergy,
+    MetatomicPotentialEnergy,
     PotentialEnergy,
     KineticEnergy,
     TotalEnergy,

@@ -1,0 +1,55 @@
+#
+# This file is part of the GROMACS molecular simulation package.
+#
+# Copyright 2024- The GROMACS Authors
+# and the project initiators Erik Lindahl, Berk Hess and David van der Spoel.
+# Consult the AUTHORS/COPYING files and https://www.gromacs.org for details.
+#
+# GROMACS is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# as published by the Free Software Foundation; either version 2.1
+# of the License, or (at your option) any later version.
+#
+# GROMACS is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with GROMACS; if not, see
+# https://www.gnu.org/licenses, or write to the Free Software Foundation,
+# Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA.
+#
+# If you want to redistribute modifications to GROMACS, please
+# consider that scientific software is very special. Version
+# control is crucial - bugs must be traceable. We will be happy to
+# consider code for inclusion in the official distribution, but
+# derived work must not be called official GROMACS. Details are found
+# in the README & COPYING files - if they are missing, get the
+# official version at https://www.gromacs.org.
+#
+# To help us fund GROMACS development, we humbly ask that you cite
+# the research papers on the package. Check out https://www.gromacs.org.
+
+gmx_add_libgromacs_sources(
+    metatomic_options.cpp
+    metatomic_mdmodule.cpp
+)
+
+# GMX_METATOMIC is the user-facing AUTO/ON/OFF multichoice. It stays set
+# even when libmetatomic was not found in AUTO mode. GMX_METATOMIC_ACTIVE is
+# set only when the C API library was found, so it is the compile gate.
+# Without it, link the stub force provider.
+if (GMX_METATOMIC_ACTIVE)
+    gmx_add_libgromacs_sources(
+        metatomic_forceprovider.cpp
+    )
+else()
+    gmx_add_libgromacs_sources(
+        metatomic_forceprovider_stub.cpp
+    )
+endif()
+
+if (BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
