@@ -52,6 +52,9 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
                        "Metatomic potential support enabled.")
 
         list(APPEND GMX_COMMON_LIBRARIES metatomic::shared)
+        # mdrun loads the plugins installed with this libmetatomic when the
+        # metatomic-plugin mdp option is empty
+        set(GMX_METATOMIC_PLUGINS_DIR "${METATOMIC_PLUGINS_DIR}")
 
         # Pre-installed libraries outside the GROMACS prefix need their own
         # RPATH entry. Pip wheels put metatomic and metatensor in different

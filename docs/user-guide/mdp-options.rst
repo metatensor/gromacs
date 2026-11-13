@@ -3819,8 +3819,11 @@ the topology, as for :mdp:`nnpot-input-group`.
 .. mdp:: metatomic-plugin
 
    Path of a metatomic-core plugin library, registered before the model is
-   loaded. Leave empty when a plugin already registered with metatomic-core
-   loads the model.
+   loaded. When empty, :ref:`gmx mdrun` registers the plugins installed with
+   the libmetatomic GROMACS was built with, in ``<prefix>/libexec/metatomic``
+   (``<prefix>/bin`` on Windows). This includes the plugin of metatomic-torch,
+   which loads TorchScript models exported with ``AtomisticModel``, when it is
+   installed in the same prefix.
 
 .. mdp:: metatomic-model-options
 

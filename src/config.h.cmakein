@@ -485,6 +485,10 @@
  * when libmetatomic was found. */
 #cmakedefine01 GMX_METATOMIC_ACTIVE
 
+/* Directory of the plugins installed with libmetatomic, which mdrun loads
+ * when the metatomic-plugin mdp option is empty */
+#define GMX_METATOMIC_PLUGINS_DIR "@GMX_METATOMIC_PLUGINS_DIR@"
+
 /* Build using clang analyzer */
 #cmakedefine01 GMX_CLANG_ANALYZER
 

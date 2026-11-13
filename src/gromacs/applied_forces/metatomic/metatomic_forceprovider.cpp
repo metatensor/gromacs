@@ -63,11 +63,14 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
@@ -319,6 +322,22 @@ struct MetatomicData
     std::vector<float>  cell32;
 };
 
+//! Plugins installed with the libmetatomic GROMACS was built with, all named *.so
+static std::vector<std::filesystem::path> installedPlugins()
+{
+    std::vector<std::filesystem::path> plugins;
+    std::error_code                    error;
+    for (const auto& entry : std::filesystem::directory_iterator(GMX_METATOMIC_PLUGINS_DIR, error))
+    {
+        if (entry.path().extension() == ".so")
+        {
+            plugins.push_back(entry.path());
+        }
+    }
+    std::sort(plugins.begin(), plugins.end());
+    return plugins;
+}
+
 MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                                const MDLogger&         logger,
                                                const MpiComm&          mpiComm) :
@@ -333,6 +352,28 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         if (!options_.params_.pluginPath.empty())
         {
             metatomic::load_plugin(options_.params_.pluginPath);
+        }
+        else
+        {
+            for (const auto& plugin : installedPlugins())
+            {
+                try
+                {
+                    metatomic::load_plugin(plugin.string());
+                    GMX_LOG(logger_.info)
+                            .asParagraph()
+                            .appendTextFormatted("Loaded the metatomic plugin %s",
+                                                 plugin.string().c_str());
+                }
+                catch (const std::exception& e)
+                {
+                    GMX_LOG(logger_.warning)
+                            .asParagraph()
+                            .appendTextFormatted("Could not load the metatomic plugin %s: %s",
+                                                 plugin.string().c_str(),
+                                                 e.what());
+                }
+            }
         }
         std::optional<std::string> modelOptions;
         if (!options_.params_.modelOptions.empty())

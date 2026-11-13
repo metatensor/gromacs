@@ -50,6 +50,7 @@
 #include <cmath>
 
 #include <array>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -72,6 +73,7 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
+#include "gromacs/utility/stringutil.h"
 
 #include "testutils/testasserts.h"
 
@@ -288,6 +290,22 @@ TEST_F(MetatomicForceProviderTest, RejectsInputsGromacsCannotProvide)
 {
     options_.params_.modelOptions = R"(length_unit=nm energy_unit=kJ/mol request_charges="")";
     EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), APIError);
+}
+
+TEST_F(MetatomicForceProviderTest, LoadsInstalledPluginsWithoutPluginPath)
+{
+    // metatomic-core installs its Lennard-Jones plugin next to libmetatomic
+    const auto plugin = std::filesystem::path(GMX_METATOMIC_PLUGINS_DIR) / "metatomic-lj-plugin.so";
+    if (!std::filesystem::exists(plugin))
+    {
+        GTEST_SKIP() << plugin << " is not installed";
+    }
+    options_.params_.pluginPath   = "";
+    options_.params_.modelPath_   = "metatomic-lj-model";
+    options_.params_.modelOptions = formatString(
+            "sigma=%g epsilon=%g cutoff=%g atomic_type=%d length_unit=nm energy_unit=kJ/mol",
+            c_sigma, c_epsilon, c_cutoff, c_atomicNumber);
+    EXPECT_NO_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_));
 }
 
 TEST_F(MetatomicForceProviderTest, FailsOnUnknownModel)
