@@ -611,32 +611,34 @@ static void checkPotentialEnergyValidity(int64_t step, const gmx_enerdata_t& ene
  * \param[in,out] ed               Essential dynamics pointer
  * \param[in]     didNeighborSearch  Tells if we did neighbor searching this step,
  *                                   used for ED sampling
+ * \param[in]     interactionConst   Non-bonded interaction constants, passed to the force providers
  *
  * \todo Remove didNeighborSearch, which is used incorrectly.
  * \todo Convert all other algorithms called here to ForceProviders.
  */
-static void computeSpecialForces(FILE*                fplog,
-                                 const MpiComm&       mpiComm,
-                                 const gmx_domdec_t*  dd,
-                                 const t_inputrec&    inputrec,
-                                 Awh*                 awh,
-                                 gmx_enfrot*          enforcedRotation,
-                                 ImdSession*          imdSession,
-                                 pull_t*              pull_work,
-                                 int64_t              step,
-                                 double               t,
-                                 gmx_wallcycle*       wcycle,
-                                 ForceProviders*      forceProviders,
-                                 const matrix         box,
-                                 ArrayRef<const RVec> x,
-                                 const t_mdatoms*     mdatoms,
-                                 ArrayRef<const real> lambda,
-                                 const StepWorkload&  stepWork,
-                                 ForceWithVirial*     forceWithVirialMtsLevel0,
-                                 ForceWithVirial*     forceWithVirialMtsLevel1,
-                                 gmx_enerdata_t*      enerd,
-                                 edsam*               ed,
-                                 bool                 didNeighborSearch)
+static void computeSpecialForces(FILE*                      fplog,
+                                 const MpiComm&             mpiComm,
+                                 const gmx_domdec_t*        dd,
+                                 const t_inputrec&          inputrec,
+                                 Awh*                       awh,
+                                 gmx_enfrot*                enforcedRotation,
+                                 ImdSession*                imdSession,
+                                 pull_t*                    pull_work,
+                                 int64_t                    step,
+                                 double                     t,
+                                 gmx_wallcycle*             wcycle,
+                                 ForceProviders*            forceProviders,
+                                 const matrix               box,
+                                 ArrayRef<const RVec>       x,
+                                 const t_mdatoms*           mdatoms,
+                                 ArrayRef<const real>       lambda,
+                                 const StepWorkload&        stepWork,
+                                 ForceWithVirial*           forceWithVirialMtsLevel0,
+                                 ForceWithVirial*           forceWithVirialMtsLevel1,
+                                 gmx_enerdata_t*            enerd,
+                                 edsam*                     ed,
+                                 bool                       didNeighborSearch,
+                                 const interaction_const_t& interactionConst)
 {
     /* NOTE: Currently all ForceProviders only provide forces.
      *       When they also provide energies, remove this conditional.
@@ -652,6 +654,7 @@ static void computeSpecialForces(FILE*                fplog,
                                               box,
                                               mpiComm,
                                               dd);
+        forceProviderInput.interactionConst_ = &interactionConst;
         ForceProviderOutput forceProviderOutput(forceWithVirialMtsLevel0, enerd);
 
         /* Collect forces from modules */
@@ -1518,10 +1521,27 @@ static void doPairSearch(const t_commrec*             cr,
 
     if (alsoMakePlainPairlist)
     {
-        const auto& plainPairlist = nbv->plainPairlist(fr->plainPairlistRange.value(), fr->shift_vec);
+        wallcycle_start_nocount(wcycle, WallCycleCounter::NS);
+
+        // The filter is by global index; with domain decomposition we need it by local index
+        ArrayRef<const char> atomFilter = fr->plainPairlistGlobalAtomFilter;
+        if (!atomFilter.empty() && haveDDAtomOrdering(*cr))
+        {
+            const auto& globalAtomIndices = cr->dd->globalAtomIndices;
+            fr->plainPairlistLocalAtomFilter.resize(globalAtomIndices.size());
+            for (Index i = 0; i < gmx::ssize(globalAtomIndices); i++)
+            {
+                fr->plainPairlistLocalAtomFilter[i] = atomFilter[globalAtomIndices[i]];
+            }
+            atomFilter = fr->plainPairlistLocalAtomFilter;
+        }
+        const auto& plainPairlist =
+                nbv->plainPairlist(fr->plainPairlistRange.value(), fr->shift_vec, atomFilter);
         MDModulesPairlistConstructedSignal mdModulesPairlistConstructedSignal(
                 plainPairlist.pairs, plainPairlist.excludedPairs, mdatoms.typeA);
         mdModulesNotifiers.simulationRunNotifier_.notify(mdModulesPairlistConstructedSignal);
+
+        wallcycle_stop(wcycle, WallCycleCounter::NS);
     }
 }
 
@@ -2293,7 +2313,8 @@ void do_force(FILE*                         fplog,
                              forceOutMtsLevel1 ? &forceOutMtsLevel1->forceWithVirial() : nullptr,
                              enerd,
                              ed,
-                             stepWork.doNeighborSearch);
+                             stepWork.doNeighborSearch,
+                             *fr->ic);
     }
 
     if (simulationWork.havePpDomainDecomposition && stepWork.computeForces && stepWork.useGpuFHalo

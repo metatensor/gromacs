@@ -260,9 +260,9 @@ TEST_F(QMMMTopologyPreprocessorTest, AlanineDipeptideWithLinksNoConstraints)
     logHelper_.expectEntryMatchingRegex(
             MDLogger::LogLevel::Info,
             "Number of InteractionFunction::ConnectBonds \\(type 5 bonds\\) added: 5\n");
-    logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "Number of angles removed: 11\n");
+    logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "Number of angles removed: 7\n");
     logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info,
-                                        "Number of dihedrals removed: 9\n");
+                                        "Number of dihedrals removed: 3\n");
     logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "Number of link bonds added: 2\n");
     EXPECT_NO_THROW(options.modifyQMMMTopology(mtop.get()));
 }
@@ -288,9 +288,9 @@ TEST_F(QMMMTopologyPreprocessorTest, AlanineDipeptideWithLinksWithConstraints)
                                         "Classical charge removed from embedded atoms: 0.11440\n");
     logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "Number of exclusions made: 6\n");
     logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "Number of bonds removed: 3\n");
-    logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "Number of angles removed: 11\n");
+    logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "Number of angles removed: 7\n");
     logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info,
-                                        "Number of dihedrals removed: 9\n");
+                                        "Number of dihedrals removed: 3\n");
     logHelper_.expectEntryMatchingRegex(MDLogger::LogLevel::Info, "Number of link bonds added: 2\n");
     EXPECT_NO_THROW(options.modifyQMMMTopology(mtop.get()));
 

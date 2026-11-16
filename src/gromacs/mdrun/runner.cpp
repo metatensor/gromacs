@@ -1920,6 +1920,16 @@ int Mdrunner::mdrunner()
                         inputrec->rlist);
                 GMX_THROW(APIError(mesg));
             }
+
+            // Only build the plain pairlist for the atoms the modules asked for
+            if (const auto atoms = plainPairlistRanges.atoms())
+            {
+                fr->plainPairlistGlobalAtomFilter.assign(mtop.natoms, 0);
+                for (const Index atom : *atoms)
+                {
+                    fr->plainPairlistGlobalAtomFilter[atom] = 1;
+                }
+            }
         }
 
         deform = buildBoxDeformation(

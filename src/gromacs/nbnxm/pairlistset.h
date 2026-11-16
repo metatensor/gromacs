@@ -130,11 +130,14 @@ public:
     /*! \brief Appends the contents of our pairlists, except for exclusions, to \p plainPairlist
      *
      * The atom indices in the plain list are normal, not NBNxM order, atom indices.
+     * When \p atomFilter is not empty, only pairs of which both atoms have a non-zero
+     * entry in \p atomFilter, indexed by local atom index, are appended.
      */
     void appendPlainPairlist(PlainPairlist*          plainPairlist,
                              real                    range,
                              const nbnxm_atomdata_t& nbat,
-                             ArrayRef<const int>     atomIndices);
+                             ArrayRef<const int>     atomIndices,
+                             ArrayRef<const char>    atomFilter);
 
 private:
     //! List of pairlists in CPU layout

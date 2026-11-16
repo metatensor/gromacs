@@ -1918,8 +1918,21 @@ std::tuple<real, int, int> maxNonPerturbedExclusionDistance(const gmx_mtop_t&   
                                                             const bool           useFep,
                                                             const PbcType        pbcType,
                                                             ArrayRef<const RVec> x,
-                                                            const matrix         box)
+                                                            const matrix         box,
+                                                            const ExclusionDistanceExemptions& exemptions)
 {
+    // Pairs within one exempted group are corrected by a module at any distance
+    std::vector<int> exemptGroup(mtop.natoms, -1);
+    for (size_t g = 0; g < exemptions.groups.size(); g++)
+    {
+        for (const int atom : exemptions.groups[g])
+        {
+            exemptGroup[atom] = g;
+        }
+    }
+    const auto exempt = [&exemptGroup](int a, int b)
+    { return exemptGroup[a] >= 0 && exemptGroup[a] == exemptGroup[b]; };
+
     t_pbc pbc;
 
     set_pbc(&pbc, pbcType, box);
@@ -1948,7 +1961,8 @@ std::tuple<real, int, int> maxNonPerturbedExclusionDistance(const gmx_mtop_t&   
                 const auto& jAtoms = excls[iAtom];
                 for (int jAtom : jAtoms)
                 {
-                    if (jAtom != iAtom && !(useFep && PERTURBED(atoms.atom[jAtom])))
+                    if (jAtom != iAtom && !(useFep && PERTURBED(atoms.atom[jAtom]))
+                        && !exempt(moleculeOffset + iAtom, moleculeOffset + jAtom))
                     {
                         rvec dx;
 
@@ -1973,19 +1987,20 @@ std::tuple<real, int, int> maxNonPerturbedExclusionDistance(const gmx_mtop_t&   
 
 // Computes and logs the maximum exclusion distance. Checks whether (non-perturbed) excluded
 // atom pairs are close to the cut-off distance and if so, generates a warning/error
-void checkExclusionDistances(const gmx_mtop_t&    mtop,
-                             const t_inputrec&    ir,
-                             ArrayRef<const RVec> x,
-                             const matrix         box,
-                             const MDLogger&      logger,
-                             WarningHandler*      wi)
+void checkExclusionDistances(const gmx_mtop_t&                  mtop,
+                             const t_inputrec&                  ir,
+                             ArrayRef<const RVec>               x,
+                             const matrix                       box,
+                             const MDLogger&                    logger,
+                             WarningHandler*                    wi,
+                             const ExclusionDistanceExemptions& exemptions)
 {
     // Check the maximum distance for (non-perturbed) excluded pairs here,
     // as it should not be longer than the cut-off distance, but we can't
     // easily ensure that during the run.
     const bool useFep = (ir.efep != FreeEnergyPerturbationType::No);
     const auto [maxExclusionDistance, atom0, atom1] =
-            maxNonPerturbedExclusionDistance(mtop, useFep, ir.pbcType, x, box);
+            maxNonPerturbedExclusionDistance(mtop, useFep, ir.pbcType, x, box, exemptions);
 
     const std::string distanceString = formatString(
             "The largest distance between%s excluded atoms is %.3f nm between atom %d and %d",
@@ -2601,7 +2616,9 @@ int gmx_grompp(int argc, char* argv[])
     if (usingFullElectrostatics(ir->coulombtype) || usingLJPme(ir->vdwtype))
     {
         // We may have exclusion forces beyond the cut-off distance.
-        checkExclusionDistances(sys, *ir, state.x, state.box, logger, &wi);
+        ExclusionDistanceExemptions exclusionDistanceExemptions;
+        mdModules.notifiers().preProcessingNotifier_.notify(&exclusionDistanceExemptions);
+        checkExclusionDistances(sys, *ir, state.x, state.box, logger, &wi, exclusionDistanceExemptions);
     }
 
     if (ir->cutoff_scheme == CutoffScheme::Verlet && ir->verletbuf_tol > 0)

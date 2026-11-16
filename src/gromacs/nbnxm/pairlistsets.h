@@ -135,8 +135,15 @@ public:
         }
     }
 
-    //! Returns a plain pairlist containing all pairs in the lists on this domain except for exclusions
-    const PlainPairlist& plainPairlist(real range, const nbnxm_atomdata_t& nbat, ArrayRef<const int> atomIndices);
+    /*! \brief Returns a plain pairlist containing all pairs in the lists on this domain except for exclusions
+     *
+     * When \p atomFilter is not empty, the list only contains pairs of atoms that have
+     * a non-zero entry in \p atomFilter, indexed by local atom index.
+     */
+    const PlainPairlist& plainPairlist(real                    range,
+                                       const nbnxm_atomdata_t& nbat,
+                                       ArrayRef<const int>     atomIndices,
+                                       ArrayRef<const char>    atomFilter);
 
 private:
     //! Returns the pair-list set for the given locality

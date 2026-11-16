@@ -237,6 +237,11 @@ struct t_forcerec
 
     /* When this has a value, generate a plain pairlist with this range */
     std::optional<real> plainPairlistRange;
+    /* When not empty, the plain pairlist only contains pairs of atoms with a non-zero entry,
+     * indexed by global atom index */
+    std::vector<char> plainPairlistGlobalAtomFilter;
+    /* The same filter indexed by local atom index, used with domain decomposition */
+    std::vector<char> plainPairlistLocalAtomFilter;
 
     /* Limit for printing large forces, negative is don't print */
     real print_force = 0;

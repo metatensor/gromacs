@@ -63,12 +63,19 @@ PairlistSet::~PairlistSet() = default;
 namespace
 {
 
+//! Returns whether local atom \p atom, which is < 0 for filler particles, passes \p atomFilter
+bool inFilter(ArrayRef<const char> atomFilter, const int atom)
+{
+    return atom >= 0 && (atomFilter.empty() || atomFilter[atom] != 0);
+}
+
 void appendPlainPairlistCpu(PlainPairlist*          plainPairlist,
                             const NbnxmPairlistCpu& pairlist,
                             const PairlistParams&   params,
                             const real              range,
                             const nbnxm_atomdata_t& nbat,
-                            ArrayRef<const int>     atomIndices)
+                            ArrayRef<const int>     atomIndices,
+                            ArrayRef<const char>    atomFilter)
 {
     constexpr int                      c_maxClusterSize = 8;
     std::array<int, c_maxClusterSize>  atomI;
@@ -98,11 +105,17 @@ void appendPlainPairlistCpu(PlainPairlist*          plainPairlist,
         const int shiftIndex = (iEntry.shift & NBNXM_CI_SHIFT);
 
         // Prefetch the i-atom indices
+        bool haveIAtomInFilter = false;
         for (int i = 0; i < pairlist.na_ci; i++)
         {
             const int iAtomIndex = iEntry.ci * pairlist.na_ci + i;
             atomI[i]             = atomIndices[iAtomIndex];
             xI[i]                = getCoordinate(nbat, iAtomIndex) + nbat.shift_vec[shiftIndex];
+            haveIAtomInFilter    = haveIAtomInFilter || inFilter(atomFilter, atomI[i]);
+        }
+        if (!haveIAtomInFilter)
+        {
+            continue;
         }
 
         for (int jClusterIndex = iEntry.cj_ind_start; jClusterIndex < iEntry.cj_ind_end; jClusterIndex++)
@@ -111,9 +124,9 @@ void appendPlainPairlistCpu(PlainPairlist*          plainPairlist,
 
             for (int i = 0; i < pairlist.na_ci; i++)
             {
-                if (atomI[i] < 0)
+                if (!inFilter(atomFilter, atomI[i]))
                 {
-                    // This is a filler particle
+                    // This is a filler particle or an atom not in the filter
                     continue;
                 }
 
@@ -124,7 +137,7 @@ void appendPlainPairlistCpu(PlainPairlist*          plainPairlist,
                     const int jAtomIndex = jEntry.cj * pairlist.na_cj + j;
                     const int atomJ      = atomIndices[jAtomIndex];
 
-                    if (atomJ >= 0 && norm2(xI[i] - getCoordinate(nbat, jAtomIndex)) < rangeSquared)
+                    if (inFilter(atomFilter, atomJ) && norm2(xI[i] - getCoordinate(nbat, jAtomIndex)) < rangeSquared)
                     {
                         if (jEntry.excl & (1 << (i * pairlist.na_cj + j)))
                         {
@@ -147,7 +160,8 @@ void appendPlainPairlistGpu(PlainPairlist*          plainPairlist,
                             const NbnxmPairlistGpu& pairlist,
                             const real              range,
                             const nbnxm_atomdata_t& nbat,
-                            ArrayRef<const int>     atomIndices)
+                            ArrayRef<const int>     atomIndices,
+                            ArrayRef<const char>    atomFilter)
 {
     constexpr int c_clSize = detail::c_nbnxmGpuClusterSize;
     constexpr int c_splitClusterSize = detail::c_nbnxmGpuClusterSize / detail::c_nbnxmGpuClusterpairSplit;
@@ -169,11 +183,17 @@ void appendPlainPairlistGpu(PlainPairlist*          plainPairlist,
     for (const nbnxm_sci_t& iEntry : pairlist.sci)
     {
         // Prefetch the i-atom indices
+        bool haveIAtomInFilter = false;
         for (int i = 0; i < c_numClusterPerCell * c_clSize; i++)
         {
             const int iAtomIndex = iEntry.sci * c_numClusterPerCell * c_clSize + i;
             atomIList[i]         = atomIndices[iAtomIndex];
             xI[i]                = getCoordinate(nbat, iAtomIndex) + nbat.shift_vec[iEntry.shift];
+            haveIAtomInFilter    = haveIAtomInFilter || inFilter(atomFilter, atomIList[i]);
+        }
+        if (!haveIAtomInFilter)
+        {
+            continue;
         }
 
         for (int jPackIndex = iEntry.cjPackedBegin; jPackIndex < iEntry.cjPackedEnd; jPackIndex++)
@@ -208,9 +228,9 @@ void appendPlainPairlistGpu(PlainPairlist*          plainPairlist,
                         const int localI = iClusterIndex * c_clSize + i;
                         const int atomI  = atomIList[localI];
 
-                        if (atomI < 0)
+                        if (!inFilter(atomFilter, atomI))
                         {
-                            // This is a filler particle
+                            // This is a filler particle or an atom not in the filter
                             continue;
                         }
 
@@ -225,7 +245,8 @@ void appendPlainPairlistGpu(PlainPairlist*          plainPairlist,
                             const int exclPair =
                                     atomIndexInClusterpairSplit<sc_layoutType>(j) * c_clSize + i;
 
-                            if (atomJ >= 0 && norm2(xI[localI] - getCoordinate(nbat, jAtomIndex)) < rangeSquared)
+                            if (inFilter(atomFilter, atomJ)
+                                && norm2(xI[localI] - getCoordinate(nbat, jAtomIndex)) < rangeSquared)
                             {
                                 if (pairlist.excl[jPack.imei[j / c_splitClusterSize].excl_ind].pair[exclPair]
                                     & clusterPairMask)
@@ -251,7 +272,8 @@ void appendPlainPairlistGpu(PlainPairlist*          plainPairlist,
 void PairlistSet::appendPlainPairlist(PlainPairlist*          plainPairlist,
                                       const real              range,
                                       const nbnxm_atomdata_t& nbat,
-                                      ArrayRef<const int>     atomIndices)
+                                      ArrayRef<const int>     atomIndices,
+                                      ArrayRef<const char>    atomFilter)
 {
     GMX_RELEASE_ASSERT(range <= params_.rlistOuter, "range should be <= rlistOuter");
 
@@ -259,13 +281,13 @@ void PairlistSet::appendPlainPairlist(PlainPairlist*          plainPairlist,
     {
         GMX_ASSERT(gpuList() != nullptr, "We expect a GPU pairlist to be present");
 
-        appendPlainPairlistGpu(plainPairlist, *gpuList(), range, nbat, atomIndices);
+        appendPlainPairlistGpu(plainPairlist, *gpuList(), range, nbat, atomIndices, atomFilter);
     }
     else
     {
         for (const auto& cpuList : cpuLists())
         {
-            appendPlainPairlistCpu(plainPairlist, cpuList, params_, range, nbat, atomIndices);
+            appendPlainPairlistCpu(plainPairlist, cpuList, params_, range, nbat, atomIndices, atomFilter);
         }
     }
 }

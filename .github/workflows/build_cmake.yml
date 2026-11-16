@@ -29,10 +29,13 @@ jobs:
             openmp_var: "On"
           }
         - {
-            name: "Windows ARM64 MSVC 2022", artifact: "Windows-ARM64-MSVC-2022.7z",
-            os: windows-11-arm,
+            # GitHub moved the `windows-11-arm` label to an image that ships Visual
+            # Studio 2026 instead of 2022, so the 2022 vcvars path below is gone and
+            # `cl` never reaches the PATH. Ask for the VS2026 image by name.
+            name: "Windows ARM64 MSVC 2026", artifact: "Windows-ARM64-MSVC-2026.7z",
+            os: windows-11-vs2026-arm,
             cc: "cl", cxx: "cl",
-            environment_script: "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvarsarm64.bat",
+            environment_script: "C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Auxiliary/Build/vcvarsarm64.bat",
             gpu_var: "Off",
             openmp_var: "On"
           }

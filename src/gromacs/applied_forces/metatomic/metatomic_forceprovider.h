@@ -66,10 +66,11 @@ class MpiComm;
  * ## Domain decomposition (DD) strategy
  *
  * Each rank evaluates the model on its local (home + halo) MTA atoms.
- * The GROMACS excluded pairlist serves as the pair source; a backward ghost
- * atom exchange followed by a backward pair exchange ensures every home atom
- * has ALL its pairs (the "newton pair ON" pattern from LAMMPS pair_metatomic).
- * Distance vectors and shifts are recomputed from local positions.
+ * The GROMACS interacting and excluded pairlists serve as the pair source; a
+ * backward ghost atom exchange followed by a backward pair exchange ensures
+ * every home atom has ALL its pairs (the "newton pair ON" pattern from LAMMPS
+ * pair_metatomic). Distance vectors and shifts are recomputed from local
+ * positions.
  * The energy is summed over home atoms only (`selected_atoms = home_only`).
  * This approach is safe for all model architectures.
  *
@@ -119,14 +120,14 @@ private:
 
     /*! \brief Exchange backward-direction pairs via ring-based MPI_Sendrecv.
      *
-     * In GROMACS DD, the excluded pairlist assigns each pair to exactly one
-     * rank (the rank whose home atom is the i-atom). For newton mode, each
-     * rank needs ALL pairs involving its home atoms, including those assigned
-     * to other ranks. This method discovers those missing pairs by
+     * In GROMACS DD, each plain pairlist entry is assigned to exactly one rank
+     * (the rank whose home atom is the i-atom). For newton mode, each rank
+     * needs ALL pairs involving its home atoms, including those assigned to
+     * other ranks. This method discovers those missing pairs by
      * circulating packed (globalI, globalJ) pair buffers in P-1 ring rounds,
      * then adds them to backwardPairsMta_ with shifts recomputed from local
      * positions. Complexity: O(total_pairs) communication, O(max_pairs/rank)
-     * memory — replaces the previous O(N²) pair table allreduce.
+     * memory without an O(N²) global pair table.
      *
      * Must be called after exchangeBackwardGhosts() (so all atom positions
      * are available) and before the NL building loop.
@@ -164,6 +165,20 @@ private:
      */
     int32_t exchangeBackwardGhosts(const gmx_domdec_t* dd, const matrix box, double cutoff);
 
+    /*! \brief Make every MTA atom available on every rank.
+     *
+     * A message-passing model needs, for each home atom, all atoms within
+     * the model interaction range and all pairs among them.  The DD halo
+     * only covers the forward direction and the plain pairlist lacks
+     * halo-halo pairs, so instead the home positions of all ranks are
+     * all-reduced and every MTA atom that is not already local is appended
+     * (as with backward ghosts, the caller restores numLocalMta_ after the
+     * model evaluation).
+     *
+     * \returns Number of atoms added.
+     */
+    int32_t gatherAllMtaAtoms();
+
     //! Distribute non-home forces via sparse indexed exchange (allgatherv pattern).
     //! Home forces are applied directly; only halo forces are communicated.
     //! \param[in] forces   Flat force array [numLocalMta_ * 3], row-major (fx,fy,fz).
@@ -194,7 +209,7 @@ private:
     std::vector<int32_t> mtaToGlobalMta_;
     //! Maps ANY GROMACS local buffer index -> MTA model index.
     //! Includes ALL periodic ghost images of each atom (not just the first).
-    //! Needed because excludedPairlist_ entries can reference any image.
+    //! Needed because pairlist entries can reference any image.
     //! Initialized to -1 for non-MTA atoms.
     std::vector<int32_t> gmxLocalToMtaIdx_;
 
@@ -204,7 +219,7 @@ private:
     std::unordered_map<int32_t, int32_t> globalMtaToLocalHome_;
 
     //! Pairlist in MTA model indices, flat [i0,j0, i1,j1, ...].
-    //! Built from GROMACS excludedPairlist_ with negated cell shifts.
+    //! Built from GROMACS interacting and excluded pairlists with negated cell shifts.
     //! Used in both NL modes.
     std::vector<int32_t> pairlistMta_;
     //! Cell shifts for each pair (metatensor convention: shift applied to second atom).

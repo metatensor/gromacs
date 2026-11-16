@@ -53,7 +53,8 @@ namespace gmx
 
 const PlainPairlist& PairlistSets::plainPairlist(const real              range,
                                                  const nbnxm_atomdata_t& nbat,
-                                                 ArrayRef<const int>     atomIndices)
+                                                 ArrayRef<const int>     atomIndices,
+                                                 ArrayRef<const char>    atomFilter)
 {
     GMX_RELEASE_ASSERT(includesAllPairs_ == true,
                        "We should have all pairs when getting a plain pairlist");
@@ -61,11 +62,11 @@ const PlainPairlist& PairlistSets::plainPairlist(const real              range,
     plainPairlist_.pairs.clear();
     plainPairlist_.excludedPairs.clear();
 
-    localSet_->appendPlainPairlist(&plainPairlist_, range, nbat, atomIndices);
+    localSet_->appendPlainPairlist(&plainPairlist_, range, nbat, atomIndices, atomFilter);
 
     if (nonlocalSet_)
     {
-        nonlocalSet_->appendPlainPairlist(&plainPairlist_, range, nbat, atomIndices);
+        nonlocalSet_->appendPlainPairlist(&plainPairlist_, range, nbat, atomIndices, atomFilter);
     }
 
     return plainPairlist_;
