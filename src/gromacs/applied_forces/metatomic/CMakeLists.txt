@@ -42,6 +42,7 @@ gmx_add_libgromacs_sources(
 # Without it, link the stub force provider.
 if (GMX_METATOMIC_ACTIVE)
     gmx_add_libgromacs_sources(
+        metatomic_environment.cpp
         metatomic_forceprovider.cpp
     )
 else()
