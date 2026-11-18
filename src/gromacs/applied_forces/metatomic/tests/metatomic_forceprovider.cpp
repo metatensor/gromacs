@@ -45,6 +45,8 @@
  */
 #include "gmxpre.h"
 
+#include "gromacs/applied_forces/metatomic/metatomic_forceprovider.h"
+
 #include "config.h"
 
 #include <cmath>
@@ -58,11 +60,9 @@
 #include <gtest/gtest.h>
 
 #include "gromacs/applied_forces/metatomic/metatomic_cellshift.h"
-#include "gromacs/applied_forces/metatomic/metatomic_forceprovider.h"
 #include "gromacs/applied_forces/metatomic/metatomic_options.h"
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/domdec/localatomsetmanager.h"
-#include "gromacs/utility/vec.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/enerdata.h"
@@ -77,6 +77,7 @@
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
 #include "gromacs/utility/stringutil.h"
+#include "gromacs/utility/vec.h"
 
 #include "testutils/testasserts.h"
 
@@ -157,8 +158,7 @@ public:
 
     void setModelUnits(const std::string& lengthUnit, const std::string& energyUnit)
     {
-        options_.params_.modelOptions =
-                "length_unit=" + lengthUnit + " energy_unit=" + energyUnit;
+        options_.params_.modelOptions = "length_unit=" + lengthUnit + " energy_unit=" + energyUnit;
     }
 
     /*! \brief Evaluate the pair (0, 1) with metatensor cell shift \p cellShift
@@ -167,7 +167,8 @@ public:
      */
     void evaluate(const matrix box, const RVec& distance, const IVec& cellShift, bool computeVirial = true)
     {
-        const DVec shift(cellShift[XX] * box[XX][XX] + cellShift[YY] * box[YY][XX] + cellShift[ZZ] * box[ZZ][XX],
+        const DVec shift(cellShift[XX] * box[XX][XX] + cellShift[YY] * box[YY][XX]
+                                 + cellShift[ZZ] * box[ZZ][XX],
                          cellShift[YY] * box[YY][YY] + cellShift[ZZ] * box[ZZ][YY],
                          cellShift[ZZ] * box[ZZ][ZZ]);
         x_ = { RVec(0.3, 0.4, 0.5), RVec(0.3, 0.4, 0.5) + distance - shift.toRVec() };
@@ -267,7 +268,7 @@ TEST_F(MetatomicForceProviderTest, PairAcrossTriclinicBoundary)
 TEST_F(MetatomicForceProviderTest, NonperiodicSystemWithBox)
 {
     setModelUnits("nm", "kJ/mol");
-    options_.params_.pbcType_ = std::make_unique<PbcType>(PbcType::No);
+    options_.params_.pbcType_         = std::make_unique<PbcType>(PbcType::No);
     options_.params_.checkConsistency = true;
     evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
     checkAgainstLennardJones();
@@ -276,7 +277,7 @@ TEST_F(MetatomicForceProviderTest, NonperiodicSystemWithBox)
 TEST_F(MetatomicForceProviderTest, TwoDimensionalPeriodicity)
 {
     setModelUnits("Angstrom", "eV");
-    options_.params_.pbcType_ = std::make_unique<PbcType>(PbcType::XY);
+    options_.params_.pbcType_         = std::make_unique<PbcType>(PbcType::XY);
     options_.params_.checkConsistency = true;
     evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(1, -1, 0));
     checkAgainstLennardJones();
@@ -337,7 +338,10 @@ TEST_F(MetatomicForceProviderTest, LoadsInstalledPluginsWithoutPluginPath)
     options_.params_.modelPath_   = "metatomic-lj-model";
     options_.params_.modelOptions = formatString(
             "sigma=%g epsilon=%g cutoff=%g atomic_type=%d length_unit=nm energy_unit=kJ/mol",
-            c_sigma, c_epsilon, c_cutoff, c_atomicNumber);
+            c_sigma,
+            c_epsilon,
+            c_cutoff,
+            c_atomicNumber);
     // The model loads, as a failure to load would be an APIError, but its energy has no strain
     // gradient, which GROMACS needs for the virial.
     EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), InconsistentInputError);

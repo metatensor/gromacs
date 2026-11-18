@@ -44,9 +44,9 @@
 
 #include "gmxpre.h"
 
-#include "config.h"
-
 #include "gromacs/applied_forces/metatomic/metatomic_options.h"
+
+#include "config.h"
 
 #include <gtest/gtest.h>
 
@@ -104,8 +104,7 @@ public:
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-plugin", std::string("./ext"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-check-consistency",
                                               std::string("false"));
-        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant",
-                                              std::string(""));
+        mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant", std::string(""));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-uncertainty-threshold",
                                               std::string("10"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant-energy-uq",
@@ -256,9 +255,17 @@ TEST(MetatomicModelOptionsTest, ParsesStringsAndQuotedValues)
 
 TEST(MetatomicModelOptionsTest, RejectsMalformedOptions)
 {
-    for (const char* text : { "key", "=value", "key=", "key=one key=two", "key='open",
-                              "key=\"open", "key='value'tail", "key=un'quoted", "key='a\\q'",
-                              "bad/key=value", R"({"key":"value"})" })
+    for (const char* text : { "key",
+                              "=value",
+                              "key=",
+                              "key=one key=two",
+                              "key='open",
+                              "key=\"open",
+                              "key='value'tail",
+                              "key=un'quoted",
+                              "key='a\\q'",
+                              "bad/key=value",
+                              R"({"key":"value"})" })
     {
         EXPECT_THROW_GMX(parseMetatomicModelOptions(text), InconsistentInputError) << text;
     }

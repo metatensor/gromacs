@@ -44,9 +44,9 @@
 
 #include "gmxpre.h"
 
-#include "config.h"
-
 #include "metatomic_mdmodule.h"
+
+#include "config.h"
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/domdec/localatomsetmanager.h"
@@ -159,8 +159,7 @@ public:
         notifiers->simulationSetupNotifier_.subscribe(setLoggerFunction);
 
         // Request that GROMACS adds an energy term for our potential to the .edr file
-        const auto requestEnergyOutput =
-                [](MDModulesEnergyOutputToMetatomicRequestChecker* energyOutputRequest)
+        const auto requestEnergyOutput = [](MDModulesEnergyOutputToMetatomicRequestChecker* energyOutputRequest)
         { energyOutputRequest->energyOutputToMetatomic_ = true; };
         notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
 

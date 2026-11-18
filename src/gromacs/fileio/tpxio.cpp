@@ -199,12 +199,12 @@ enum tpxv
     tpxv_HandleMartiniBondedBStateParametersProperly, /**< Handle restraint angles, restraint dihedrals, and combined bending-torsion parameters properly */
     tpxv_RefScaleMultipleCOMs, /**< Add multiple COM groups for refcoord-scale */
     tpxv_InputHistogramCounts, /**< Provide input histogram counts for current expanded ensemble state */
-    tpxv_NNPotIFuncType,              /**< Add interaction function type for neural network potential */
+    tpxv_NNPotIFuncType,       /**< Add interaction function type for neural network potential */
     tpxv_AwhHistogramTolerance,       /**< Add AWH histogram tolerance */
     tpxv_OutputControlInKeyValueTree, /**< Move output control parameters to key-value tree */
-    tpxv_CmapBState, /**< Store B-state CMAP grid index for free energy perturbation */
+    tpxv_CmapBState,         /**< Store B-state CMAP grid index for free energy perturbation */
     tpxv_MetatomicIFuncType, /**< Add interaction function type for metatomic potentials */
-    tpxv_Count                /**< the total number of tpxv versions */
+    tpxv_Count               /**< the total number of tpxv versions */
 };
 
 /*! \brief Version number of the file format written to run input

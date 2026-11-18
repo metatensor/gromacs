@@ -46,8 +46,9 @@
 
 #include "config.h"
 
-#include <algorithm>
 #include <cctype>
+
+#include <algorithm>
 #include <iomanip>
 #include <set>
 #include <sstream>
@@ -81,11 +82,11 @@ static const std::string METATOMIC_MODULE_NAME = "metatomic";
 static const std::string ACTIVE_TAG      = "active";
 static const std::string INPUT_GROUP_TAG = "input-group";
 
-static const std::string MODEL_PATH_TAG           = "model";
-static const std::string PLUGIN_TAG = "plugin";
-static const std::string MODEL_OPTIONS_TAG        = "model-options";
-static const std::string CHECK_CONSISTENCY_TAG    = "check-consistency";
-static const std::string VARIANT_TAG              = "variant";
+static const std::string MODEL_PATH_TAG            = "model";
+static const std::string PLUGIN_TAG                = "plugin";
+static const std::string MODEL_OPTIONS_TAG         = "model-options";
+static const std::string CHECK_CONSISTENCY_TAG     = "check-consistency";
+static const std::string VARIANT_TAG               = "variant";
 static const std::string UNCERTAINTY_THRESHOLD_TAG = "uncertainty-threshold";
 static const std::string VARIANT_ENERGY_UQ_TAG     = "variant-energy-uq";
 static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
@@ -167,8 +168,8 @@ void checkUncertaintyThreshold(const std::string& value)
 std::map<std::string, std::string> parseMetatomicModelOptions(const std::string& text)
 {
     std::map<std::string, std::string> options;
-    size_t position = 0;
-    const auto isSpace = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    size_t                             position = 0;
+    const auto isSpace   = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
     const auto skipSpace = [&]()
     {
         while (position < text.size() && isSpace(text[position]))
@@ -193,7 +194,8 @@ std::map<std::string, std::string> parseMetatomicModelOptions(const std::string&
         skipSpace();
         if (key.empty() || position == text.size() || text[position] != '=')
         {
-            modelOptionsError("expected key=value with an alphanumeric, underscore, hyphen or dot key.");
+            modelOptionsError(
+                    "expected key=value with an alphanumeric, underscore, hyphen or dot key.");
         }
         ++position;
         skipSpace();
@@ -210,10 +212,10 @@ std::map<std::string, std::string> parseMetatomicModelOptions(const std::string&
                 char c = text[position++];
                 if (c == '\\')
                 {
-                    if (position == text.size()
-                        || (text[position] != quote && text[position] != '\\'))
+                    if (position == text.size() || (text[position] != quote && text[position] != '\\'))
                     {
-                        modelOptionsError("inside quotes, escape only the matching quote or a backslash.");
+                        modelOptionsError(
+                                "inside quotes, escape only the matching quote or a backslash.");
                     }
                     c = text[position++];
                 }
@@ -258,8 +260,7 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
 
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_PATH_TAG);
-    addMdpTransformFromString<std::string>(
-            rules, stringIdentityTransform, METATOMIC_MODULE_NAME, PLUGIN_TAG);
+    addMdpTransformFromString<std::string>(rules, stringIdentityTransform, METATOMIC_MODULE_NAME, PLUGIN_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, MODEL_OPTIONS_TAG);
     addMdpTransformFromString<bool>(
@@ -270,8 +271,7 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, UNCERTAINTY_THRESHOLD_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_ENERGY_UQ_TAG);
-    addMdpTransformFromString<bool>(
-            rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, NON_CONSERVATIVE_TAG);
+    addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, NON_CONSERVATIVE_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG);
     addMdpTransformFromString<std::string>(
@@ -313,8 +313,7 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, INPUT_GROUP_TAG, params_.inputGroup);
 
         addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, MODEL_PATH_TAG, params_.modelPath_);
-        addMdpOutputValue<std::string>(
-                builder, METATOMIC_MODULE_NAME, PLUGIN_TAG, params_.pluginPath);
+        addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, PLUGIN_TAG, params_.pluginPath);
         addMdpOutputValue<std::string>(
                 builder, METATOMIC_MODULE_NAME, MODEL_OPTIONS_TAG, params_.modelOptions);
         addMdpOutputValue<bool>(
@@ -382,8 +381,8 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
                 "metatomic-plugin must be auto or the path of a metatomic plugin library."));
     }
     checkUncertaintyThreshold(params_.uncertaintyThreshold);
-    const auto modelOptions = parseMetatomicModelOptions(params_.modelOptions);
-    auto modelOptionsObject = treeBuilder.addObject("metatomic-model-loading-options");
+    const auto modelOptions       = parseMetatomicModelOptions(params_.modelOptions);
+    auto       modelOptionsObject = treeBuilder.addObject("metatomic-model-loading-options");
     for (const auto& [key, value] : modelOptions)
     {
         modelOptionsObject.addValue(key, value);
@@ -421,7 +420,8 @@ void MetatomicOptions::readParamsFromKvt(const KeyValueTreeObject& tree)
 
     if (!tree.keyExists("metatomic-model-loading-options"))
     {
-        GMX_THROW(InconsistentInputError("Cannot find metatomic model-loading options in the tpr file."));
+        GMX_THROW(InconsistentInputError(
+                "Cannot find metatomic model-loading options in the tpr file."));
     }
     std::ostringstream options;
     for (const auto& property : tree["metatomic-model-loading-options"].asObject().properties())

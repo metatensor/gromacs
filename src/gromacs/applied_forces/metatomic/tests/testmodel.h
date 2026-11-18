@@ -34,17 +34,19 @@
 // Shared analytic model for unit tests and the dynamically loaded smoke-test plugin.
 #ifndef GMX_METATOMIC_TESTMODEL_H
 #define GMX_METATOMIC_TESTMODEL_H
+#include <cmath>
+
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <memory>
+#include <metatomic.hpp>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include <metatomic.hpp>
 #include <nlohmann/json.hpp>
-namespace gmx::test {
+namespace gmx::test
+{
 //! Lennard-Jones parameters in GROMACS units: nm and kJ/mol.
 constexpr double c_sigma   = 0.34;
 constexpr double c_epsilon = 0.99;
@@ -69,7 +71,11 @@ public:
         toEnergy_(metatomic::unit_conversion_factor("kJ/mol", energyUnit)),
         requestCharges_(requestCharges),
         readsPairs_(readsPairs),
-        pairs_(metatomic::PairListOptions::builder().cutoff(c_cutoff * toLength_).full_list(false).strict(false).build())
+        pairs_(metatomic::PairListOptions::builder()
+                       .cutoff(c_cutoff * toLength_)
+                       .full_list(false)
+                       .strict(false)
+                       .build())
     {
     }
 
@@ -139,9 +145,9 @@ public:
         const double epsilon = c_epsilon * toEnergy_;
         const double cutoff  = c_cutoff * toLength_;
 
-        double                         energy = 0;
-        std::vector<double>            positionsGradient(3 * nAtoms, 0.0);
-        std::array<double, 9>          strainGradient{};
+        double                energy = 0;
+        std::vector<double>   positionsGradient(3 * nAtoms, 0.0);
+        std::array<double, 9> strainGradient{};
         for (size_t pair = 0; pair < pairs.samples().count(); ++pair)
         {
             const double d[3] = { vectors(pair, 0, 0), vectors(pair, 1, 0), vectors(pair, 2, 0) };
@@ -182,8 +188,8 @@ public:
         }
 
         auto block = metatensor::TensorBlock(
-                std::make_unique<metatensor::SimpleDataArray<double>>(std::vector<uintptr_t>{ 1, 1 },
-                                                                      std::vector<double>{ energy }),
+                std::make_unique<metatensor::SimpleDataArray<double>>(
+                        std::vector<uintptr_t>{ 1, 1 }, std::vector<double>{ energy }),
                 metatensor::Labels({ "system" }, { { 0 } }),
                 {},
                 metatensor::Labels({ "energy" }, { { 0 } }));
@@ -195,13 +201,12 @@ public:
         }
         block.add_gradient(
                 "positions",
-                metatensor::TensorBlock(std::make_unique<metatensor::SimpleDataArray<double>>(
-                                                std::vector<uintptr_t>{ nAtoms, 3, 1 }, positionsGradient),
-                                        metatensor::Labels({ "sample", "system", "atom" },
-                                                           gradientSamples.data(),
-                                                           nAtoms),
-                                        { metatensor::Labels({ "xyz" }, { { 0 }, { 1 }, { 2 } }) },
-                                        metatensor::Labels({ "energy" }, { { 0 } })));
+                metatensor::TensorBlock(
+                        std::make_unique<metatensor::SimpleDataArray<double>>(
+                                std::vector<uintptr_t>{ nAtoms, 3, 1 }, positionsGradient),
+                        metatensor::Labels({ "sample", "system", "atom" }, gradientSamples.data(), nAtoms),
+                        { metatensor::Labels({ "xyz" }, { { 0 }, { 1 }, { 2 } }) },
+                        metatensor::Labels({ "energy" }, { { 0 } })));
         // Like models that only compute the strain gradient on request
         const auto& gradients = requestedOutputs.front().gradients();
         if (std::find(gradients.begin(), gradients.end(), metatomic::Gradients::Strain) != gradients.end())

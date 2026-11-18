@@ -69,6 +69,8 @@
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <metatensor.hpp>
+#include <metatomic.hpp>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -76,6 +78,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include <metatensor/dlpack/dlpack.h>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/mdlib/broadcaststructs.h"
@@ -93,10 +97,6 @@
 #include "gromacs/utility/stringutil.h"
 
 #include "metatomic_cellshift.h"
-
-#include <metatensor.hpp>
-#include <metatensor/dlpack/dlpack.h>
-#include <metatomic.hpp>
 
 
 namespace gmx
@@ -125,7 +125,7 @@ static std::string quantity_name(const std::string& base, const std::optional<st
 }
 
 static const metatomic::Quantity* find_output(const std::vector<metatomic::Quantity>& outputs,
-                                              const std::string&                     name)
+                                              const std::string&                      name)
 {
     for (const auto& output : outputs)
     {
@@ -152,8 +152,8 @@ static void dlpack_deleter(DLManagedTensorVersioned* self)
 //! Wrap a caller-owned contiguous CPU buffer. The deleter frees the header only.
 static metatomic::DLPackTensor wrap_dlpack(void* data, std::vector<int64_t> shape, DLDataType dtype)
 {
-    auto* ctx   = new DlpackShape;
-    ctx->shape  = std::move(shape);
+    auto* ctx  = new DlpackShape;
+    ctx->shape = std::move(shape);
     ctx->strides.resize(ctx->shape.size());
     int64_t stride = 1;
     for (int axis = static_cast<int>(ctx->shape.size()) - 1; axis >= 0; --axis)
@@ -162,19 +162,19 @@ static metatomic::DLPackTensor wrap_dlpack(void* data, std::vector<int64_t> shap
         stride *= ctx->shape[axis];
     }
 
-    auto* tensor                 = new DLManagedTensorVersioned{};
-    tensor->version.major        = DLPACK_MAJOR_VERSION;
-    tensor->version.minor        = DLPACK_MINOR_VERSION;
-    tensor->manager_ctx          = ctx;
-    tensor->deleter              = dlpack_deleter;
-    tensor->flags                = DLPACK_FLAG_BITMASK_READ_ONLY;
-    tensor->dl_tensor.data       = data;
+    auto* tensor                  = new DLManagedTensorVersioned{};
+    tensor->version.major         = DLPACK_MAJOR_VERSION;
+    tensor->version.minor         = DLPACK_MINOR_VERSION;
+    tensor->manager_ctx           = ctx;
+    tensor->deleter               = dlpack_deleter;
+    tensor->flags                 = DLPACK_FLAG_BITMASK_READ_ONLY;
+    tensor->dl_tensor.data        = data;
     tensor->dl_tensor.byte_offset = 0;
-    tensor->dl_tensor.device     = { kDLCPU, 0 };
-    tensor->dl_tensor.dtype      = dtype;
-    tensor->dl_tensor.ndim       = static_cast<int32_t>(ctx->shape.size());
-    tensor->dl_tensor.shape      = ctx->shape.data();
-    tensor->dl_tensor.strides    = ctx->strides.data();
+    tensor->dl_tensor.device      = { kDLCPU, 0 };
+    tensor->dl_tensor.dtype       = dtype;
+    tensor->dl_tensor.ndim        = static_cast<int32_t>(ctx->shape.size());
+    tensor->dl_tensor.shape       = ctx->shape.data();
+    tensor->dl_tensor.strides     = ctx->strides.data();
     return metatomic::DLPackTensor(tensor);
 }
 
@@ -202,8 +202,8 @@ static int64_t count_above(metatensor::TensorBlock& block, double threshold)
 template<typename T>
 static double sum_block(metatensor::TensorBlock& block)
 {
-    auto          values = block.values<T>();
-    size_t        n      = 1;
+    auto   values = block.values<T>();
+    size_t n      = 1;
     for (size_t extent : values.shape())
     {
         n *= extent;
@@ -222,7 +222,10 @@ static double sum_block(metatensor::TensorBlock& block)
  * Atoms are read from the \p atomColumn column of the samples.
  */
 template<typename T>
-static void add_atom_vectors(metatensor::TensorBlock& block, int atomColumn, int32_t nAtoms, std::vector<double>* vectors)
+static void add_atom_vectors(metatensor::TensorBlock& block,
+                             int                      atomColumn,
+                             int32_t                  nAtoms,
+                             std::vector<double>*     vectors)
 {
     auto       sampleLabels = block.samples();
     const auto samples      = sampleLabels.values();
@@ -266,25 +269,28 @@ static void add_virial(metatensor::TensorBlock& block, matrix virial)
 struct MetatomicData
 {
     std::unique_ptr<metatomic::ExternalModel> model;
-    metatomic::ModelCapabilities              capabilities = metatomic::ModelCapabilities::builder()
-                                                      .atomic_types({})
-                                                      .interaction_range(0.0)
-                                                      .length_unit("nm")
-                                                      .supported_devices({ metatomic::ModelCapabilities::Device::CPU })
-                                                      .dtype(metatomic::ModelCapabilities::DType::Float64)
-                                                      .outputs({})
-                                                      .build();
+    metatomic::ModelCapabilities              capabilities =
+            metatomic::ModelCapabilities::builder()
+                    .atomic_types({})
+                    .interaction_range(0.0)
+                    .length_unit("nm")
+                    .supported_devices({ metatomic::ModelCapabilities::Device::CPU })
+                    .dtype(metatomic::ModelCapabilities::DType::Float64)
+                    .outputs({})
+                    .build();
     std::vector<metatomic::PairListOptions> pairLists;
     //! Each pair-list cutoff converted to nm at init.
     std::vector<double> cutoffNm;
     //! Convert model-declared cutoffs to GROMACS units.
-    double              lengthToNm      = 1.0;
-    bool                useFloat64      = true;
-    bool                checkConsistency = false;
+    double lengthToNm       = 1.0;
+    bool   useFloat64       = true;
+    bool   checkConsistency = false;
 
-    std::vector<std::string> nlSampleNames = {
-        "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c"
-    };
+    std::vector<std::string> nlSampleNames = { "first_atom",
+                                               "second_atom",
+                                               "cell_shift_a",
+                                               "cell_shift_b",
+                                               "cell_shift_c" };
 
     std::array<uint8_t, 3> pbc = { 1, 1, 1 };
 
@@ -372,12 +378,14 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         std::optional<std::string> modelOptions;
         if (!options_.params_.modelOptions.empty())
         {
-            modelOptions = nlohmann::json(parseMetatomicModelOptions(options_.params_.modelOptions)).dump();
+            modelOptions =
+                    nlohmann::json(parseMetatomicModelOptions(options_.params_.modelOptions)).dump();
         }
         data_->model = std::make_unique<metatomic::ExternalModel>(
                 metatomic::load_model(options_.params_.modelPath_, modelOptions));
         data_->capabilities = data_->model->capabilities();
-        data_->lengthToNm = metatomic::unit_conversion_factor(data_->capabilities.length_unit(), "nm");
+        data_->lengthToNm =
+                metatomic::unit_conversion_factor(data_->capabilities.length_unit(), "nm");
     }
     catch (const std::exception& e)
     {
@@ -394,7 +402,8 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     const PbcType* pbcType  = options_.params_.pbcType_.get();
     if (pbcType != nullptr && *pbcType == PbcType::Screw)
     {
-        GMX_THROW(NotImplementedError("Metatomic does not support screw periodic boundary conditions."));
+        GMX_THROW(NotImplementedError(
+                "Metatomic does not support screw periodic boundary conditions."));
     }
     if (pbcType != nullptr && *pbcType == PbcType::XY)
     {
@@ -421,11 +430,11 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     const auto* energyCap    = find_output(modelOutputs, data_->energyName);
     if (energyCap == nullptr)
     {
-        GMX_THROW(APIError(formatString(
-                "The model at '%s' does not provide an '%s' output. "
-                "Metatomic interface cannot proceed.",
-                params.modelPath_.c_str(),
-                data_->energyName.c_str())));
+        GMX_THROW(
+                APIError(formatString("The model at '%s' does not provide an '%s' output. "
+                                      "Metatomic interface cannot proceed.",
+                                      params.modelPath_.c_str(),
+                                      data_->energyName.c_str())));
     }
 
     data_->nonConservative = params.nonConservative;
@@ -494,10 +503,10 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 "non_conservative_force", output_variant(params.variant, params.variantNcForces));
         if (find_output(modelOutputs, forceName) == nullptr)
         {
-            GMX_THROW(APIError(formatString(
-                    "The model does not provide '%s' output, "
-                    "we can not enable non-conservative simulations",
-                    forceName.c_str())));
+            GMX_THROW(
+                    APIError(formatString("The model does not provide '%s' output, "
+                                          "we can not enable non-conservative simulations",
+                                          forceName.c_str())));
         }
         data_->ncForceIndex = data_->requested.size();
         data_->requested.push_back(metatomic::Quantity::builder()
@@ -520,10 +529,9 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         }
         GMX_LOG(logger_.info)
                 .asParagraph()
-                .appendTextFormatted(
-                        "Metatomic: non-conservative mode enabled. Forces from '%s'%s",
-                        forceName.c_str(),
-                        data_->ncStressIndex.has_value() ? ", with stress" : "");
+                .appendTextFormatted("Metatomic: non-conservative mode enabled. Forces from '%s'%s",
+                                     forceName.c_str(),
+                                     data_->ncStressIndex.has_value() ? ", with stress" : "");
     }
 
     // The pair lists and extra inputs a model needs depend on the outputs it computes,
@@ -540,9 +548,9 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
     if (!inputs.empty())
     {
-        GMX_THROW(APIError(formatString(
-                "The model requests the input '%s', which GROMACS can not provide.",
-                inputs.front().name().c_str())));
+        GMX_THROW(APIError(
+                formatString("The model requests the input '%s', which GROMACS can not provide.",
+                             inputs.front().name().c_str())));
     }
     data_->cutoffNm.reserve(data_->pairLists.size());
     for (const auto& pairs : data_->pairLists)
@@ -566,17 +574,18 @@ real MetatomicForceProvider::plainPairlistRange(const PlainPairlistRanges& range
     }
     if (!std::isfinite(interactionRange) && mpiComm_.isParallel())
     {
-        GMX_THROW(NotImplementedError(
-                "interaction_range is infinite for this model; "
-                "using multiple MPI domains is not supported."));
+        GMX_THROW(
+                NotImplementedError("interaction_range is infinite for this model; "
+                                    "using multiple MPI domains is not supported."));
     }
 
     // The model only reads pairs within its pair-list cutoffs; a longer interaction range
     // comes from message passing over them. So the plain pairlist needs the largest
     // cutoff plus a buffer for the motion between pairlist updates, not the interaction
     // range (which would force rlist up to it).
-    const double pairCutoff =
-            data_->cutoffNm.empty() ? 0.0 : *std::max_element(data_->cutoffNm.begin(), data_->cutoffNm.end());
+    const double pairCutoff = data_->cutoffNm.empty() ? 0.0
+                                                      : *std::max_element(data_->cutoffNm.begin(),
+                                                                          data_->cutoffNm.end());
     if (pairCutoff == 0.0)
     {
         // The model reads no pairs.
@@ -590,8 +599,9 @@ real MetatomicForceProvider::plainPairlistRange(const PlainPairlistRanges& range
     // pairs beyond rlist, so the buffer ends there; the cutoff itself must fit (mdrun
     // stops otherwise).
     const double rmsd  = ranges.rmsdDistance().value_or(0.0);
-    const double range = std::max(
-            pairCutoff, std::min(pairCutoff + std::max(2 * rmsd, 0.1), static_cast<double>(ranges.pairlistCutoff())));
+    const double range = std::max(pairCutoff,
+                                  std::min(pairCutoff + std::max(2 * rmsd, 0.1),
+                                           static_cast<double>(ranges.pairlistCutoff())));
     GMX_LOG(logger_.info)
             .asParagraph()
             .appendTextFormatted(
@@ -741,8 +751,8 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     {
         // Serial / thread-MPI: all MTA atoms are home, no halos
         const auto* mtaAtoms = options_.params_.mtaAtoms_.get();
-        numHomeMta_  = numTotalMta;
-        numLocalMta_ = numTotalMta;
+        numHomeMta_          = numTotalMta;
+        numLocalMta_         = numTotalMta;
 
         mtaToGmxLocal_.resize(numTotalMta);
         mtaToGlobalMta_.resize(numTotalMta);
@@ -754,9 +764,9 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             int32_t localIndex = mtaAtoms->localIndex()[i];
             int32_t globalIdx  = mtaAtoms->globalIndex()[mtaAtoms->collectiveIndex()[i]];
 
-            mtaToGmxLocal_[i]       = localIndex;
-            mtaToGlobalMta_[i]      = i;
-            atomNumbers_[i]         = options_.params_.atoms_.atom[globalIdx].atomnumber;
+            mtaToGmxLocal_[i]             = localIndex;
+            mtaToGlobalMta_[i]            = i;
+            atomNumbers_[i]               = options_.params_.atoms_.atom[globalIdx].atomnumber;
             gmxLocalToMtaIdx_[localIndex] = i;
         }
     }
@@ -805,12 +815,13 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
     // Sign convention: GROMACS shifts atom I (first): d = x[I]+shift - x[J].
     // Metatensor shifts atom J (second): r_ij = x[J]+cell·box - x[I].
     // So metatensor cell shift = -GROMACS cell shift.
-    const auto appendPairlistEntries = [this](const auto& pairlistEntries) {
+    const auto appendPairlistEntries = [this](const auto& pairlistEntries)
+    {
         for (const auto& entry : pairlistEntries)
         {
             const auto& [atomPair, shiftIndex] = entry;
-            const int32_t idxA = gmxLocalToMtaIdx_[atomPair.first];
-            const int32_t idxB = gmxLocalToMtaIdx_[atomPair.second];
+            const int32_t idxA                 = gmxLocalToMtaIdx_[atomPair.first];
+            const int32_t idxB                 = gmxLocalToMtaIdx_[atomPair.second];
 
             if (idxA != -1 && idxB != -1)
             {
@@ -932,14 +943,22 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
         // Exchange counts first so receiver knows buffer size.
         int sendCount = static_cast<int>(sendBuf.size());
         int recvCount = 0;
-        MPI_Sendrecv(&sendCount, 1, MPI_INT, sendTo, 0,
-                     &recvCount, 1, MPI_INT, recvFrom, 0,
-                     mpiComm_.comm(), MPI_STATUS_IGNORE);
+        MPI_Sendrecv(
+                &sendCount, 1, MPI_INT, sendTo, 0, &recvCount, 1, MPI_INT, recvFrom, 0, mpiComm_.comm(), MPI_STATUS_IGNORE);
 
         recvBuf.resize(recvCount);
-        MPI_Sendrecv(sendBuf.data(), sendCount, MPI_INT, sendTo, 1,
-                     recvBuf.data(), recvCount, MPI_INT, recvFrom, 1,
-                     mpiComm_.comm(), MPI_STATUS_IGNORE);
+        MPI_Sendrecv(sendBuf.data(),
+                     sendCount,
+                     MPI_INT,
+                     sendTo,
+                     1,
+                     recvBuf.data(),
+                     recvCount,
+                     MPI_INT,
+                     recvFrom,
+                     1,
+                     mpiComm_.comm(),
+                     MPI_STATUS_IGNORE);
 
         // Keep the received pairs this rank does not have yet.
         const int nRecvPairs = recvCount / 2;
@@ -969,8 +988,8 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
 
             // Minimum-image shift along the periodic directions only: none along z
             // with pbc = xy, none at all with pbc = no.
-            const IVec shift = minimumImageCellShift(
-                    box, data_->pbc, positions_[localJ] - positions_[localI]);
+            const IVec shift =
+                    minimumImageCellShift(box, data_->pbc, positions_[localJ] - positions_[localI]);
 
             backwardPairsMta_.push_back(localI);
             backwardPairsMta_.push_back(localJ);
@@ -989,8 +1008,7 @@ void MetatomicForceProvider::exchangeBackwardPairs(const matrix box, int maxRoun
 }
 
 
-void MetatomicForceProvider::distributeNonHomeForces(const double*        forces,
-                                                     ForceProviderOutput* outputs)
+void MetatomicForceProvider::distributeNonHomeForces(const double* forces, ForceProviderOutput* outputs)
 {
     const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
 
@@ -1001,7 +1019,7 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
         std::vector<double> denseForces(3 * numTotalMta, 0.0);
         for (int32_t i = 0; i < numLocalMta_; i++)
         {
-            int32_t g = mtaToGlobalMta_[i];
+            int32_t g              = mtaToGlobalMta_[i];
             denseForces[3 * g]     = forces[3 * i];
             denseForces[3 * g + 1] = forces[3 * i + 1];
             denseForces[3 * g + 2] = forces[3 * i + 2];
@@ -1032,11 +1050,11 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
 
     // Step 2: Pack non-home forces as sparse tuples (globalMtaIdx, fx, fy, fz).
     // Each tuple is 4 doubles: [globalMtaIdx_as_double, fx, fy, fz].
-    const int32_t numNonHome = numLocalMta_ - numHomeMta_;
+    const int32_t       numNonHome = numLocalMta_ - numHomeMta_;
     std::vector<double> sendBuf(4 * numNonHome);
     for (int32_t i = numHomeMta_; i < numLocalMta_; i++)
     {
-        int32_t k = i - numHomeMta_;
+        int32_t k          = i - numHomeMta_;
         sendBuf[4 * k]     = static_cast<double>(mtaToGlobalMta_[i]);
         sendBuf[4 * k + 1] = forces[3 * i];
         sendBuf[4 * k + 2] = forces[3 * i + 1];
@@ -1044,13 +1062,13 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
     }
 
     // Step 3: Exchange counts via allreduce on a P-element array.
-    const int numRanks = mpiComm_.size();
+    const int        numRanks = mpiComm_.size();
     std::vector<int> counts(numRanks, 0);
     counts[mpiComm_.rank()] = numNonHome;
     mpiComm_.sumReduce(ArrayRef<int>(counts));
 
     // Step 4: Allgatherv via Gatherv + Bcast (thread-MPI compatible).
-    int totalNonHome = 0;
+    int              totalNonHome = 0;
     std::vector<int> displs(numRanks);
     for (int r = 0; r < numRanks; r++)
     {
@@ -1068,11 +1086,16 @@ void MetatomicForceProvider::distributeNonHomeForces(const double*        forces
 
     std::vector<double> recvBuf(4 * totalNonHome);
 #if GMX_MPI
-    MPI_Gatherv(sendBuf.data(), 4 * numNonHome, MPI_DOUBLE,
-                recvBuf.data(), dcounts.data(), ddispls.data(), MPI_DOUBLE,
-                mpiComm_.mainRank(), mpiComm_.comm());
-    MPI_Bcast(recvBuf.data(), 4 * totalNonHome, MPI_DOUBLE,
-              mpiComm_.mainRank(), mpiComm_.comm());
+    MPI_Gatherv(sendBuf.data(),
+                4 * numNonHome,
+                MPI_DOUBLE,
+                recvBuf.data(),
+                dcounts.data(),
+                ddispls.data(),
+                MPI_DOUBLE,
+                mpiComm_.mainRank(),
+                mpiComm_.comm());
+    MPI_Bcast(recvBuf.data(), 4 * totalNonHome, MPI_DOUBLE, mpiComm_.mainRank(), mpiComm_.comm());
 #else
     GMX_RELEASE_ASSERT(false, "Parallel metatomic evaluation needs an MPI build");
 #endif
@@ -1136,12 +1159,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         // Step 3: Temporarily extend pairlistMta_ with backward pairs
         // so the NL building loop processes all pairs in one pass.
-        pairlistMta_.insert(pairlistMta_.end(),
-                            backwardPairsMta_.begin(),
-                            backwardPairsMta_.end());
-        cellShiftsMta_.insert(cellShiftsMta_.end(),
-                              backwardShiftsMta_.begin(),
-                              backwardShiftsMta_.end());
+        pairlistMta_.insert(pairlistMta_.end(), backwardPairsMta_.begin(), backwardPairsMta_.end());
+        cellShiftsMta_.insert(cellShiftsMta_.end(), backwardShiftsMta_.begin(), backwardShiftsMta_.end());
     }
 
     double energy = 0.0;
@@ -1149,11 +1168,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     clear_mat(virialMatrix);
 
     {
-        const int32_t       nAtoms       = numLocalMta_;
-        const bool          modelIsDouble = data_->useFloat64;
-        const DLDataType    floatType    = modelIsDouble ? DLDataType{ kDLFloat, 64, 1 }
-                                                         : DLDataType{ kDLFloat, 32, 1 };
-        const bool          gromacsIsDouble = std::is_same_v<real, double>;
+        const int32_t    nAtoms        = numLocalMta_;
+        const bool       modelIsDouble = data_->useFloat64;
+        const DLDataType floatType =
+                modelIsDouble ? DLDataType{ kDLFloat, 64, 1 } : DLDataType{ kDLFloat, 32, 1 };
+        const bool           gromacsIsDouble = std::is_same_v<real, double>;
         std::vector<int32_t> types(atomNumbers_.begin(), atomNumbers_.begin() + nAtoms);
 
         void* positionData = nullptr;
@@ -1197,12 +1216,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
         }
 
-        auto system = metatomic::System(
-                "nm",
-                wrap_dlpack(types.data(), { nAtoms }, { kDLInt, 32, 1 }),
-                wrap_dlpack(positionData, { nAtoms, 3 }, floatType),
-                wrap_dlpack(cellData, { 3, 3 }, floatType),
-                wrap_dlpack(data_->pbc.data(), { 3 }, { kDLBool, 8, 1 }));
+        auto system = metatomic::System("nm",
+                                        wrap_dlpack(types.data(), { nAtoms }, { kDLInt, 32, 1 }),
+                                        wrap_dlpack(positionData, { nAtoms, 3 }, floatType),
+                                        wrap_dlpack(cellData, { 3, 3 }, floatType),
+                                        wrap_dlpack(data_->pbc.data(), { 3 }, { kDLBool, 8, 1 }));
 
         for (size_t requestIndex = 0; requestIndex < data_->pairLists.size(); ++requestIndex)
         {
@@ -1221,7 +1239,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 using T = decltype(zero);
                 std::vector<T> vectors(static_cast<size_t>(maxPairs) * 3);
                 int64_t        nPairs = 0;
-                const auto     addPair = [&](int32_t i, int32_t j, const IVec& n, double sign, const double* d)
+                const auto addPair = [&](int32_t i, int32_t j, const IVec& n, double sign, const double* d)
                 {
                     const int32_t sample[5] = { i, j, n[XX], n[YY], n[ZZ] };
                     std::copy(sample, sample + 5, nlSamplesBuffer_.begin() + 5 * nPairs);
@@ -1283,26 +1301,25 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                     rows[2 * atom]     = 0;
                     rows[2 * atom + 1] = atom;
                 }
-                data_->selectedAtoms = metatensor::Labels(
-                        { "system", "atom" },
-                        numHomeMta_ == 0 ? nullptr : rows.data(),
-                        static_cast<size_t>(numHomeMta_));
+                data_->selectedAtoms = metatensor::Labels({ "system", "atom" },
+                                                          numHomeMta_ == 0 ? nullptr : rows.data(),
+                                                          static_cast<size_t>(numHomeMta_));
             }
             selected = data_->selectedAtoms;
         }
 
-        const bool computeVirial = outputs->forceWithVirial_.computeVirial_;
+        const bool                     computeVirial = outputs->forceWithVirial_.computeVirial_;
         std::vector<metatomic::System> systems;
         systems.push_back(std::move(system));
         std::vector<metatensor::TensorMap> modelOutputs;
         try
         {
-            modelOutputs = metatomic::execute_model(*data_->model,
-                                                    systems,
-                                                    selected,
-                                                    computeVirial ? data_->requestedWithVirial
-                                                                  : data_->requested,
-                                                    data_->checkConsistency);
+            modelOutputs = metatomic::execute_model(
+                    *data_->model,
+                    systems,
+                    selected,
+                    computeVirial ? data_->requestedWithVirial : data_->requested,
+                    data_->checkConsistency);
         }
         catch (const std::exception& e)
         {

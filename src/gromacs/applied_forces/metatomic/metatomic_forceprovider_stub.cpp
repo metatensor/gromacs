@@ -53,7 +53,9 @@ namespace gmx
 {
 
 // use an empty struct for MetatomicData in the stub implementation
-struct MetatomicData {};
+struct MetatomicData
+{
+};
 
 CLANG_DIAGNOSTIC_IGNORE("-Wmissing-noreturn")
 
@@ -63,7 +65,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     options_(options),
     logger_(logger),
     mpiComm_(mpiComm),
-    box_{{ 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }},
+    box_{ { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 0.0 } },
     data_(nullptr)
 {
     (void)options_;
@@ -86,13 +88,9 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
 {
 }
 
-void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& /*signal*/)
-{
-}
+void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& /*signal*/) {}
 
-void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> /*positions*/)
-{
-}
+void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> /*positions*/) {}
 
 CLANG_DIAGNOSTIC_RESET
 

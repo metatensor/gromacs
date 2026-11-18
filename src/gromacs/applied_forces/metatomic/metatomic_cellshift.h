@@ -50,8 +50,8 @@
 
 #include <array>
 
-#include "gromacs/utility/vectypes.h"
 #include "gromacs/utility/real.h"
+#include "gromacs/utility/vectypes.h"
 
 namespace gmx
 {

@@ -35,7 +35,7 @@
 
 MTA_REGISTER_PLUGIN(registerPlugin, {
     const mta_plugin_t plugin{ MTA_ABI_VERSION, "gromacs-test", gmx::test::loadPairModel };
-    const auto status = registerPlugin(plugin);
+    const auto         status = registerPlugin(plugin);
     if (status != MTA_SUCCESS)
     {
         return status;
