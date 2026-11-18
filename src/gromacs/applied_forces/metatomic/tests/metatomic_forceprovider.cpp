@@ -64,12 +64,15 @@
 #include "gromacs/domdec/localatomsetmanager.h"
 #include "gromacs/utility/vec.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
+#include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/enerdata.h"
 #include "gromacs/mdtypes/forceoutput.h"
 #include "gromacs/mdtypes/iforceprovider.h"
+#include "gromacs/mdtypes/inputrec.h"
 #include "gromacs/pbcutil/ishift.h"
 #include "gromacs/pbcutil/pbc.h"
 #include "gromacs/topology/atoms.h"
+#include "gromacs/topology/topology.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/logger.h"
 #include "gromacs/utility/mpicomm.h"
@@ -162,7 +165,7 @@ public:
      *
      * \p x1 is chosen such that x1 + cellShift . box - x0 = \p distance.
      */
-    void evaluate(const matrix box, const RVec& distance, const IVec& cellShift)
+    void evaluate(const matrix box, const RVec& distance, const IVec& cellShift, bool computeVirial = true)
     {
         const DVec shift(cellShift[XX] * box[XX][XX] + cellShift[YY] * box[YY][XX] + cellShift[ZZ] * box[ZZ][XX],
                          cellShift[YY] * box[YY][YY] + cellShift[ZZ] * box[ZZ][YY],
@@ -180,7 +183,7 @@ public:
         provider.setPairlist(MDModulesPairlistConstructedSignal(pairlist, {}, {}));
 
         forces_.assign(2, RVec(0, 0, 0));
-        ForceWithVirial     forceWithVirial(forces_, true);
+        ForceWithVirial     forceWithVirial(forces_, computeVirial);
         gmx_enerdata_t      enerd(1, nullptr);
         ForceProviderOutput output(&forceWithVirial, &enerd);
         provider.calculateForces(ForceProviderInput(x_, 2, {}, {}, 0.0, 0, box, mpiComm_, nullptr), &output);
@@ -188,8 +191,8 @@ public:
         copy_mat(forceWithVirial.getVirial(), virial_);
     }
 
-    //! Compare with the Lennard-Jones energy, forces and virial of the last evaluation.
-    void checkAgainstLennardJones() const
+    //! Compare with the Lennard-Jones energy, forces and virial (zero without) of the last evaluation.
+    void checkAgainstLennardJones(bool withVirial = true) const
     {
         const double r      = norm(distance_);
         const double sr6    = std::pow(c_sigma / r, 6);
@@ -206,7 +209,7 @@ public:
             for (int b = 0; b < 3; ++b)
             {
                 // -0.5 sum_i x_i (x) F_i = -0.5 d (x) F_1
-                const double virial = -0.5 * distance_[a] * -dEdr * distance_[b] / r;
+                const double virial = withVirial ? -0.5 * distance_[a] * -dEdr * distance_[b] / r : 0.0;
                 EXPECT_NEAR(virial, virial_[a][b], c_tolerance * std::abs(dEdr * r))
                         << "virial " << a << ", " << b;
             }
@@ -292,6 +295,36 @@ TEST_F(MetatomicForceProviderTest, RejectsInputsGromacsCannotProvide)
     EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), APIError);
 }
 
+TEST_F(MetatomicForceProviderTest, RequestsTheStrainGradientForTheVirialOnly)
+{
+    setModelUnits("nm", "kJ/mol");
+    const int strainRequests = PairModel::strainRequests;
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), false);
+    checkAgainstLennardJones(false);
+    EXPECT_EQ(PairModel::strainRequests, strainRequests);
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), true);
+    checkAgainstLennardJones(true);
+    EXPECT_EQ(PairModel::strainRequests, strainRequests + 1);
+}
+
+TEST_F(MetatomicForceProviderTest, PlainPairlistRange)
+{
+    gmx_mtop_t mtop;
+    t_inputrec inputrec;
+    inputrec.eI    = IntegrationAlgorithm::Steep; // no displacement between searches
+    inputrec.rlist = 1.2;
+    const PlainPairlistRanges ranges(mtop, inputrec);
+
+    // the pair-list cutoff with a buffer of 0.1 nm
+    setModelUnits("Angstrom", "eV");
+    EXPECT_REAL_EQ_TOL(MetatomicForceProvider(options_, logger_, mpiComm_).plainPairlistRange(ranges),
+                       c_cutoff + 0.1,
+                       relativeToleranceAsFloatingPoint(1.0, 1e-6));
+    // a model without pair lists needs no plain pairlist
+    options_.params_.modelOptions = "length_unit=nm energy_unit=kJ/mol no_pairs=1";
+    EXPECT_EQ(MetatomicForceProvider(options_, logger_, mpiComm_).plainPairlistRange(ranges), 0);
+}
+
 TEST_F(MetatomicForceProviderTest, LoadsInstalledPluginsWithoutPluginPath)
 {
     // metatomic-core installs its Lennard-Jones plugin next to libmetatomic
@@ -305,7 +338,9 @@ TEST_F(MetatomicForceProviderTest, LoadsInstalledPluginsWithoutPluginPath)
     options_.params_.modelOptions = formatString(
             "sigma=%g epsilon=%g cutoff=%g atomic_type=%d length_unit=nm energy_unit=kJ/mol",
             c_sigma, c_epsilon, c_cutoff, c_atomicNumber);
-    EXPECT_NO_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_));
+    // The model loads, as a failure to load would be an APIError, but its energy has no strain
+    // gradient, which GROMACS needs for the virial.
+    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), InconsistentInputError);
 }
 
 TEST_F(MetatomicForceProviderTest, FailsOnUnknownModel)

@@ -79,17 +79,13 @@ public:
      *
      * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
      *
-     * The Metatomic module subscribes to the following notifications:
-     * - The atom groups and their names from the index file (to specify the ML atoms)
-     * by taking a const IndexGroupsAndNames& as a parameter.
-     * - The system topology, which might be modified (e.g., to remove classical interactions).
-     * by taking a gmx_mtop_t* as a parameter.
-     * - Writing the module parameters to the KVT for storage in the .tpr file
-     * by taking a KeyValueTreeObjectBuilder as a parameter.
-     * - Accessing the MDLogger to log messages
-     * by taking a const MDLogger& as a parameter.
-     * - Accessing the WarningHandler to output warnings
-     * by taking a WarningHandler* as a parameter.
+     * A notifier calls the callbacks whose argument has the type it sends, given here
+     * after each notification the Metatomic module subscribes to:
+     * - the index groups, to find the atoms of the model: const IndexGroupsAndNames&
+     * - the topology, to remove the classical interactions among these atoms: gmx_mtop_t*
+     * - writing the module parameters to the .tpr file: KeyValueTreeObjectBuilder
+     * - the logger: const MDLogger&
+     * - the grompp warning handler: WarningHandler*
      */
     void subscribeToPreProcessingNotifications(MDModulesNotifiers* notifiers) override
     {
@@ -121,19 +117,16 @@ public:
      *
      * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
      *
-     * The Metatomic module subscribes to the following notifications:
-     * - Reading the module parameters from the KVT
-     * by taking a const KeyValueTreeObject& as a parameter.
-     * - The local atom set manager to construct a local atom set for the ML atoms.
-     * by taking a LocalAtomSetManager* as a parameter.
-     * - The system topology
-     * by taking a const gmx_mtop_t& as a parameter.
-     * - The PBC type
-     * by taking a PbcType as a parameter.
-     * - The MPI communicator
-     * by taking a const MpiComm& as a parameter.
-     * - The MDLogger to log messages
-     * by taking a const MDLogger& as a parameter.
+     * A notifier calls the callbacks whose argument has the type it sends, given here
+     * after each notification the Metatomic module subscribes to:
+     * - reading the module parameters from the .tpr file: const KeyValueTreeObject&
+     * - the local atom set manager, to follow the atoms of the model: LocalAtomSetManager*
+     * - the topology: const gmx_mtop_t&
+     * - the periodic boundary conditions: const PbcType&
+     * - the MPI communicator: const MpiComm&
+     * - the logger: const MDLogger&
+     * - the request for an energy term: MDModulesEnergyOutputToMetatomicRequestChecker*
+     * - the range of the plain pairlist, which loads the model: PlainPairlistRanges*
      */
     void subscribeToSimulationSetupNotifications(MDModulesNotifiers* notifiers) override
     {
@@ -177,7 +170,13 @@ public:
         const auto setPlainPairlistRangeFunction = [this](PlainPairlistRanges* ranges)
         {
             createForceProvider();
-            ranges->addRange(force_provider_->plainPairlistRange(*ranges));
+            const real range = force_provider_->plainPairlistRange(*ranges);
+            // mdrun requires a range from the modules that subscribe to the pairlist
+            needsPairlist_ = range > 0;
+            if (needsPairlist_)
+            {
+                ranges->addRange(range);
+            }
         };
         notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);
 #endif // GMX_METATOMIC_ACTIVE
@@ -187,10 +186,10 @@ public:
      *
      * \param[in] notifiers allows the module to subscribe to notifications from MdModules.
      *
-     * The Metatomic module subscribes to the following notifications:
-     * - Atom redistribution due to domain decomposition
-     * - Changes in the neighborlist
-     * by taking a const MDModulesAtomsRedistributedSignal as a parameter.
+     * A notifier calls the callbacks whose argument has the type it sends, given here
+     * after each notification the Metatomic module subscribes to:
+     * - the atoms of this rank, after domain decomposition: const MDModulesAtomsRedistributedSignal&
+     * - the plain pairlist, unless the model reads no pairs: const MDModulesPairlistConstructedSignal&
      */
     void subscribeToSimulationRunNotifications(MDModulesNotifiers* notifiers) override
     {
@@ -204,10 +203,12 @@ public:
         { force_provider_->gatherAtomNumbersIndices(signal); };
         notifiers->simulationRunNotifier_.subscribe(notifyDDFunction);
 
-        // subscribe to pairlist construction notification
-        const auto notifyPairlistFunction = [this](const MDModulesPairlistConstructedSignal& signal)
-        { force_provider_->setPairlist(signal); };
-        notifiers->simulationRunNotifier_.subscribe(notifyPairlistFunction);
+        if (needsPairlist_)
+        {
+            const auto notifyPairlistFunction = [this](const MDModulesPairlistConstructedSignal& signal)
+            { force_provider_->setPairlist(signal); };
+            notifiers->simulationRunNotifier_.subscribe(notifyPairlistFunction);
+        }
     }
 
     void initForceProviders(ForceProviders* forceProviders) override
@@ -238,6 +239,8 @@ private:
     MetatomicOptions options_;
 
     std::unique_ptr<MetatomicForceProvider> force_provider_;
+    //! False for a model that reads no pairs
+    bool needsPairlist_ = true;
 };
 
 } // end anonymous namespace

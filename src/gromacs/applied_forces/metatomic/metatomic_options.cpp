@@ -135,10 +135,10 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
     // finalize topology
     mtop->finalize();
 }
-//! metatomic-uncertainty-threshold is auto, off, or a non-negative number of kJ/mol.
+//! metatomic-uncertainty-threshold is off or a non-negative number of kJ/mol.
 void checkUncertaintyThreshold(const std::string& value)
 {
-    if (value == "auto" || value == "off")
+    if (value == "off")
     {
         return;
     }
@@ -153,7 +153,7 @@ void checkUncertaintyThreshold(const std::string& value)
     {
     }
     GMX_THROW(InconsistentInputError(formatString(
-            "metatomic-uncertainty-threshold must be auto, off or a non-negative number in kJ/mol, "
+            "metatomic-uncertainty-threshold must be off or a non-negative number in kJ/mol, "
             "not '%s'.",
             value.c_str())));
 }

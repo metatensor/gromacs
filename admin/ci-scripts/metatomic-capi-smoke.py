@@ -136,7 +136,7 @@ metatomic-check-consistency = true
                 command = [gmx, *mdrun]
             run(command, cwd=root)
             log = (root / f'{name}.log').read_text()
-            assert 'Metatomic C API' in log, 'C API force provider was not initialized'
+            assert 'Metatomic model: length unit' in log, 'the metatomic force provider was not initialized'
             if ranks > 1:
                 assert f'Domain decomposition grid {ranks} x 1 x 1' in log, f'{name}: no {ranks}-rank DD'
             run([gmx, 'energy', '-f', f'{name}.edr', '-o', f'{name}-energy.xvg'], cwd=root,

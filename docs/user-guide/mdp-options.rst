@@ -3787,19 +3787,17 @@ interface implementation follow :ref:`nnpot`.
 
 .. _mdp-metatomic:
 
-Metatomic simulations
-^^^^^^^^^^^^^^^^^^^^^
+Machine learning potentials with metatomic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The Metatomic interface evaluates an atomistic model through the C API of
-metatomic-core and adds its energy, forces and virial through the
-applied-forces framework. It is available when |Gromacs| was configured with
-``-DGMX_METATOMIC=ON`` (or ``AUTO`` with metatomic-core found). The model sees
-the atoms of :mdp:`metatomic-input-group`, with the cell, the periodic
-boundary conditions and pair lists built from the |Gromacs| pairlist.
-Three-dimensional, two-dimensional and nonperiodic systems are supported;
-screw periodic boundary conditions are rejected.
-:ref:`gmx grompp` removes the classical interactions among these atoms from
-the topology, as for :mdp:`nnpot-input-group`.
+`metatomic <https://docs.metatensor.org/metatomic/>`__ models, most of them
+machine learning potentials, can compute the energy, forces and virial of the
+atoms in :mdp:`metatomic-input-group`. :ref:`gmx grompp` removes the
+classical interactions among these atoms from the topology, as for
+:mdp:`nnpot-input-group`; their interactions with the other atoms stay
+classical. Systems periodic in three or two dimensions and nonperiodic systems
+are supported, screw periodic boundary conditions are not. This needs a
+|Gromacs| configured with ``-DGMX_METATOMIC=ON`` and the metatomic library.
 
 .. mdp:: metatomic-active
 
@@ -3847,19 +3845,20 @@ the topology, as for :mdp:`nnpot-input-group`.
 
 .. mdp:: metatomic-variant
 
-   Variant of the outputs to use, ``energy/<variant>`` instead of ``energy``.
-   Empty or ``no`` uses the default output.
+   Variant of the model outputs to use, for example ``pbe0`` to use
+   ``energy/pbe0`` instead of ``energy``. Empty uses the outputs without
+   variant.
 
 .. mdp:: metatomic-uncertainty-threshold
 
-   (auto)
+   (10) [kJ/mol]
    When the model provides a per-atom ``energy_uncertainty`` output, warn about
-   atoms whose uncertainty exceeds this threshold, in kJ/mol. ``auto`` uses
-   0.1 eV, ``off`` disables the check.
+   atoms whose uncertainty exceeds this threshold. ``off`` disables the check.
 
 .. mdp:: metatomic-variant-energy-uq
 
-   Variant of the ``energy_uncertainty`` output, as :mdp:`metatomic-variant`.
+   Variant of the ``energy_uncertainty`` output. Empty uses
+   :mdp:`metatomic-variant`, ``off`` the output without variant.
 
 .. mdp:: metatomic-non-conservative
 
@@ -3871,12 +3870,13 @@ the topology, as for :mdp:`nnpot-input-group`.
 
 .. mdp:: metatomic-variant-nc-forces
 
-   Variant of the ``non_conservative_force`` output, as :mdp:`metatomic-variant`.
+   Variant of the ``non_conservative_force`` output. Empty uses
+   :mdp:`metatomic-variant`, ``off`` the output without variant.
 
 .. mdp:: metatomic-variant-nc-stress
 
-   Variant of the ``non_conservative_stress`` output. When both variants are
-   given, they must be the same.
+   Variant of the ``non_conservative_stress`` output. Empty uses
+   :mdp:`metatomic-variant`, ``off`` the output without variant.
 
 
 .. _mdp-fmm:

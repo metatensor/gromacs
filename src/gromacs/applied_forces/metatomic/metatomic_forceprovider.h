@@ -67,6 +67,8 @@ class PlainPairlistRanges;
  *
  * Implements the IForceProvider interface for the Metatomic force provider.
  *
+ * MTA atoms are the atoms of metatomic-input-group, the atoms the model sees.
+ *
  * ## Domain decomposition (DD) strategy
  *
  * Each rank evaluates the model on all MTA atoms: the home positions of every
@@ -123,7 +125,7 @@ public:
      * The largest pair-list cutoff plus a buffer for the motion between pairlist
      * updates (twice the RMS displacement, at least 0.1 nm), capped at the
      * normal pairlist cut-off and never below the pair-list cutoff. A model
-     * without pair lists gets its interaction range.
+     * without pair lists needs no plain pairlist: the range is then 0.
      */
     real plainPairlistRange(const PlainPairlistRanges& ranges) const;
 
@@ -203,7 +205,6 @@ private:
 
     //! Pairlist in MTA model indices, flat [i0,j0, i1,j1, ...].
     //! Built from GROMACS interacting and excluded pairlists with negated cell shifts.
-    //! Used in both NL modes.
     std::vector<int32_t> pairlistMta_;
     //! Cell shifts for each pair (metatensor convention: shift applied to second atom).
     std::vector<IVec> cellShiftsMta_;
@@ -215,11 +216,9 @@ private:
     //! Cell shifts for backward pairs (recomputed from local positions).
     std::vector<IVec> backwardShiftsMta_;
 
-    //! Pre-allocated raw buffers for NL construction (used by both NL modes).
-    //! Filled inline from pairlistMta_/cellShiftsMta_ (+ backward pairs in full mode).
-    //! Wrapped as a metatensor pair block and passed to `System::add_pairs`.
-    std::vector<int32_t> nlSamplesBuffer_; //!< flat [n_pairs * 5]: i, j, cs_a, cs_b, cs_c
-    std::vector<double>  nlVectorsBuffer_; //!< flat [n_pairs * 3]: dx, dy, dz
+    //! Samples of the pairs given to the model, flat [n_pairs * 5]: i, j, cs_a, cs_b, cs_c.
+    //! Filled from pairlistMta_/cellShiftsMta_, kept to reuse the allocation.
+    std::vector<int32_t> nlSamplesBuffer_;
 
     //! local copy of simulation box
     matrix box_;

@@ -35,7 +35,8 @@
  * \brief
  * Implements the Metatomic Force Provider class with per-rank model evaluation.
  *
- * In domain decomposition, every rank gathers all ML atoms and the pairs of
+ * MTA atoms are the atoms of metatomic-input-group, the atoms the model sees.
+ * In domain decomposition, every rank gathers all MTA atoms and the pairs of
  * every rank's GROMACS pairlist, so each home atom sees its whole environment,
  * including the message-passing receptive field. The model returns home-atom
  * outputs only.
@@ -67,6 +68,7 @@
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -100,14 +102,17 @@
 namespace gmx
 {
 
-/*! \brief Normalizes the variant string for Metatomic output selection. */
-static std::optional<std::string> normalize_variant(std::string variant_string)
+/*! \brief The variant of one output: its own option, else metatomic-variant.
+ *
+ * `off` in the option of the output selects the output without variant.
+ */
+static std::optional<std::string> output_variant(const std::string& variant, const std::string& outputVariant)
 {
-    if (variant_string == "no" || variant_string.empty())
+    if (!outputVariant.empty())
     {
-        return std::nullopt;
+        return outputVariant == "off" ? std::nullopt : std::optional<std::string>(outputVariant);
     }
-    return variant_string;
+    return variant.empty() ? std::nullopt : std::optional<std::string>(variant);
 }
 
 static std::string quantity_name(const std::string& base, const std::optional<std::string>& variant)
@@ -212,18 +217,16 @@ static double sum_block(metatensor::TensorBlock& block)
     return sum;
 }
 
-//! Add `scale * values` into `forces`, indexing atoms by a sample column.
+/*! \brief Add per-atom vectors, shape (samples, 3, 1), into \p vectors.
+ *
+ * Atoms are read from the \p atomColumn column of the samples.
+ */
 template<typename T>
-static void add_atom_rows(metatensor::TensorBlock& block,
-                          int                      atomColumn,
-                          int32_t                  nAtoms,
-                          double                   scale,
-                          std::vector<double>*     forces)
+static void add_atom_vectors(metatensor::TensorBlock& block, int atomColumn, int32_t nAtoms, std::vector<double>* vectors)
 {
     auto       sampleLabels = block.samples();
-    const auto samples      = sampleLabels.values_cpu();
-    auto       values       = block.values<T>();
-    const auto shape        = values.shape();
+    const auto samples      = sampleLabels.values();
+    const auto values       = block.values<T>();
     for (size_t row = 0; row < sampleLabels.count(); ++row)
     {
         const int32_t atom = samples(row, static_cast<size_t>(atomColumn));
@@ -231,44 +234,29 @@ static void add_atom_rows(metatensor::TensorBlock& block,
         {
             GMX_THROW(APIError("Metatomic output names an atom outside the local set"));
         }
-        for (int d = 0; d < 3; ++d)
+        for (size_t d = 0; d < 3; ++d)
         {
-            const double component = shape.size() >= 3
-                                             ? static_cast<double>(values(row, static_cast<size_t>(d), 0))
-                                             : static_cast<double>(values(row, static_cast<size_t>(d)));
-            (*forces)[3 * atom + d] += scale * component;
+            (*vectors)[3 * atom + d] += static_cast<double>(values(row, d, 0));
         }
     }
 }
 
-//! `virial += 0.5 * strain_gradient`. Strain values are V*sigma.
+/*! \brief Add half of the 3x3 matrices of \p block, shape (samples, 3, 3, 1), to \p virial.
+ *
+ * For a strain gradient dE/de this is the GROMACS virial, -0.5 sum_i x_i (x) f_i.
+ * A stress s gives the same after multiplication by the volume, as dE/de = V s.
+ */
 template<typename T>
-static void add_strain(metatensor::TensorBlock& block, matrix virial)
+static void add_virial(metatensor::TensorBlock& block, matrix virial)
 {
-    auto       sampleLabels = block.samples();
-    auto       values       = block.values<T>();
-    const auto shape        = values.shape();
-    const size_t nRows      = shape.size() >= 3 ? sampleLabels.count() : 1;
-    for (size_t row = 0; row < nRows; ++row)
+    const auto values = block.values<T>();
+    for (size_t row = 0; row < block.samples().count(); ++row)
     {
-        for (int a = 0; a < 3; ++a)
+        for (size_t a = 0; a < 3; ++a)
         {
-            for (int b = 0; b < 3; ++b)
+            for (size_t b = 0; b < 3; ++b)
             {
-                double component = 0.0;
-                if (shape.size() == 4)
-                {
-                    component = static_cast<double>(values(row, static_cast<size_t>(a), static_cast<size_t>(b), 0));
-                }
-                else if (shape.size() == 3)
-                {
-                    component = static_cast<double>(values(row, static_cast<size_t>(a), static_cast<size_t>(b)));
-                }
-                else
-                {
-                    component = static_cast<double>(values(static_cast<size_t>(a), static_cast<size_t>(b)));
-                }
-                virial[a][b] += static_cast<real>(0.5 * component);
+                virial[a][b] += static_cast<real>(0.5 * static_cast<double>(values(row, a, b, 0)));
             }
         }
     }
@@ -300,8 +288,12 @@ struct MetatomicData
 
     std::array<uint8_t, 3> pbc = { 1, 1, 1 };
 
-    //! Outputs passed to execute_model, in request order.
+    //! Outputs passed to execute_model, in request order, without the virial.
     std::vector<metatomic::Quantity> requested;
+    /*! \brief The same outputs with what the virial needs: the strain gradient of the
+     * energy, or the non-conservative stress, which comes last.
+     */
+    std::vector<metatomic::Quantity> requestedWithVirial;
     std::size_t                      energyIndex = 0;
     std::optional<std::size_t>       uqIndex;
     std::optional<std::size_t>       ncForceIndex;
@@ -316,7 +308,6 @@ struct MetatomicData
 
     //! Home-atom selection. Rebuilt when numHomeMta_ changes.
     std::optional<metatensor::Labels> selectedAtoms;
-    int32_t                           selectedCount = -1;
 
     //! Buffers used when GROMACS `real` is not the model dtype.
     std::vector<double> positions64;
@@ -420,71 +411,60 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     GMX_LOG(logger_.info)
             .asParagraph()
-            .appendTextFormatted("Metatomic C API, length unit %s, model dtype %s",
+            .appendTextFormatted("Metatomic model: length unit %s, dtype %s",
                                  data_->capabilities.length_unit().c_str(),
                                  data_->useFloat64 ? "float64" : "float32");
 
+    const auto& params       = options_.params_;
     const auto& modelOutputs = data_->capabilities.outputs();
-    const auto  vEnergy      = normalize_variant(options_.params_.variant);
-    data_->energyName        = quantity_name("energy", vEnergy);
+    data_->energyName        = quantity_name("energy", output_variant(params.variant, ""));
     const auto* energyCap    = find_output(modelOutputs, data_->energyName);
     if (energyCap == nullptr)
     {
         GMX_THROW(APIError(formatString(
                 "The model at '%s' does not provide an '%s' output. "
                 "Metatomic interface cannot proceed.",
-                options_.params_.modelPath_.c_str(),
+                params.modelPath_.c_str(),
                 data_->energyName.c_str())));
     }
-    if (energyCap->sample_kind() != metatomic::SampleKind::Atom && mpiComm_.isParallel())
-    {
-        GMX_LOG(logger_.warning)
-                .asParagraph()
-                .appendText("Metatomic: the model's energy is per system. With domain "
-                            "decomposition every rank asks for the energy of its home atoms "
-                            "(selected_atoms), and the energies, forces and virials of the ranks "
-                            "are added: a model that does not restrict a per-system energy to the "
-                            "selected atoms is counted once per rank.");
-    }
 
-    data_->nonConservative = options_.params_.nonConservative;
+    data_->nonConservative = params.nonConservative;
     if (!data_->nonConservative)
     {
-        // metatomic matches requests to outputs by name and sample kind only, and a model may
-        // compute gradients it does not declare; one that cannot fails at the first step.
+        // The forces need the positions gradient, the virial the strain gradient.
         const auto& declared = energyCap->gradients();
         const auto  declares = [&declared](metatomic::Gradients gradient)
         { return std::find(declared.begin(), declared.end(), gradient) != declared.end(); };
         if (!declares(metatomic::Gradients::Positions) || !declares(metatomic::Gradients::Strain))
         {
-            GMX_LOG(logger_.warning)
-                    .asParagraph()
-                    .appendTextFormatted(
-                            "Metatomic: the model's '%s' output does not declare gradients with "
-                            "respect to both positions and strain, which GROMACS requests for "
-                            "the forces and the virial. If the model does not compute them, the "
-                            "first force evaluation fails.",
-                            data_->energyName.c_str());
+            GMX_THROW(InconsistentInputError(formatString(
+                    "The model's '%s' output does not declare gradients with respect to both "
+                    "positions and strain, which GROMACS needs for the forces and the virial.",
+                    data_->energyName.c_str())));
         }
     }
     {
-        auto energy = metatomic::Quantity::builder()
-                              .name(data_->energyName)
-                              .unit("kJ/mol")
-                              .sample_kind(energyCap->sample_kind());
-        if (!data_->nonConservative)
+        // Models may compute the strain gradient only on request, so it is only
+        // requested for the steps that need the virial.
+        using metatomic::Gradients;
+        const auto energy = [&](std::vector<Gradients> gradients)
         {
-            energy.add_gradient(metatomic::Gradients::Positions)
-                    .add_gradient(metatomic::Gradients::Strain);
-        }
+            return metatomic::Quantity::builder()
+                    .name(data_->energyName)
+                    .unit("kJ/mol")
+                    .sample_kind(energyCap->sample_kind())
+                    .gradients(data_->nonConservative ? std::vector<Gradients>{} : gradients)
+                    .build();
+        };
         data_->energyIndex = data_->requested.size();
-        data_->requested.push_back(energy.build());
+        data_->requested.push_back(energy({ Gradients::Positions }));
+        data_->requestedWithVirial.push_back(energy({ Gradients::Positions, Gradients::Strain }));
     }
 
-    if (options_.params_.uncertaintyThreshold != "off")
+    if (params.uncertaintyThreshold != "off")
     {
-        const auto  vUq   = normalize_variant(options_.params_.variantEnergyUq);
-        const auto  uqName = quantity_name("energy_uncertainty", vUq);
+        const auto  uqName = quantity_name("energy_uncertainty",
+                                          output_variant(params.variant, params.variantEnergyUq));
         const auto* uqCap  = find_output(modelOutputs, uqName);
         if (uqCap != nullptr && uqCap->sample_kind() == metatomic::SampleKind::Atom)
         {
@@ -495,14 +475,8 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                                .unit("kJ/mol")
                                                .sample_kind(metatomic::SampleKind::Atom)
                                                .build());
-            if (options_.params_.uncertaintyThreshold == "auto")
-            {
-                data_->uncertaintyThreshold = 0.1 * metatomic::unit_conversion_factor("eV", "kJ/mol");
-            }
-            else
-            {
-                data_->uncertaintyThreshold = doubleFromString(options_.params_.uncertaintyThreshold.c_str());
-            }
+            data_->requestedWithVirial.push_back(data_->requested.back());
+            data_->uncertaintyThreshold = doubleFromString(params.uncertaintyThreshold.c_str());
             GMX_LOG(logger_.info)
                     .asParagraph()
                     .appendTextFormatted(
@@ -515,28 +489,14 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
     if (data_->nonConservative)
     {
-        const auto vForces = normalize_variant(options_.params_.variantNcForces);
-        const auto vStress = normalize_variant(options_.params_.variantNcStress);
-        if (vForces.has_value() && vStress.has_value() && vForces.value() != vStress.value())
-        {
-            GMX_THROW(APIError("if both 'variant-nc-forces' and 'variant-nc-stress' are present, "
-                               "they must have the same value"));
-        }
-        const auto  forceName = quantity_name("non_conservative_force", vForces);
-        const auto* forceCap  = find_output(modelOutputs, forceName);
-        if (forceCap == nullptr)
+        // non_conservative_force is always per atom
+        const auto forceName = quantity_name(
+                "non_conservative_force", output_variant(params.variant, params.variantNcForces));
+        if (find_output(modelOutputs, forceName) == nullptr)
         {
             GMX_THROW(APIError(formatString(
                     "The model does not provide '%s' output, "
                     "we can not enable non-conservative simulations",
-                    forceName.c_str())));
-        }
-        if (forceCap->sample_kind() != metatomic::SampleKind::Atom)
-        {
-            GMX_THROW(APIError(formatString(
-                    "The model's '%s' output can not produce per-atom output "
-                    "(sample_kind != \"atom\"), we can not enable non-conservative "
-                    "simulations",
                     forceName.c_str())));
         }
         data_->ncForceIndex = data_->requested.size();
@@ -545,17 +505,18 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                                            .unit("kJ/mol/nm")
                                            .sample_kind(metatomic::SampleKind::Atom)
                                            .build());
+        data_->requestedWithVirial.push_back(data_->requested.back());
 
-        const auto  stressName = quantity_name("non_conservative_stress", vStress);
-        const auto* stressCap  = find_output(modelOutputs, stressName);
-        if (stressCap != nullptr)
+        const auto stressName = quantity_name(
+                "non_conservative_stress", output_variant(params.variant, params.variantNcStress));
+        if (find_output(modelOutputs, stressName) != nullptr)
         {
-            data_->ncStressIndex = data_->requested.size();
-            data_->requested.push_back(metatomic::Quantity::builder()
-                                               .name(stressName)
-                                               .unit("kJ/mol/nm^3")
-                                               .sample_kind(metatomic::SampleKind::System)
-                                               .build());
+            data_->ncStressIndex = data_->requestedWithVirial.size();
+            data_->requestedWithVirial.push_back(metatomic::Quantity::builder()
+                                                         .name(stressName)
+                                                         .unit("kJ/mol/nm^3")
+                                                         .sample_kind(metatomic::SampleKind::System)
+                                                         .build());
         }
         GMX_LOG(logger_.info)
                 .asParagraph()
@@ -565,12 +526,13 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                         data_->ncStressIndex.has_value() ? ", with stress" : "");
     }
 
-    // The pair lists and extra inputs a model needs depend on the outputs it computes.
+    // The pair lists and extra inputs a model needs depend on the outputs it computes,
+    // asked here for the outputs of the virial steps, which include the others.
     std::vector<metatomic::Quantity> inputs;
     try
     {
-        data_->pairLists = data_->model->requested_pair_lists(data_->requested);
-        inputs           = data_->model->requested_inputs(data_->requested);
+        data_->pairLists = data_->model->requested_pair_lists(data_->requestedWithVirial);
+        inputs           = data_->model->requested_inputs(data_->requestedWithVirial);
     }
     catch (const std::exception& e)
     {
@@ -617,19 +579,16 @@ real MetatomicForceProvider::plainPairlistRange(const PlainPairlistRanges& range
             data_->cutoffNm.empty() ? 0.0 : *std::max_element(data_->cutoffNm.begin(), data_->cutoffNm.end());
     if (pairCutoff == 0.0)
     {
-        if (!std::isfinite(interactionRange) || interactionRange == 0.0)
-        {
-            GMX_THROW(InconsistentInputError(
-                    "The metatomic model requests no pair list and has no finite interaction "
-                    "range."));
-        }
-        return interactionRange;
+        // The model reads no pairs.
+        return 0.0;
     }
 
-    // Twice the RMS displacement over a pairlist lifetime, as recommended for
-    // PlainPairlistRanges, and at least 0.1 nm for fast ML hydrogens. The normal
-    // pairlist holds no pairs beyond rlist, so the buffer ends there; the cutoff
-    // itself must fit (mdrun stops otherwise).
+    // GROMACS builds the plain pairlist on search steps only, at the requested range, and
+    // leaves the buffer for the motion until the next search to the requester. Twice the
+    // RMS displacement over a pairlist lifetime, as PlainPairlistRanges::rmsdDistance()
+    // recommends, and at least 0.1 nm for fast ML hydrogens. The normal pairlist holds no
+    // pairs beyond rlist, so the buffer ends there; the cutoff itself must fit (mdrun
+    // stops otherwise).
     const double rmsd  = ranges.rmsdDistance().value_or(0.0);
     const double range = std::max(
             pairCutoff, std::min(pairCutoff + std::max(2 * rmsd, 0.1), static_cast<double>(ranges.pairlistCutoff())));
@@ -830,9 +789,10 @@ void MetatomicForceProvider::gatherAtomPositions(ArrayRef<const RVec> pos)
  * MTA model indices via gmxLocalToMtaIdx_, and negates cell shifts
  * (GROMACS shifts the first atom, metatensor shifts the second).
  *
- * The plain list is what the model needs inside its cutoff. The excluded
- * list is only 1-2 / 1-3 / 1-4 pairs. Reading exclusions alone drops every
- * non-bonded neighbor (the neighbor-list capacity bug).
+ * The model needs every pair within its cutoff, excluded or not. grompp
+ * excludes the classical non-bonded interactions among MTA atoms, so their
+ * pairs come in the excluded list; both lists are read so that no pair is
+ * lost, whatever the exclusions.
  */
 void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSignal& signal)
 {
@@ -1148,11 +1108,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
     }
 
-    // With domain decomposition every rank needs, for each home atom, all ML atoms within
+    // With domain decomposition every rank needs, for each home atom, all MTA atoms within
     // the model's interaction range and the pairs among them (message passing), not only
     // the pairs the eighth-shell decomposition assigned to it. The GROMACS pairlist is the
     // pair source; atoms and pairs are then exchanged across ranks.
-    const bool useNewtonNL = mpiComm_.isParallel();
+    const bool parallel = mpiComm_.isParallel();
 
     // The model rows appended below are removed after the evaluation, so that
     // gatherAtomPositions on the next step only sees the rows mtaToGmxLocal_ maps.
@@ -1162,7 +1122,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     const std::size_t origPairlistSize = pairlistMta_.size();
     const std::size_t origShiftsSize   = cellShiftsMta_.size();
 
-    if (useNewtonNL)
+    if (parallel)
     {
         // Step 1: Make all MTA atoms local. The DD halo covers only the forward direction,
         // while each home atom energy depends on all atoms within the model interaction
@@ -1246,95 +1206,76 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         for (size_t requestIndex = 0; requestIndex < data_->pairLists.size(); ++requestIndex)
         {
-            const auto&   request = data_->pairLists[requestIndex];
-            const bool    full    = request.full_list();
-            const bool    strict  = request.strict();
-            const double  cutoff  = data_->cutoffNm[requestIndex];
-            const double  cutoff2 = cutoff * cutoff;
-            const int64_t nHalf   = static_cast<int64_t>(pairlistMta_.size() / 2);
+            const auto&   request  = data_->pairLists[requestIndex];
+            const bool    full     = request.full_list();
+            const bool    strict   = request.strict();
+            const double  cutoff2  = data_->cutoffNm[requestIndex] * data_->cutoffNm[requestIndex];
+            const int64_t nHalf    = static_cast<int64_t>(pairlistMta_.size() / 2);
             const int64_t maxPairs = full ? 2 * nHalf : nHalf;
             nlSamplesBuffer_.resize(static_cast<size_t>(maxPairs) * 5);
-            nlVectorsBuffer_.resize(static_cast<size_t>(maxPairs) * 3);
 
-            int64_t outIdx = 0;
-            for (int64_t k = 0; k < nHalf; ++k)
+            // Pair vectors use the system length unit (nm), in the dtype of the model. They are
+            // written straight into the array the pair block takes over.
+            const auto pairValues = [&](auto zero) -> std::unique_ptr<metatensor::DataArrayBase>
             {
-                const int32_t ai = pairlistMta_[2 * k];
-                const int32_t aj = pairlistMta_[2 * k + 1];
-                const IVec&   n     = cellShiftsMta_[k];
-                const RVec    shift = cellShiftVector(inputs.box_, n);
-                const double dx = static_cast<double>(positions_[aj][0] - positions_[ai][0] + shift[0]);
-                const double dy = static_cast<double>(positions_[aj][1] - positions_[ai][1] + shift[1]);
-                const double dz = static_cast<double>(positions_[aj][2] - positions_[ai][2] + shift[2]);
-                if (strict && dx * dx + dy * dy + dz * dz > cutoff2)
+                using T = decltype(zero);
+                std::vector<T> vectors(static_cast<size_t>(maxPairs) * 3);
+                int64_t        nPairs = 0;
+                const auto     addPair = [&](int32_t i, int32_t j, const IVec& n, double sign, const double* d)
                 {
-                    continue;
-                }
-                nlSamplesBuffer_[5 * outIdx + 0] = ai;
-                nlSamplesBuffer_[5 * outIdx + 1] = aj;
-                nlSamplesBuffer_[5 * outIdx + 2] = n[0];
-                nlSamplesBuffer_[5 * outIdx + 3] = n[1];
-                nlSamplesBuffer_[5 * outIdx + 4] = n[2];
-                nlVectorsBuffer_[3 * outIdx + 0] = dx;
-                nlVectorsBuffer_[3 * outIdx + 1] = dy;
-                nlVectorsBuffer_[3 * outIdx + 2] = dz;
-                ++outIdx;
-                if (full)
+                    const int32_t sample[5] = { i, j, n[XX], n[YY], n[ZZ] };
+                    std::copy(sample, sample + 5, nlSamplesBuffer_.begin() + 5 * nPairs);
+                    for (int a = 0; a < 3; ++a)
+                    {
+                        vectors[3 * nPairs + a] = static_cast<T>(sign * d[a]);
+                    }
+                    ++nPairs;
+                };
+                for (int64_t k = 0; k < nHalf; ++k)
                 {
-                    nlSamplesBuffer_[5 * outIdx + 0] = aj;
-                    nlSamplesBuffer_[5 * outIdx + 1] = ai;
-                    nlSamplesBuffer_[5 * outIdx + 2] = -n[0];
-                    nlSamplesBuffer_[5 * outIdx + 3] = -n[1];
-                    nlSamplesBuffer_[5 * outIdx + 4] = -n[2];
-                    nlVectorsBuffer_[3 * outIdx + 0] = -dx;
-                    nlVectorsBuffer_[3 * outIdx + 1] = -dy;
-                    nlVectorsBuffer_[3 * outIdx + 2] = -dz;
-                    ++outIdx;
+                    const int32_t ai    = pairlistMta_[2 * k];
+                    const int32_t aj    = pairlistMta_[2 * k + 1];
+                    const IVec&   n     = cellShiftsMta_[k];
+                    const RVec    shift = cellShiftVector(inputs.box_, n);
+                    double        d[3];
+                    for (int a = 0; a < 3; ++a)
+                    {
+                        d[a] = static_cast<double>(positions_[aj][a] - positions_[ai][a] + shift[a]);
+                    }
+                    if (strict && d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > cutoff2)
+                    {
+                        continue;
+                    }
+                    addPair(ai, aj, n, 1.0, d);
+                    if (full)
+                    {
+                        addPair(aj, ai, IVec(-n[XX], -n[YY], -n[ZZ]), -1.0, d);
+                    }
                 }
-            }
-            const int64_t nPairs = outIdx;
-            nlSamplesBuffer_.resize(static_cast<size_t>(nPairs) * 5);
-            nlVectorsBuffer_.resize(static_cast<size_t>(nPairs) * 3);
+                nlSamplesBuffer_.resize(static_cast<size_t>(nPairs) * 5);
+                vectors.resize(static_cast<size_t>(nPairs) * 3);
+                return std::make_unique<metatensor::SimpleDataArray<T>>(
+                        std::vector<uintptr_t>{ static_cast<uintptr_t>(nPairs), 3, 1 }, std::move(vectors));
+            };
+            auto values = modelIsDouble ? pairValues(0.0) : pairValues(0.0F);
 
-            auto samples = metatensor::Labels(
-                    data_->nlSampleNames,
-                    nPairs == 0 ? nullptr : nlSamplesBuffer_.data(),
-                    static_cast<size_t>(nPairs));
-            const int32_t                   xyzValues[3] = { 0, 1, 2 };
+            const size_t nPairs  = nlSamplesBuffer_.size() / 5;
+            auto         samples = metatensor::Labels(
+                    data_->nlSampleNames, nPairs == 0 ? nullptr : nlSamplesBuffer_.data(), nPairs);
+            const int32_t                   xyzValues[3]  = { 0, 1, 2 };
             const int32_t                   distanceValue = 0;
             std::vector<metatensor::Labels> components;
             components.push_back(metatensor::Labels({ "xyz" }, xyzValues, 3));
             auto properties = metatensor::Labels({ "distance" }, &distanceValue, 1);
-
-            // Pair vectors use the system length unit (nm).
-            std::unique_ptr<metatensor::DataArrayBase> values;
-            const auto shape = std::vector<uintptr_t>{ static_cast<uintptr_t>(nPairs), 3, 1 };
-            if (modelIsDouble)
-            {
-                std::vector<double> packed(static_cast<size_t>(nPairs) * 3);
-                for (size_t i = 0; i < packed.size(); ++i)
-                {
-                    packed[i] = nlVectorsBuffer_[i];
-                }
-                values = std::make_unique<metatensor::SimpleDataArray<double>>(shape, std::move(packed));
-            }
-            else
-            {
-                std::vector<float> packed(static_cast<size_t>(nPairs) * 3);
-                for (size_t i = 0; i < packed.size(); ++i)
-                {
-                    packed[i] = static_cast<float>(nlVectorsBuffer_[i]);
-                }
-                values = std::make_unique<metatensor::SimpleDataArray<float>>(shape, std::move(packed));
-            }
             system.add_pairs(request,
                              metatensor::TensorBlock(std::move(values), samples, components, properties));
         }
 
         std::optional<metatensor::Labels> selected;
-        if (useNewtonNL)
+        if (parallel)
         {
-            if (data_->selectedCount != numHomeMta_)
+            if (!data_->selectedAtoms.has_value()
+                || data_->selectedAtoms->count() != static_cast<size_t>(numHomeMta_))
             {
                 std::vector<int32_t> rows(static_cast<size_t>(numHomeMta_) * 2);
                 for (int32_t atom = 0; atom < numHomeMta_; ++atom)
@@ -1346,18 +1287,22 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                         { "system", "atom" },
                         numHomeMta_ == 0 ? nullptr : rows.data(),
                         static_cast<size_t>(numHomeMta_));
-                data_->selectedCount = numHomeMta_;
             }
             selected = data_->selectedAtoms;
         }
 
+        const bool computeVirial = outputs->forceWithVirial_.computeVirial_;
         std::vector<metatomic::System> systems;
         systems.push_back(std::move(system));
         std::vector<metatensor::TensorMap> modelOutputs;
         try
         {
-            modelOutputs = metatomic::execute_model(
-                    *data_->model, systems, selected, data_->requested, data_->checkConsistency);
+            modelOutputs = metatomic::execute_model(*data_->model,
+                                                    systems,
+                                                    selected,
+                                                    computeVirial ? data_->requestedWithVirial
+                                                                  : data_->requested,
+                                                    data_->checkConsistency);
         }
         catch (const std::exception& e)
         {
@@ -1388,10 +1333,10 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             }
         }
 
-        auto&               energyMap     = modelOutputs[data_->energyIndex];
-        const auto          nEnergyBlocks = energyMap.keys().count();
+        // Model gradients come in the system's nm and the requested kJ/mol.
+        auto&               energyMap = modelOutputs[data_->energyIndex];
         std::vector<double> forces(static_cast<size_t>(nAtoms) * 3, 0.0);
-        for (size_t blockId = 0; blockId < nEnergyBlocks; ++blockId)
+        for (size_t blockId = 0; blockId < energyMap.keys().count(); ++blockId)
         {
             auto block = energyMap.block_by_id(blockId);
             energy += modelIsDouble ? sum_block<double>(block) : sum_block<float>(block);
@@ -1399,90 +1344,80 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             {
                 continue;
             }
-            bool hasPositions = false;
-            bool hasStrain    = false;
-            for (const auto& name : block.gradients_list())
-            {
-                hasPositions = hasPositions || name == "positions";
-                hasStrain    = hasStrain || name == "strain";
-            }
-            if (!hasPositions || !hasStrain)
+            const auto gradients = block.gradients_list();
+            const auto has       = [&gradients](const std::string& name)
+            { return std::find(gradients.begin(), gradients.end(), name) != gradients.end(); };
+            if (!has("positions") || (computeVirial && !has("strain")))
             {
                 GMX_THROW(APIError(
-                        "Conservative Metatomic evaluation requires 'positions' and "
-                        "'strain' gradients on the energy block"));
+                        "The energy block of the metatomic model lacks the requested 'positions' "
+                        "or 'strain' gradient"));
             }
-            auto posGrad    = block.gradient("positions");
-            auto strainGrad = block.gradient("strain");
-            // metatomic returns gradients in the system's nm and requested kJ/mol.
-            const double forceScale = -1.0;
+            auto positionsGradient = block.gradient("positions");
             if (modelIsDouble)
             {
-                add_atom_rows<double>(posGrad, 2, nAtoms, forceScale, &forces);
-                add_strain<double>(strainGrad, virialMatrix);
+                add_atom_vectors<double>(positionsGradient, 2, nAtoms, &forces);
             }
             else
             {
-                add_atom_rows<float>(posGrad, 2, nAtoms, forceScale, &forces);
-                add_strain<float>(strainGrad, virialMatrix);
+                add_atom_vectors<float>(positionsGradient, 2, nAtoms, &forces);
+            }
+            if (computeVirial)
+            {
+                auto strainGradient = block.gradient("strain");
+                if (modelIsDouble)
+                {
+                    add_virial<double>(strainGradient, virialMatrix);
+                }
+                else
+                {
+                    add_virial<float>(strainGradient, virialMatrix);
+                }
             }
         }
-
-        if (data_->nonConservative)
+        if (!data_->nonConservative)
         {
-            auto&      forceMap = modelOutputs[data_->ncForceIndex.value()];
-            const auto nBlocks  = forceMap.keys().count();
-            for (size_t blockId = 0; blockId < nBlocks; ++blockId)
+            // the force is minus the positions gradient
+            std::transform(forces.begin(), forces.end(), forces.begin(), std::negate<>());
+        }
+        else
+        {
+            auto& forceMap = modelOutputs[data_->ncForceIndex.value()];
+            for (size_t blockId = 0; blockId < forceMap.keys().count(); ++blockId)
             {
                 auto block = forceMap.block_by_id(blockId);
                 if (modelIsDouble)
                 {
-                    add_atom_rows<double>(block, 1, nAtoms, 1.0, &forces);
+                    add_atom_vectors<double>(block, 1, nAtoms, &forces);
                 }
                 else
                 {
-                    add_atom_rows<float>(block, 1, nAtoms, 1.0, &forces);
+                    add_atom_vectors<float>(block, 1, nAtoms, &forces);
                 }
             }
-            if (data_->ncStressIndex.has_value())
+            if (computeVirial && data_->ncStressIndex.has_value())
             {
-                const double volume = inputs.box_[XX][XX]
-                                              * (inputs.box_[YY][YY] * inputs.box_[ZZ][ZZ]
-                                                 - inputs.box_[YY][ZZ] * inputs.box_[ZZ][YY])
-                                      - inputs.box_[XX][YY]
-                                                * (inputs.box_[YY][XX] * inputs.box_[ZZ][ZZ]
-                                                   - inputs.box_[YY][ZZ] * inputs.box_[ZZ][XX])
-                                      + inputs.box_[XX][ZZ]
-                                                * (inputs.box_[YY][XX] * inputs.box_[ZZ][YY]
-                                                   - inputs.box_[YY][YY] * inputs.box_[ZZ][XX]);
-                auto&      stressMap = modelOutputs[data_->ncStressIndex.value()];
-                const auto nStress   = stressMap.keys().count();
-                matrix     stressVirial;
+                auto&  stressMap = modelOutputs[data_->ncStressIndex.value()];
+                matrix stressVirial;
                 clear_mat(stressVirial);
-                for (size_t blockId = 0; blockId < nStress; ++blockId)
+                for (size_t blockId = 0; blockId < stressMap.keys().count(); ++blockId)
                 {
                     auto block = stressMap.block_by_id(blockId);
                     if (modelIsDouble)
                     {
-                        add_strain<double>(block, stressVirial);
+                        add_virial<double>(block, stressVirial);
                     }
                     else
                     {
-                        add_strain<float>(block, stressVirial);
+                        add_virial<float>(block, stressVirial);
                     }
                 }
-                for (int a = 0; a < 3; ++a)
-                {
-                    for (int b = 0; b < 3; ++b)
-                    {
-                        virialMatrix[a][b] = static_cast<real>(stressVirial[a][b] * volume);
-                    }
-                }
+                msmul(stressVirial, det(inputs.box_), virialMatrix);
             }
         }
 
         const double* forceData = forces.data();
-        if (data_->nonConservative || !mpiComm_.isParallel())
+        if (data_->nonConservative || !parallel)
         {
             const int32_t nApply = data_->nonConservative ? numHomeMta_ : nAtoms;
             for (int32_t i = 0; i < nApply; ++i)
@@ -1499,7 +1434,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
     }
 
-    if (useNewtonNL)
+    if (parallel)
     {
         if (numLocalMta_ != origNumLocalMta)
         {

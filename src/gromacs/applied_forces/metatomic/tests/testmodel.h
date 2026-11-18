@@ -34,6 +34,7 @@
 // Shared analytic model for unit tests and the dynamically loaded smoke-test plugin.
 #ifndef GMX_METATOMIC_TESTMODEL_H
 #define GMX_METATOMIC_TESTMODEL_H
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
@@ -61,12 +62,13 @@ constexpr int c_atomicNumber = 18;
 class PairModel final : public metatomic::BaseModel
 {
 public:
-    PairModel(const std::string& lengthUnit, const std::string& energyUnit, bool requestCharges) :
+    PairModel(const std::string& lengthUnit, const std::string& energyUnit, bool requestCharges, bool readsPairs) :
         lengthUnit_(lengthUnit),
         energyUnit_(energyUnit),
         toLength_(metatomic::unit_conversion_factor("nm", lengthUnit)),
         toEnergy_(metatomic::unit_conversion_factor("kJ/mol", energyUnit)),
         requestCharges_(requestCharges),
+        readsPairs_(readsPairs),
         pairs_(metatomic::PairListOptions::builder().cutoff(c_cutoff * toLength_).full_list(false).strict(false).build())
     {
     }
@@ -98,6 +100,10 @@ public:
     std::vector<metatomic::PairListOptions>
     requested_pair_lists(const std::vector<metatomic::Quantity>& /*requestedOutputs*/) const override
     {
+        if (!readsPairs_)
+        {
+            return {};
+        }
         return { pairs_ };
     }
 
@@ -117,7 +123,7 @@ public:
 
     std::vector<metatensor::TensorMap> execute_inner(const std::vector<metatomic::System>& systems,
                                                      std::optional<metatensor::Labels> selectedAtoms,
-                                                     const std::vector<metatomic::Quantity>& /*requestedOutputs*/) override
+                                                     const std::vector<metatomic::Quantity>& requestedOutputs) override
     {
         if (systems.size() != 1)
         {
@@ -196,16 +202,22 @@ public:
                                                            nAtoms),
                                         { metatensor::Labels({ "xyz" }, { { 0 }, { 1 }, { 2 } }) },
                                         metatensor::Labels({ "energy" }, { { 0 } })));
-        block.add_gradient(
-                "strain",
-                metatensor::TensorBlock(
-                        std::make_unique<metatensor::SimpleDataArray<double>>(
-                                std::vector<uintptr_t>{ 1, 3, 3, 1 },
-                                std::vector<double>(strainGradient.begin(), strainGradient.end())),
-                        metatensor::Labels({ "sample" }, { { 0 } }),
-                        { metatensor::Labels({ "xyz_1" }, { { 0 }, { 1 }, { 2 } }),
-                          metatensor::Labels({ "xyz_2" }, { { 0 }, { 1 }, { 2 } }) },
-                        metatensor::Labels({ "energy" }, { { 0 } })));
+        // Like models that only compute the strain gradient on request
+        const auto& gradients = requestedOutputs.front().gradients();
+        if (std::find(gradients.begin(), gradients.end(), metatomic::Gradients::Strain) != gradients.end())
+        {
+            ++strainRequests;
+            block.add_gradient(
+                    "strain",
+                    metatensor::TensorBlock(
+                            std::make_unique<metatensor::SimpleDataArray<double>>(
+                                    std::vector<uintptr_t>{ 1, 3, 3, 1 },
+                                    std::vector<double>(strainGradient.begin(), strainGradient.end())),
+                            metatensor::Labels({ "sample" }, { { 0 } }),
+                            { metatensor::Labels({ "xyz_1" }, { { 0 }, { 1 }, { 2 } }),
+                              metatensor::Labels({ "xyz_2" }, { { 0 }, { 1 }, { 2 } }) },
+                            metatensor::Labels({ "energy" }, { { 0 } })));
+        }
 
         std::vector<metatensor::TensorBlock> blocks;
         blocks.push_back(std::move(block));
@@ -214,12 +226,16 @@ public:
         return outputs;
     }
 
+    //! Number of evaluations asked for the strain gradient, by all PairModel instances
+    static inline int strainRequests = 0;
+
 private:
     std::string                lengthUnit_;
     std::string                energyUnit_;
     double                     toLength_;
     double                     toEnergy_;
     bool                       requestCharges_;
+    bool                       readsPairs_;
     metatomic::PairListOptions pairs_;
 };
 
@@ -236,7 +252,8 @@ inline mta_status_t loadPairModel(const char* loadFrom, const char* optionsJson,
         *model             = metatomic::BaseModel::to_mta_model(
                 std::make_unique<PairModel>(options.at("length_unit").get<std::string>(),
                                             options.at("energy_unit").get<std::string>(),
-                                            options.contains("request_charges")));
+                                            options.contains("request_charges"),
+                                            !options.contains("no_pairs")));
         return MTA_SUCCESS;
     }
     catch (const std::exception& e)

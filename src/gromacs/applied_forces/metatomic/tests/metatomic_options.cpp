@@ -107,7 +107,7 @@ public:
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant",
                                               std::string(""));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-uncertainty-threshold",
-                                              std::string("auto"));
+                                              std::string("10"));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-variant-energy-uq",
                                               std::string(""));
         mdpValueBuilder.rootObject().addValue(METATOMIC_MODULE_NAME + "-non-conservative",
@@ -209,17 +209,17 @@ TEST_F(MetatomicOptionsTest, GromppChecksUncertaintyThresholdAndModelOptions)
         KeyValueTreeBuilder builder;
         metatomicOptions.writeParamsToKvt(builder.rootObject());
     };
-    for (const char* threshold : { "auto", "off", "0", "2.5" })
+    for (const char* threshold : { "off", "0", "2.5", "10" })
     {
         metatomicOptions.params_.uncertaintyThreshold = threshold;
         EXPECT_NO_THROW(write()) << threshold;
     }
-    for (const char* threshold : { "0.1 eV", "-1", "" })
+    for (const char* threshold : { "auto", "no", "0.1 eV", "-1", "" })
     {
         metatomicOptions.params_.uncertaintyThreshold = threshold;
         EXPECT_THROW_GMX(write(), InconsistentInputError) << threshold;
     }
-    metatomicOptions.params_.uncertaintyThreshold = "auto";
+    metatomicOptions.params_.uncertaintyThreshold = "10";
 
     metatomicOptions.params_.modelOptions = "cutoff=5.0";
     EXPECT_NO_THROW(write());

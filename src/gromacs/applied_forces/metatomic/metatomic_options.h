@@ -91,18 +91,19 @@ struct MetatomicParameters
     std::string modelOptions;
     //! should metatomic run additional checks on the models inputs & outputs?
     bool checkConsistency = false;
-    //! Variant of the model outputs to use. Empty or "no" selects the default.
+    //! Variant of the model outputs to use. Empty selects the outputs without variant.
     std::string variant;
 
-    //! Uncertainty threshold: "auto" (100 meV/atom), "off", or a number in kJ/mol
-    std::string uncertaintyThreshold = "auto";
-    //! Variant override for energy_uncertainty output
+    //! Uncertainty threshold per atom: a number in kJ/mol, or "off"
+    std::string uncertaintyThreshold = "10";
+    //! Variant of the energy_uncertainty output: empty for variant, "off" for none
     std::string variantEnergyUq;
 
     //! Forces and stress come from model outputs rather than energy gradients.
     bool nonConservative = false;
-    //! Variant overrides for non-conservative outputs
+    //! Variant of the non_conservative_force output: empty for variant, "off" for none
     std::string variantNcForces;
+    //! Variant of the non_conservative_stress output: empty for variant, "off" for none
     std::string variantNcStress;
 
     //! stores atom group name for which metatomic should compute the energy
