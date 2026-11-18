@@ -36,7 +36,9 @@
  * \brief
  * Tests for functionality of the MetatomicOptions
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Eric Boittier <eric.boittier@epfl.ch>
+ * \author Rohit Goswami <r95g10@gmail.com>
+ * \author Philip Loche <ploche@physik.fu-berlin.de>
  * \ingroup module_applied_forces
  */
 

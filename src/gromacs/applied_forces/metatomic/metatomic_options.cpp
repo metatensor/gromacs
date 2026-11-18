@@ -35,7 +35,9 @@
  * \brief
  * Implements the options for the Metatomic MDModule.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Eric Boittier <eric.boittier@epfl.ch>
+ * \author Rohit Goswami <r95g10@gmail.com>
+ * \author Guillaume Fraux <guillaume.fraux@epfl.ch>
  * \ingroup module_applied_forces
  */
 #include "gmxpre.h"

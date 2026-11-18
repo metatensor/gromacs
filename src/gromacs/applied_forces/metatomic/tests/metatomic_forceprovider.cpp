@@ -40,7 +40,7 @@
  * chosen per test. Energies, forces and virials are compared with the same
  * potential evaluated here in GROMACS units.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Eric Boittier <eric.boittier@epfl.ch>
  * \ingroup module_applied_forces
  */
 #include "gmxpre.h"

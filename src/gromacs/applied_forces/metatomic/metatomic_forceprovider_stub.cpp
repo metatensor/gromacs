@@ -36,7 +36,9 @@
  * Stub implementation of the Metatomic Force Provider class.
  * Compiled when the metatomic C API library is not linked.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Eric Boittier <eric.boittier@epfl.ch>
+ * \author Rohit Goswami <r95g10@gmail.com>
+ * \author Guillaume Fraux <guillaume.fraux@epfl.ch>
  * \ingroup module_applied_forces
  */
 

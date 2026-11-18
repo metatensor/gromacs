@@ -39,7 +39,7 @@
  * with a along x and b in the xy plane. A metatomic pair sample stores the
  * integer cell shift n of its second atom, r_ij = x_j + n_a a + n_b b + n_c c - x_i.
  *
- * \author Metatensor developers <https://github.com/metatensor>
+ * \author Eric Boittier <eric.boittier@epfl.ch>
  * \ingroup module_applied_forces
  */
 #ifndef GMX_APPLIED_FORCES_METATOMIC_CELLSHIFT_H
