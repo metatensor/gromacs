@@ -56,28 +56,9 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
         # metatomic-plugin mdp option is empty
         set(GMX_METATOMIC_PLUGINS_DIR "${METATOMIC_PLUGINS_DIR}")
 
-        # Pre-installed libraries outside the GROMACS prefix need their own
-        # RPATH entry. Pip wheels put metatomic and metatensor in different
-        # site-packages directories.
-        foreach(_mta_target IN ITEMS metatomic::shared metatensor::shared)
-            if(NOT TARGET ${_mta_target})
-                continue()
-            endif()
-            unset(_mta_location)
-            string(TOUPPER "${CMAKE_BUILD_TYPE}" _mta_config)
-            foreach(_mta_property IN ITEMS IMPORTED_LOCATION_${_mta_config} IMPORTED_LOCATION IMPORTED_LOCATION_RELEASE
-                                           IMPORTED_LOCATION_RELWITHDEBINFO IMPORTED_LOCATION_DEBUG)
-                get_target_property(_mta_location ${_mta_target} ${_mta_property})
-                if(_mta_location)
-                    break()
-                endif()
-            endforeach()
-            if(_mta_location)
-                get_filename_component(_mta_libdir "${_mta_location}" DIRECTORY)
-                list(APPEND CMAKE_INSTALL_RPATH "${_mta_libdir}")
-            endif()
-        endforeach()
-        list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
+        # The install RPATH of the binaries gets the directories of libmetatomic and
+        # libmetatensor through CMAKE_INSTALL_RPATH_USE_LINK_PATH, set with shared
+        # libraries in the main CMakeLists.txt.
     elseif(GMX_METATOMIC STREQUAL "ON")
         message(FATAL_ERROR
             "metatomic with metatensor >= 0.2.4 was not found. Install "
