@@ -376,6 +376,11 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
         return;
     }
     // grompp rejects what mdrun would only find when it loads the model
+    if (params_.pluginPath.empty())
+    {
+        GMX_THROW(InconsistentInputError(
+                "metatomic-plugin must be auto or the path of a metatomic plugin library."));
+    }
     checkUncertaintyThreshold(params_.uncertaintyThreshold);
     const auto modelOptions = parseMetatomicModelOptions(params_.modelOptions);
     auto modelOptionsObject = treeBuilder.addObject("metatomic-model-loading-options");

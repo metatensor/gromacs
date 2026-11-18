@@ -3816,9 +3816,10 @@ are supported, screw periodic boundary conditions are not. This needs a
 
 .. mdp:: metatomic-plugin
 
-   Path of a metatomic-core plugin library, registered before the model is
-   loaded. When empty, :ref:`gmx mdrun` registers the plugins installed with
-   the libmetatomic GROMACS was built with, in ``<prefix>/libexec/metatomic``
+   (auto)
+   Path of a metatomic plugin library, registered before the model is loaded.
+   ``auto`` registers the plugins installed with the metatomic library
+   |Gromacs| was built with, in ``<prefix>/libexec/metatomic``
    (``<prefix>/bin`` on Windows). This includes the plugin of metatomic-torch,
    which loads TorchScript models exported with ``AtomisticModel``, when it is
    installed in the same prefix.

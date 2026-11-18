@@ -343,7 +343,7 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 {
     try
     {
-        if (!options_.params_.pluginPath.empty())
+        if (options_.params_.pluginPath != "auto")
         {
             metatomic::load_plugin(options_.params_.pluginPath);
         }

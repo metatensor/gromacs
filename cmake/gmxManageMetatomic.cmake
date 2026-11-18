@@ -53,7 +53,7 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
 
         list(APPEND GMX_COMMON_LIBRARIES metatomic::shared)
         # mdrun loads the plugins installed with this libmetatomic when the
-        # metatomic-plugin mdp option is empty
+        # metatomic-plugin mdp option is auto
         set(GMX_METATOMIC_PLUGINS_DIR "${METATOMIC_PLUGINS_DIR}")
 
         # The install RPATH of the binaries gets the directories of libmetatomic and

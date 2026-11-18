@@ -333,7 +333,7 @@ TEST_F(MetatomicForceProviderTest, LoadsInstalledPluginsWithoutPluginPath)
     {
         GTEST_SKIP() << plugin << " is not installed";
     }
-    options_.params_.pluginPath   = "";
+    options_.params_.pluginPath   = "auto";
     options_.params_.modelPath_   = "metatomic-lj-model";
     options_.params_.modelOptions = formatString(
             "sigma=%g epsilon=%g cutoff=%g atomic_type=%d length_unit=nm energy_unit=kJ/mol",

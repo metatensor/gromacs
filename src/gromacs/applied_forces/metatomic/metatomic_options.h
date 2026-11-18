@@ -85,8 +85,9 @@ struct MetatomicParameters
 
     //! model to load: the path of an exported model file, or what a plugin loads
     std::string modelPath_;
-    //! path of a metatomic plugin library registered before loading the model
-    std::string pluginPath;
+    //! path of a metatomic plugin library registered before loading the model, or "auto" for
+    //! the plugins installed with libmetatomic
+    std::string pluginPath = "auto";
     //! Whitespace-separated key=value options passed to the model-loading plugin
     std::string modelOptions;
     //! should metatomic run additional checks on the models inputs & outputs?
