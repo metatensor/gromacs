@@ -38,7 +38,11 @@
  * With domain decomposition, the model runs on each rank for its home atoms,
  * and needs every atom within its interaction range of them, in every
  * direction, and the pairs among these atoms. The halo of GROMACS is one-sided
- * and about rlist wide, so these functions find both from the positions.
+ * and about rlist wide, so the force provider exchanges its own: each rank
+ * describes where its home atoms are with a LatticeRegion, and sends the
+ * home atoms that may be near the region of another rank to that rank. The
+ * receiver keeps the atoms within range (atomsWithinRange) and finds the pairs
+ * (findPairs).
  *
  * \author Eric Boittier <eric.boittier@epfl.ch>
  * \ingroup module_applied_forces
@@ -59,6 +63,69 @@ struct t_pbc;
 
 namespace gmx
 {
+
+//! Coordinates of a point: fractional along the periodic box vectors, Cartesian along the others.
+using LatticePoint = std::array<double, 3>;
+
+/*! \brief Converts positions to lattice coordinates.
+ *
+ * A displacement of length r changes lattice coordinate d by at most r * perLength(d):
+ * the inverse of the distance between the lattice planes for a periodic direction,
+ * 1 for a Cartesian one.
+ */
+class LatticeCoordinates
+{
+public:
+    LatticeCoordinates(const matrix box, const std::array<uint8_t, 3>& periodic);
+
+    //! Lattice coordinates of \p x.
+    LatticePoint operator()(const RVec& x) const;
+    //! Largest change of coordinate \p d per unit of length.
+    double perLength(int d) const { return perLength_[d]; }
+
+private:
+    //! Inverse of the box with Cartesian unit vectors along the non-periodic directions.
+    std::array<std::array<double, 3>, 3> inverse_;
+    std::array<double, 3>                perLength_;
+};
+
+/*! \brief The interval spanned by a set of points along each lattice coordinate.
+ *
+ * Positions are not put in the box, so the interval of an atom near a periodic
+ * boundary stays contiguous. A region without points has lo > hi.
+ */
+struct LatticeRegion
+{
+    LatticePoint lo = { 1, 1, 1 };
+    LatticePoint hi = { 0, 0, 0 };
+
+    //! Whether the region holds no point.
+    bool empty() const { return lo[0] > hi[0]; }
+};
+
+//! The region spanned by \p points.
+LatticeRegion latticeRegion(ArrayRef<const LatticePoint> points);
+
+/*! \brief Whether \p point may be within \p range of a point of \p region.
+ *
+ * Conservative: true for every point within range, and maybe for some others.
+ * Periodic directions wrap, so a point near the other side of the box is near.
+ */
+bool isNearRegion(const LatticeRegion&          region,
+                  const LatticePoint&           point,
+                  const LatticeCoordinates&     lattice,
+                  const std::array<uint8_t, 3>& periodic,
+                  double                        range);
+
+/*! \brief Whether a point of \p b may be within \p range of a point of \p a.
+ *
+ * Conservative, like isNearRegion(); false when either region is empty.
+ */
+bool regionsAreNear(const LatticeRegion&          a,
+                    const LatticeRegion&          b,
+                    const LatticeCoordinates&     lattice,
+                    const std::array<uint8_t, 3>& periodic,
+                    double                        range);
 
 /*! \brief Indices of the \p candidates within \p range of an atom of \p home.
  *

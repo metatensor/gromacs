@@ -7,7 +7,8 @@ Serial runs check the model in nm and in Angstrom. Two-rank runs with domain
 decomposition (each atom on its own rank, so the pair crosses ranks) check a 3D
 periodic box and an xy-periodic slab whose pair is farther apart in z than half
 the box height, which must not be shifted along z. Four-rank runs check boxes of
-64 and 1000 atoms, whose forces are exchanged densely and as indexed tuples.
+64 and 1000 atoms, and domains of 0.7 nm, narrower than the 0.9 nm range of the
+model, so that atoms come from two domains away, and ranks without atoms.
 They use thread-MPI, or the launcher in GMX_MPIEXEC with a library-MPI build,
 e.g. GMX_MPIEXEC="mpirun -np".
 The classical Lennard-Jones parameters are zero, so only the plugin can produce
@@ -101,6 +102,9 @@ def main():
         ('dd-xy-slab', 'nm', 'xy', (3, 3, 1.2), [(1.3, 0.4, 0.2), (1.7, 0.4, 0.85)], (2, 1, 1)),
         ('dd-64', 'Angstrom', 'xyz', (2.8, 2.8, 2.8), lattice((4, 4, 4), (2.8, 2.8, 2.8)), (2, 2, 1)),
         ('dd-1000', 'nm', 'xyz', (7, 7, 7), lattice((10, 10, 10), (7, 7, 7)), (2, 2, 1)),
+        ('dd-thin', 'nm', 'xyz', (2.8, 2.8, 2.8), lattice((4, 4, 4), (2.8, 2.8, 2.8)), (4, 1, 1)),
+        # two of the four ranks have no atoms, and send and receive nothing
+        ('dd-empty-ranks', 'nm', 'xyz', (3, 3, 3), [(1.3, 0.4, 0.5), (1.7, 0.45, 0.6)], (4, 1, 1)),
     ]
     # pbc = xy needs walls with Verlet lists; zero LJ parameters make them exert no force
     walls = 'nwall = 2\nwall-type = 9-3\nwall-atomtype = Ar Ar\nwall-density = 1 1\n'
@@ -117,15 +121,17 @@ def main():
             (root / f'{name}.gro').write_text(
                 f'Argon\n{len(x)}\n{atoms}{box[0]:10.5f}{box[1]:10.5f}{box[2]:10.5f}\n')
             options = f'length_unit={unit} energy_unit=\"kJ/mol\"'
+            # the classical cutoffs bound the domain size; the model does not use them
+            cutoff = 0.5 if name in ('dd-thin', 'dd-empty-ranks') else 1.0
             (root / f'{name}.mdp').write_text(f'''integrator = md
 nsteps = 0
 dt = 0.001
 nstlist = 1
 cutoff-scheme = Verlet
 verlet-buffer-tolerance = -1
-rlist = 1.1
-rcoulomb = 1.0
-rvdw = 1.0
+rlist = {cutoff + 0.1:g}
+rcoulomb = {cutoff:g}
+rvdw = {cutoff:g}
 coulombtype = Cut-off
 vdwtype = Cut-off
 pbc = {pbc}

@@ -40,9 +40,10 @@
  * and the MTA atoms within the interaction range of them, with the pairs among
  * these atoms, and asks for the outputs of its home atoms only.
  *
- * Forces on home atoms are applied directly. Forces on the other atoms are sent
- * to their home ranks, as ForceWithVirial is not communicated by dd_move_f:
- * with a dense all-reduce below 1000 MTA atoms, else as indexed tuples.
+ * Each rank sends its home atoms that may be near the home atoms of another rank
+ * to that rank. Forces on home atoms are applied directly, and the forces on the
+ * other atoms go back to their home ranks the same way, as ForceWithVirial is not
+ * communicated by dd_move_f.
  *
  * \author Eric Boittier <eric.boittier@epfl.ch>
  * \author Rohit Goswami <r95g10@gmail.com>
@@ -66,6 +67,7 @@
 #include <functional>
 #include <metatensor.hpp>
 #include <metatomic.hpp>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -648,7 +650,6 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
     mtaToGlobalMta_.clear();
     atomNumbers_.clear();
     gmxLocalToMtaIdx_.clear();
-    globalMtaToLocalHome_.clear();
 
     if (mpiComm_.isParallel())
     {
@@ -697,14 +698,6 @@ void MetatomicForceProvider::gatherAtomNumbersIndices(const MDModulesAtomsRedist
             atomNumbers_[i]               = options_.params_.atoms_.atom[globalIdx].atomnumber;
             gmxLocalToMtaIdx_[localIndex] = i;
         }
-    }
-
-    // Build reverse map: global MTA index -> local home model index.
-    // Used by sparse force distribution to route incoming forces to home atoms.
-    globalMtaToLocalHome_.reserve(numHomeMta_);
-    for (int32_t i = 0; i < numHomeMta_; i++)
-    {
-        globalMtaToLocalHome_[mtaToGlobalMta_[i]] = i;
     }
 
     GMX_RELEASE_ASSERT(std::count(atomNumbers_.begin(), atomNumbers_.end(), 0) == 0,
@@ -765,38 +758,62 @@ void MetatomicForceProvider::setPairlist(const MDModulesPairlistConstructedSigna
 }
 
 
+/*! \brief Sends \p counts[r] blocks of \p width numbers of \p send to rank r.
+ *
+ * \p receivedCounts[r] blocks come from rank r, in rank order in the result.
+ */
+static std::vector<double> exchangeBlocks(const MpiComm&             mpiComm,
+                                          const std::vector<double>& send,
+                                          const std::vector<int>&    counts,
+                                          const std::vector<int>&    receivedCounts,
+                                          int                        width)
+{
+#if GMX_MPI
+    const int        numRanks = mpiComm.size();
+    std::vector<int> sendCounts(numRanks), sendOffsets(numRanks), receiveCounts(numRanks),
+            receiveOffsets(numRanks);
+    int numSent     = 0;
+    int numReceived = 0;
+    for (int r = 0; r < numRanks; ++r)
+    {
+        sendCounts[r]     = width * counts[r];
+        sendOffsets[r]    = numSent;
+        receiveCounts[r]  = width * receivedCounts[r];
+        receiveOffsets[r] = numReceived;
+        numSent += sendCounts[r];
+        numReceived += receiveCounts[r];
+    }
+    // thread-MPI rejects null buffers, which empty vectors give
+    const double        nothing = 0;
+    std::vector<double> received(numReceived + 1);
+    MPI_Alltoallv(send.empty() ? &nothing : send.data(),
+                  sendCounts.data(),
+                  sendOffsets.data(),
+                  MPI_DOUBLE,
+                  received.data(),
+                  receiveCounts.data(),
+                  receiveOffsets.data(),
+                  MPI_DOUBLE,
+                  mpiComm.comm());
+    received.pop_back();
+    return received;
+#else
+    GMX_UNUSED_VALUE(mpiComm);
+    GMX_UNUSED_VALUE(send);
+    GMX_UNUSED_VALUE(counts);
+    GMX_UNUSED_VALUE(receivedCounts);
+    GMX_UNUSED_VALUE(width);
+    GMX_RELEASE_ASSERT(false, "Parallel metatomic evaluation needs an MPI build");
+    return {};
+#endif
+}
+
 void MetatomicForceProvider::gatherEnvironment(const matrix box)
 {
-    const auto&   mtaIndices  = options_.params_.mtaIndices_;
-    const int32_t numTotalMta = static_cast<int32_t>(mtaIndices.size());
-
-    // Home atoms are owned by exactly one rank, so a sum of the home positions scattered
-    // into a dense array gives all positions.
-    std::vector<double> allPositions(3 * numTotalMta, 0.0);
-    std::vector<bool>   isHome(numTotalMta, false);
-    for (int32_t i = 0; i < numHomeMta_; i++)
-    {
-        const int32_t g = mtaToGlobalMta_[i];
-        isHome[g]       = true;
-        for (int d = 0; d < 3; d++)
-        {
-            allPositions[3 * g + d] = positions_[i][d];
-        }
-    }
-    mpiComm_.sumReduce(static_cast<std::size_t>(3 * numTotalMta), allPositions.data());
-
-    std::vector<int32_t> others;
-    std::vector<RVec>    otherPositions;
-    for (int32_t g = 0; g < numTotalMta; g++)
-    {
-        if (!isHome[g])
-        {
-            others.push_back(g);
-            otherPositions.emplace_back(static_cast<real>(allPositions[3 * g]),
-                                        static_cast<real>(allPositions[3 * g + 1]),
-                                        static_cast<real>(allPositions[3 * g + 2]));
-        }
-    }
+    const auto&  mtaIndices = options_.params_.mtaIndices_;
+    const int    numRanks   = mpiComm_.size();
+    const int    rank       = mpiComm_.rank();
+    const double range      = data_->environmentRangeNm;
 
     t_pbc pbc;
     set_pbc(&pbc, data_->pbcType, box);
@@ -809,12 +826,78 @@ void MetatomicForceProvider::gatherEnvironment(const matrix box)
                 data_->maxCutoffNm)));
     }
 
-    const auto home = ArrayRef<const RVec>(positions_).subArray(0, numHomeMta_);
-    for (const int32_t k : atomsWithinRange(&pbc, home, otherPositions, data_->environmentRangeNm))
+    // The region of the home atoms of every rank: a flag and the bounds, 7 numbers per rank.
+    const LatticeCoordinates  lattice(box, data_->pbc);
+    std::vector<LatticePoint> homePoints;
+    for (int32_t i = 0; i < numHomeMta_; i++)
     {
-        positions_.push_back(otherPositions[k]);
-        atomNumbers_.push_back(options_.params_.atoms_.atom[mtaIndices[others[k]]].atomnumber);
-        mtaToGlobalMta_.push_back(others[k]);
+        homePoints.push_back(lattice(positions_[i]));
+    }
+    const LatticeRegion own = latticeRegion(homePoints);
+    std::vector<double> regions(7 * numRanks, 0.0);
+    if (!own.empty())
+    {
+        regions[7 * rank] = 1;
+        std::copy(own.lo.begin(), own.lo.end(), regions.begin() + 7 * rank + 1);
+        std::copy(own.hi.begin(), own.hi.end(), regions.begin() + 7 * rank + 4);
+    }
+    mpiComm_.sumReduce(regions.size(), regions.data());
+
+    // Each rank gets the home atoms that may be within range of its own home atoms, as
+    // (global MTA index, x, y, z).
+    sendAtoms_.clear();
+    sendCounts_.assign(numRanks, 0);
+    std::vector<double> sent;
+    for (int r = 0; r < numRanks; ++r)
+    {
+        if (r == rank || regions[7 * r] == 0)
+        {
+            continue;
+        }
+        LatticeRegion other;
+        std::copy(regions.begin() + 7 * r + 1, regions.begin() + 7 * r + 4, other.lo.begin());
+        std::copy(regions.begin() + 7 * r + 4, regions.begin() + 7 * r + 7, other.hi.begin());
+        if (!regionsAreNear(other, own, lattice, data_->pbc, range))
+        {
+            continue;
+        }
+        for (int32_t i = 0; i < numHomeMta_; i++)
+        {
+            if (isNearRegion(other, homePoints[i], lattice, data_->pbc, range))
+            {
+                sendAtoms_.push_back(i);
+                sendCounts_[r]++;
+                sent.insert(sent.end(),
+                            { static_cast<double>(mtaToGlobalMta_[i]),
+                              positions_[i][XX],
+                              positions_[i][YY],
+                              positions_[i][ZZ] });
+            }
+        }
+    }
+    receivedCounts_.assign(numRanks, 0);
+#if GMX_MPI
+    MPI_Alltoall(sendCounts_.data(), 1, MPI_INT, receivedCounts_.data(), 1, MPI_INT, mpiComm_.comm());
+#endif
+    const auto received = exchangeBlocks(mpiComm_, sent, sendCounts_, receivedCounts_, 4);
+
+    // The environment: the received atoms within range of a home atom.
+    std::vector<RVec> candidates;
+    for (size_t q = 0; 4 * q < received.size(); q++)
+    {
+        candidates.emplace_back(static_cast<real>(received[4 * q + 1]),
+                                static_cast<real>(received[4 * q + 2]),
+                                static_cast<real>(received[4 * q + 3]));
+    }
+    const auto home = ArrayRef<const RVec>(positions_).subArray(0, numHomeMta_);
+    environmentSources_.clear();
+    for (const int32_t q : atomsWithinRange(&pbc, home, candidates, range))
+    {
+        const auto global = static_cast<int32_t>(received[4 * q]);
+        positions_.push_back(candidates[q]);
+        atomNumbers_.push_back(options_.params_.atoms_.atom[mtaIndices[global]].atomnumber);
+        mtaToGlobalMta_.push_back(global);
+        environmentSources_.push_back(q);
     }
     numLocalMta_ = static_cast<int32_t>(positions_.size());
 
@@ -822,110 +905,36 @@ void MetatomicForceProvider::gatherEnvironment(const matrix box)
 }
 
 
-void MetatomicForceProvider::distributeNonHomeForces(const double* forces, ForceProviderOutput* outputs)
+void MetatomicForceProvider::returnEnvironmentForces(ArrayRef<const double> forces,
+                                                     ForceProviderOutput*   outputs)
 {
-    const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
-
-    // A dense all-reduce is cheaper than the indexed exchange for small systems.
-    if (numTotalMta < 1000)
-    {
-        // Dense fallback: allocate N_total buffer, scatter, allreduce, readback.
-        std::vector<double> denseForces(3 * numTotalMta, 0.0);
-        for (int32_t i = 0; i < numLocalMta_; i++)
-        {
-            int32_t g              = mtaToGlobalMta_[i];
-            denseForces[3 * g]     = forces[3 * i];
-            denseForces[3 * g + 1] = forces[3 * i + 1];
-            denseForces[3 * g + 2] = forces[3 * i + 2];
-        }
-        mpiComm_.sumReduce(static_cast<std::size_t>(3 * numTotalMta), denseForces.data());
-
-        for (int32_t i = 0; i < numHomeMta_; i++)
-        {
-            int32_t gmxIdx = mtaToGmxLocal_[i];
-            int32_t g      = mtaToGlobalMta_[i];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(denseForces[3 * g]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(denseForces[3 * g + 1]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(denseForces[3 * g + 2]);
-        }
-        return;
-    }
-
-    // Sparse path: apply home forces directly, exchange only non-home forces.
-
-    // Step 1: Apply home atom forces directly (no communication needed).
+    auto&& force = outputs->forceWithVirial_.force_;
     for (int32_t i = 0; i < numHomeMta_; i++)
     {
-        int32_t gmxIdx = mtaToGmxLocal_[i];
-        outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forces[3 * i]);
-        outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forces[3 * i + 1]);
-        outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forces[3 * i + 2]);
-    }
-
-    // Step 2: Pack non-home forces as sparse tuples (globalMtaIdx, fx, fy, fz).
-    // Each tuple is 4 doubles: [globalMtaIdx_as_double, fx, fy, fz].
-    const int32_t       numNonHome = numLocalMta_ - numHomeMta_;
-    std::vector<double> sendBuf(4 * numNonHome);
-    for (int32_t i = numHomeMta_; i < numLocalMta_; i++)
-    {
-        int32_t k          = i - numHomeMta_;
-        sendBuf[4 * k]     = static_cast<double>(mtaToGlobalMta_[i]);
-        sendBuf[4 * k + 1] = forces[3 * i];
-        sendBuf[4 * k + 2] = forces[3 * i + 1];
-        sendBuf[4 * k + 3] = forces[3 * i + 2];
-    }
-
-    // Step 3: Exchange counts via allreduce on a P-element array.
-    const int        numRanks = mpiComm_.size();
-    std::vector<int> counts(numRanks, 0);
-    counts[mpiComm_.rank()] = numNonHome;
-    mpiComm_.sumReduce(ArrayRef<int>(counts));
-
-    // Step 4: Allgatherv via Gatherv + Bcast (thread-MPI compatible).
-    int              totalNonHome = 0;
-    std::vector<int> displs(numRanks);
-    for (int r = 0; r < numRanks; r++)
-    {
-        displs[r] = totalNonHome;
-        totalNonHome += counts[r];
-    }
-
-    // Scale counts/displs to doubles (4 per tuple)
-    std::vector<int> dcounts(numRanks), ddispls(numRanks);
-    for (int r = 0; r < numRanks; r++)
-    {
-        dcounts[r] = 4 * counts[r];
-        ddispls[r] = 4 * displs[r];
-    }
-
-    std::vector<double> recvBuf(4 * totalNonHome);
-#if GMX_MPI
-    MPI_Gatherv(sendBuf.data(),
-                4 * numNonHome,
-                MPI_DOUBLE,
-                recvBuf.data(),
-                dcounts.data(),
-                ddispls.data(),
-                MPI_DOUBLE,
-                mpiComm_.mainRank(),
-                mpiComm_.comm());
-    MPI_Bcast(recvBuf.data(), 4 * totalNonHome, MPI_DOUBLE, mpiComm_.mainRank(), mpiComm_.comm());
-#else
-    GMX_RELEASE_ASSERT(false, "Parallel metatomic evaluation needs an MPI build");
-#endif
-
-    // Step 5: Scan received tuples for forces destined for our home atoms.
-    for (int t = 0; t < totalNonHome; t++)
-    {
-        int32_t globalMtaIdx = static_cast<int32_t>(recvBuf[4 * t]);
-        auto    it           = globalMtaToLocalHome_.find(globalMtaIdx);
-        if (it != globalMtaToLocalHome_.end())
+        for (int d = 0; d < 3; d++)
         {
-            int32_t localHomeIdx = it->second;
-            int32_t gmxIdx       = mtaToGmxLocal_[localHomeIdx];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(recvBuf[4 * t + 1]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(recvBuf[4 * t + 2]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(recvBuf[4 * t + 3]);
+            force[mtaToGmxLocal_[i]][d] += static_cast<real>(forces[3 * i + d]);
+        }
+    }
+
+    // The forces on the environment go back in the order its atoms came in, zero for
+    // the atoms that were not in range.
+    const int numReceived = std::accumulate(receivedCounts_.begin(), receivedCounts_.end(), 0);
+    std::vector<double> back(3 * numReceived, 0.0);
+    for (int32_t e = numHomeMta_; e < numLocalMta_; e++)
+    {
+        const int32_t q = environmentSources_[e - numHomeMta_];
+        for (int d = 0; d < 3; d++)
+        {
+            back[3 * q + d] = forces[3 * e + d];
+        }
+    }
+    const auto returned = exchangeBlocks(mpiComm_, back, receivedCounts_, sendCounts_, 3);
+    for (size_t k = 0; k < sendAtoms_.size(); k++)
+    {
+        for (int d = 0; d < 3; d++)
+        {
+            force[mtaToGmxLocal_[sendAtoms_[k]]][d] += static_cast<real>(returned[3 * k + d]);
         }
     }
 }
@@ -1243,7 +1252,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     else
     {
-        distributeNonHomeForces(forceData, outputs);
+        returnEnvironmentForces(forces, outputs);
     }
 
     if (parallel)

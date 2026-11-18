@@ -43,7 +43,6 @@
 
 #pragma once
 
-#include <unordered_map>
 #include <vector>
 
 #include "gromacs/mdtypes/iforceprovider.h"
@@ -73,18 +72,19 @@ class PlainPairlistRanges;
  *
  * The energy of a home atom depends on the atoms within the interaction range
  * of the model, in every direction, and on the pairs among them (message
- * passing). The DD halo of GROMACS is one-sided and about rlist wide, so it is
- * not used: the positions of the home MTA atoms of all ranks are all-reduced,
- * and each rank takes the MTA atoms within the interaction range of its home
- * atoms, and finds the pairs among them itself (gatherEnvironment). The model
- * runs on these atoms and returns the outputs of the home atoms only
- * (`selected_atoms`), so each energy is counted once.
+ * passing). The DD halo of GROMACS is one-sided and about rlist wide, so the
+ * force provider exchanges its own (gatherEnvironment): the ranks share the
+ * region of their home MTA atoms (7 numbers each), and each rank sends to the
+ * others the home atoms that may be within range of their regions. The receiver
+ * keeps the atoms within range of its home atoms, and finds the pairs among all
+ * of these itself. The model runs on these atoms and returns the outputs of the
+ * home atoms only (`selected_atoms`), so each energy is counted once.
  *
  * **Forces**: `execute_model` returns the positions gradient (dE/dx) on every
  * atom the model saw (home + environment). The force is its negative.
  * ForceWithVirial is not communicated by dd_move_f, so home forces are applied
- * directly and the others are sent to their home ranks. Below 1000 metatomic
- * atoms the exchange is a dense all-reduce.
+ * directly and the others go back to their home ranks (returnEnvironmentForces),
+ * reversing the exchange of the positions.
  *
  * **Units**: systems and pair vectors use nm, with energy requested in kJ/mol.
  * Metatomic converts the model's outputs and gradients to these units.
@@ -129,20 +129,21 @@ private:
 
     /*! \brief Add the environment of the home atoms, and the pairs among all, with DD.
      *
-     * All-reduces the positions of the home MTA atoms of all ranks, appends the MTA
-     * atoms within the environment range of the home atoms (the caller removes them
-     * after the evaluation), and fills pairlistMta_ and cellShiftsMta_ with the
+     * Exchanges the home MTA atoms near the regions of the other ranks, appends the
+     * received atoms within the environment range of the home atoms (the caller removes
+     * them after the evaluation), and fills pairlistMta_ and cellShiftsMta_ with the
      * minimum-image pairs among the home and appended atoms.
      *
      * \param[in] box  Current simulation box.
      */
     void gatherEnvironment(const matrix box);
 
-    //! Distribute non-home forces via sparse indexed exchange (allgatherv pattern).
-    //! Home forces are applied directly; only the forces on other atoms are communicated.
-    //! \param[in] forces   Flat force array [numLocalMta_ * 3], row-major (fx,fy,fz).
-    //! \param[out] outputs Force provider output to accumulate into.
-    void distributeNonHomeForces(const double* forces, ForceProviderOutput* outputs);
+    /*! \brief Add the forces on the home atoms, with those computed on other ranks, with DD.
+     *
+     * \param[in] forces   Forces on the atoms the model saw, flat [numLocalMta_ * 3].
+     * \param[out] outputs Force provider output to accumulate into.
+     */
+    void returnEnvironmentForces(ArrayRef<const double> forces, ForceProviderOutput* outputs);
 
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
@@ -164,16 +165,18 @@ private:
     //! Used for position gathering and force scattering.
     std::vector<int32_t> mtaToGmxLocal_;
     //! Maps model index [0, numLocalMta_) -> global MTA index [0, N_total_mta).
-    //! Used for scatter/gather in the global force buffer during MPI all-reduce.
     std::vector<int32_t> mtaToGlobalMta_;
     //! Maps GROMACS local buffer index -> MTA model index, -1 for other atoms.
     //! Without DD only, to read the GROMACS pairlist.
     std::vector<int32_t> gmxLocalToMtaIdx_;
 
-    //! Maps global MTA index -> local home model index (only home atoms).
-    //! Built in gatherAtomNumbersIndices(), used by distributeNonHomeForces()
-    //! to identify incoming forces destined for this rank's home atoms.
-    std::unordered_map<int32_t, int32_t> globalMtaToLocalHome_;
+    //! With DD, the home atoms sent to other ranks, ordered by rank, and how many to each.
+    std::vector<int32_t> sendAtoms_;
+    std::vector<int>     sendCounts_;
+    //! With DD, how many atoms came from each rank, and for each environment atom (model
+    //! index numHomeMta_ and up) its place among them, for sending its force back.
+    std::vector<int>     receivedCounts_;
+    std::vector<int32_t> environmentSources_;
 
     //! Pairlist in MTA model indices, flat [i0,j0, i1,j1, ...]. Without DD, built from the
     //! GROMACS interacting and excluded pairlists with negated cell shifts; with DD by findPairs.

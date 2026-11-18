@@ -42,6 +42,11 @@
 
 #include "metatomic_environment.h"
 
+#include <cmath>
+
+#include <algorithm>
+
+#include "gromacs/math/boxmatrix.h"
 #include "gromacs/selection/nbsearch.h"
 #include "gromacs/utility/vec.h"
 
@@ -49,6 +54,137 @@
 
 namespace gmx
 {
+
+LatticeCoordinates::LatticeCoordinates(const matrix box, const std::array<uint8_t, 3>& periodic)
+{
+    // Box matrices are lower triangular, so replacing a non-periodic vector by its
+    // Cartesian unit vector keeps an invertible box matrix (pbc = xy has a and b in the
+    // xy plane).
+    matrix lattice;
+    clear_mat(lattice);
+    for (int d = 0; d < DIM; ++d)
+    {
+        if (periodic[d])
+        {
+            copy_rvec(box[d], lattice[d]);
+        }
+        else
+        {
+            lattice[d][d] = 1;
+        }
+    }
+    matrix inverse;
+    invertBoxMatrix(lattice, inverse);
+    for (int d = 0; d < DIM; ++d)
+    {
+        double sum = 0;
+        for (int k = 0; k < DIM; ++k)
+        {
+            inverse_[k][d] = inverse[k][d];
+            sum += inverse_[k][d] * inverse_[k][d];
+        }
+        // the length of a reciprocal vector is the inverse of the distance between planes
+        perLength_[d] = std::sqrt(sum);
+    }
+}
+
+LatticePoint LatticeCoordinates::operator()(const RVec& x) const
+{
+    LatticePoint u = { 0, 0, 0 };
+    for (int d = 0; d < DIM; ++d)
+    {
+        for (int k = 0; k < DIM; ++k)
+        {
+            u[d] += x[k] * inverse_[k][d];
+        }
+    }
+    return u;
+}
+
+LatticeRegion latticeRegion(ArrayRef<const LatticePoint> points)
+{
+    LatticeRegion region;
+    if (points.empty())
+    {
+        return region;
+    }
+    region.lo = points[0];
+    region.hi = points[0];
+    for (const auto& u : points)
+    {
+        for (int d = 0; d < DIM; ++d)
+        {
+            region.lo[d] = std::min(region.lo[d], u[d]);
+            region.hi[d] = std::max(region.hi[d], u[d]);
+        }
+    }
+    return region;
+}
+
+namespace
+{
+
+//! Whether \p u is in [lo, hi], modulo 1 along a periodic direction.
+bool inInterval(double u, double lo, double hi, bool periodic)
+{
+    if (!periodic)
+    {
+        return lo <= u && u <= hi;
+    }
+    if (hi - lo >= 1)
+    {
+        return true;
+    }
+    return u - lo - std::floor(u - lo) <= hi - lo;
+}
+
+} // namespace
+
+bool isNearRegion(const LatticeRegion&          region,
+                  const LatticePoint&           point,
+                  const LatticeCoordinates&     lattice,
+                  const std::array<uint8_t, 3>& periodic,
+                  double                        range)
+{
+    if (region.empty())
+    {
+        return false;
+    }
+    for (int d = 0; d < DIM; ++d)
+    {
+        const double margin = range * lattice.perLength(d);
+        if (!inInterval(point[d], region.lo[d] - margin, region.hi[d] + margin, periodic[d] != 0))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool regionsAreNear(const LatticeRegion&          a,
+                    const LatticeRegion&          b,
+                    const LatticeCoordinates&     lattice,
+                    const std::array<uint8_t, 3>& periodic,
+                    double                        range)
+{
+    if (a.empty() || b.empty())
+    {
+        return false;
+    }
+    for (int d = 0; d < DIM; ++d)
+    {
+        // Two intervals overlap when the start of one is in the other, also on a circle.
+        const double margin = range * lattice.perLength(d);
+        const double lo     = a.lo[d] - margin;
+        const double hi     = a.hi[d] + margin;
+        const bool   wraps  = periodic[d] != 0;
+        if (!inInterval(b.lo[d], lo, hi, wraps) && !inInterval(lo, b.lo[d], b.hi[d], wraps))
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
 std::vector<int32_t> atomsWithinRange(const t_pbc*         pbc,
                                       ArrayRef<const RVec> home,

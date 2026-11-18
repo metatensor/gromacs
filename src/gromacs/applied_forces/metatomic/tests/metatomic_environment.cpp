@@ -48,6 +48,7 @@
 #include <algorithm>
 #include <array>
 #include <set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -208,6 +209,124 @@ TEST_P(MetatomicEnvironment, FindsTheAtomsWithinRangeOfTheHomeAtoms)
     EXPECT_LT(expected.size(), candidates.size());
     EXPECT_EQ(found, expected);
     EXPECT_TRUE(atomsWithinRange(&pbc, home, candidates, 0).empty());
+}
+
+//! The atoms of \p x whose wrapped lattice coordinate along a is in [lo, hi), not moved by a box vector.
+std::vector<RVec> slab(const std::vector<RVec>& x, const LatticeCoordinates& lattice, double lo, double hi)
+{
+    std::vector<RVec> atoms;
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const double u = lattice(x[i])[XX];
+        if (i % 7 != 0 && lo <= u - std::floor(u) && u - std::floor(u) < hi)
+        {
+            atoms.push_back(x[i]);
+        }
+    }
+    return atoms;
+}
+
+std::vector<LatticePoint> latticePoints(const std::vector<RVec>& x, const LatticeCoordinates& lattice)
+{
+    std::vector<LatticePoint> points;
+    for (const auto& r : x)
+    {
+        points.push_back(lattice(r));
+    }
+    return points;
+}
+
+TEST_P(MetatomicEnvironment, LatticeRegionsMissNoAtomWithinRange)
+{
+    const auto&              periodic = GetParam().periodic;
+    const auto               x        = spreadAtoms(200);
+    const LatticeCoordinates lattice(c_box, periodic);
+    const auto               group  = slab(x, lattice, 0.1, 0.4);
+    const auto               region = latticeRegion(latticePoints(group, lattice));
+    const double             range  = 0.5;
+    ASSERT_FALSE(group.empty());
+
+    int near = 0;
+    int far  = 0;
+    for (const auto& r : x)
+    {
+        const bool withinRange =
+                std::any_of(group.begin(),
+                            group.end(),
+                            [&](const RVec& g) { return minimumDistance(periodic, g, r) <= range; });
+        const bool nearRegion = isNearRegion(region, lattice(r), lattice, periodic, range);
+        if (withinRange)
+        {
+            EXPECT_TRUE(nearRegion) << r[XX] << " " << r[YY] << " " << r[ZZ];
+        }
+        (nearRegion ? near : far) += 1;
+    }
+    // the test is not trivially true
+    EXPECT_GT(far, 0);
+    EXPECT_GT(near, static_cast<int>(group.size()));
+    EXPECT_FALSE(isNearRegion(LatticeRegion(), lattice(x[1]), lattice, periodic, range));
+
+    // Points just within range of a group atom, in 100 directions spread over the sphere,
+    // test the margin along every direction.
+    int missed = 0;
+    for (const auto& g : group)
+    {
+        for (int k = 0; k < 100; ++k)
+        {
+            const double z   = 1 - (2 * k + 1) / 100.0;
+            const double phi = k * 2.399963229728653;
+            const double rho = std::sqrt(1 - z * z);
+            const RVec   probe =
+                    g + RVec(rho * std::cos(phi), rho * std::sin(phi), z) * static_cast<real>(0.95 * range);
+            missed += isNearRegion(region, lattice(probe), lattice, periodic, range) ? 0 : 1;
+        }
+    }
+    EXPECT_EQ(missed, 0);
+}
+
+TEST_P(MetatomicEnvironment, LatticeRegionsAreNearWhenTheirAtomsAre)
+{
+    const auto&              periodic = GetParam().periodic;
+    const auto               x        = spreadAtoms(200);
+    const LatticeCoordinates lattice(c_box, periodic);
+    // Without periodicity the lattice coordinates are Cartesian, so the slabs are picked
+    // along the fractional coordinate of the box.
+    const LatticeCoordinates fractional(c_box, { 1, 1, 1 });
+    const auto&              select = periodic[XX] ? lattice : fractional;
+    const auto               slabA  = slab(x, select, 0.1, 0.3);
+    const auto               slabB  = slab(x, select, 0.55, 0.75);
+    const auto               slabC  = slab(x, select, 0.3, 0.5);
+    const auto               a      = latticeRegion(latticePoints(slabA, lattice));
+    const auto               b      = latticeRegion(latticePoints(slabB, lattice));
+    const auto               c      = latticeRegion(latticePoints(slabC, lattice));
+
+    // never false when two atoms are within range
+    for (const double range : { 0.3, 1.0 })
+    {
+        for (const auto& [first, second, atomsFirst, atomsSecond] :
+             { std::tuple(a, b, slabA, slabB), std::tuple(a, c, slabA, slabC), std::tuple(b, c, slabB, slabC) })
+        {
+            bool withinRange = false;
+            for (const auto& r : atomsFirst)
+            {
+                for (const auto& q : atomsSecond)
+                {
+                    withinRange = withinRange || minimumDistance(periodic, r, q) <= range;
+                }
+            }
+            if (withinRange)
+            {
+                EXPECT_TRUE(regionsAreNear(first, second, lattice, periodic, range)) << range;
+                EXPECT_TRUE(regionsAreNear(second, first, lattice, periodic, range)) << range;
+            }
+        }
+    }
+    if (periodic[XX])
+    {
+        // slabs 0.25 apart in a (0.75 nm in a 3 nm box) are not near with a range of 0.3 nm
+        EXPECT_FALSE(regionsAreNear(a, b, lattice, periodic, 0.3));
+    }
+    EXPECT_FALSE(regionsAreNear(a, LatticeRegion(), lattice, periodic, 1.0));
 }
 
 INSTANTIATE_TEST_SUITE_P(Periodicities,
