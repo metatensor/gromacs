@@ -138,7 +138,7 @@ public:
         const auto& system  = systems[0];
         const auto  nAtoms  = system.size();
         auto        pairs   = system.pairs(pairs_);
-        const auto  samples = pairs.samples().values_cpu();
+        const auto  samples = pairs.samples().values();
         const auto  vectors = pairs.values<double>();
 
         const double sigma   = c_sigma * toLength_;
