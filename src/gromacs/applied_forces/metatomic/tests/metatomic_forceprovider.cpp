@@ -342,9 +342,8 @@ TEST_F(MetatomicForceProviderTest, LoadsInstalledPluginsWithoutPluginPath)
             c_epsilon,
             c_cutoff,
             c_atomicNumber);
-    // The model loads, as a failure to load would be an APIError, but its energy has no strain
-    // gradient, which GROMACS needs for the virial.
-    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), InconsistentInputError);
+    // The energy of the model has the positions and strain gradients GROMACS needs.
+    EXPECT_NO_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_));
 }
 
 TEST_F(MetatomicForceProviderTest, FailsOnUnknownModel)
