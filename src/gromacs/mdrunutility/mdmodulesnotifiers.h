@@ -221,14 +221,14 @@ struct MDModulesEnergyOutputToNNPotRequestChecker
     bool energyOutputToNNPot_ = false;
 };
 
-/*! \libinternal \brief Check if the Metatomic module outputs energy to a specific field.
+/*! \libinternal \brief Check if the Metatomic module writes its energy to the energy file.
  *
- * Ensures that energy is present for the Metatomic module.
+ * The energy then has its own term, "Metatomic Potential", in the .edr file.
  */
-struct MDModulesEnergyOutputToMetatomicPotRequestChecker
+struct MDModulesEnergyOutputToMetatomicRequestChecker
 {
-    //! Trigger output to Metatomic energy field
-    bool energyOutputToMetatomicPot_ = false;
+    //! Write the "Metatomic Potential" energy term
+    bool energyOutputToMetatomic_ = false;
 };
 
 /*!
@@ -509,9 +509,9 @@ struct MDModulesNotifiers
      * \tparam MDModulesEnergyOutputToNNPotRequestChecker*
      *                              Enables NNPot module to report if it wants to write its energy
      *                              output to the "NN Potential" field in the energy files
-     * \tparam MDModulesEnergyOutputToMetatomicPotRequestChecker*
+     * \tparam MDModulesEnergyOutputToMetatomicRequestChecker*
      *                              Enables the Metatomic module to report if it wants to write its energy
-     *                              output to the "Metatomic Potential" field in the energy files
+     *                              output to the "Metatomic Potential" term in the energy files
      * \tparam SeparatePmeRanksPermitted*
      *                              Enables modules to report if they want to disable dedicated
      *                              PME ranks
@@ -546,7 +546,7 @@ struct MDModulesNotifiers
                            MDModulesEnergyOutputToDensityFittingRequestChecker*,
                            MDModulesEnergyOutputToQMMMRequestChecker*,
                            MDModulesEnergyOutputToNNPotRequestChecker*,
-                           MDModulesEnergyOutputToMetatomicPotRequestChecker*,
+                           MDModulesEnergyOutputToMetatomicRequestChecker*,
                            SeparatePmeRanksPermitted*,
                            const PbcType&,
                            const SimulationTimeStep&,

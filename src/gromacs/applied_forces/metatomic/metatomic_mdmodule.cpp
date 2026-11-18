@@ -165,8 +165,8 @@ public:
 
         // Request that GROMACS adds an energy term for our potential to the .edr file
         const auto requestEnergyOutput =
-                [](MDModulesEnergyOutputToMetatomicPotRequestChecker* energyOutputRequest)
-        { energyOutputRequest->energyOutputToMetatomicPot_ = true; };
+                [](MDModulesEnergyOutputToMetatomicRequestChecker* energyOutputRequest)
+        { energyOutputRequest->energyOutputToMetatomic_ = true; };
         notifiers->simulationSetupNotifier_.subscribe(requestEnergyOutput);
 
 #if GMX_METATOMIC_ACTIVE
