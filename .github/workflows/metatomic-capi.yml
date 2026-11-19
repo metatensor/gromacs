@@ -19,7 +19,7 @@ permissions:
 env:
   # metatomic-torch plugin commit. Move this to the metatomic-core branch once
   # that plugin is merged there.
-  METATOMIC_CORE_COMMIT: 9b01833e390aba3884a2f0ef4c2ace328dc356d4
+  METATOMIC_CORE_COMMIT: 28b30995575a4821b63256bb27da8c54d5ff6ff8
   METATENSOR_CORE_VERSION: 0.2.6
   GMX_TESTS: >-
     mta_applied_forces-test mdrunutility-test nbnxm-test topology-test
