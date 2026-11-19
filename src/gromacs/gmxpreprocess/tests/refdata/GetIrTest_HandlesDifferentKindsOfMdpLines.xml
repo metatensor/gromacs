@@ -323,6 +323,9 @@ colvars-active           = false
 ; Neural Network potential
 nnpot-active             = false
 
+; Machine learning potential using metatomic
+metatomic-active         = false
+
 ; Fast Multipole Method
 fmm-backend              = inactive
 </String>

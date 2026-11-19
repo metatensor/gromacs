@@ -845,6 +845,14 @@ static int make_local_bondeds_excls(const gmx_domdec_t&     dd,
     /* We only use exclusions from i-zones to i- and j-zones */
     const int numIZonesForExclusions = (dd.haveExclusions ? zones.numIZones() : 0);
 
+    /* The loop below also builds the exclusion lists. Without inter-atomic bonded
+     * interactions, for instance with single-atom molecules, it would only cover the
+     * home zone. The intermolecular exclusion group that grompp adds for an embedded
+     * region (QM/MM, NNPot, metatomic) still needs exclusion lists for the atoms of
+     * every i-zone: the nbnxm pairlist search asserts one list per i-zone atom.
+     */
+    nzone_bondeds = std::max(nzone_bondeds, numIZonesForExclusions);
+
     const gmx_reverse_top_t& rt = *dd.reverse_top;
 
     const real cutoffSquared = gmx::square(cutoff);

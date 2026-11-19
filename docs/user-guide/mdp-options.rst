@@ -3785,6 +3785,101 @@ interface implementation follow :ref:`nnpot`.
    (0.1) [nm] Distance between link atom and the bonded MM atom.
 
 
+.. _mdp-metatomic:
+
+Machine learning potentials with metatomic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+`metatomic <https://docs.metatensor.org/metatomic/>`__ models, most of them
+machine learning potentials, can compute the energy, forces and virial of the
+atoms in :mdp:`metatomic-input-group`. :ref:`gmx grompp` removes the
+classical interactions among these atoms from the topology, as for
+:mdp:`nnpot-input-group`; their interactions with the other atoms stay
+classical. Systems periodic in three or two dimensions and nonperiodic systems
+are supported, screw periodic boundary conditions are not. This needs a
+|Gromacs| configured with ``-DGMX_METATOMIC=ON`` and the metatomic library.
+
+.. mdp:: metatomic-active
+
+   (false)
+   Activate the Metatomic interface.
+
+.. mdp:: metatomic-input-group
+
+   (System)
+   Index group of the atoms given to the model.
+
+.. mdp:: metatomic-model
+
+   The model to load: the path of a model file, or the name a plugin loads
+   its model from. The string is passed unchanged to metatomic-core.
+
+.. mdp:: metatomic-plugin
+
+   (auto)
+   Path of a metatomic plugin library, registered before the model is loaded.
+   ``auto`` registers the plugins installed with the metatomic library
+   |Gromacs| was built with, in ``<prefix>/libexec/metatomic``
+   (``<prefix>/bin`` on Windows). This includes the plugin of metatomic-torch,
+   which loads TorchScript models exported with ``AtomisticModel``, when it is
+   installed in the same prefix.
+
+.. mdp:: metatomic-model-options
+
+   Whitespace-separated ``key=value`` options passed to the model-loading
+   plugin, for example ``sigma=3 epsilon=1.2``. Values are strings, including
+   numeric values. Empty means no options. Keys may contain letters, digits,
+   underscores, hyphens and dots; duplicate keys are rejected.
+
+   Single or double quotes enclose values containing spaces, for example
+   ``label="argon model"``. Use ``key=""`` for an empty value. Inside quotes,
+   a backslash escapes the matching quote or another backslash. Whitespace
+   around ``=`` is allowed. Normal MDP semicolon comments still apply, including
+   inside quoted values. Invalid syntax is rejected during preprocessing.
+   Device selection, when supported, is a plugin option such as ``device=cpu``.
+
+.. mdp:: metatomic-check-consistency
+
+   (false)
+   Let metatomic-core check the inputs and outputs of every evaluation against
+   the model's declared capabilities. Slower; meant for debugging a model.
+
+.. mdp:: metatomic-variant
+
+   Variant of the model outputs to use, for example ``pbe0`` to use
+   ``energy/pbe0`` instead of ``energy``. Empty uses the outputs without
+   variant.
+
+.. mdp:: metatomic-uncertainty-threshold
+
+   (10) [kJ/mol]
+   When the model provides a per-atom ``energy_uncertainty`` output, warn about
+   atoms whose uncertainty exceeds this threshold. ``off`` disables the check.
+
+.. mdp:: metatomic-variant-energy-uq
+
+   Variant of the ``energy_uncertainty`` output. Empty uses
+   :mdp:`metatomic-variant`, ``off`` the output without variant.
+
+.. mdp:: metatomic-non-conservative
+
+   (false)
+   Take the forces from the model's per-atom ``non_conservative_force``
+   output, and the virial from ``non_conservative_stress`` when the model
+   provides it, instead of the gradients of the energy. Faster for models
+   trained for it, but the forces do not conserve energy.
+
+.. mdp:: metatomic-variant-nc-forces
+
+   Variant of the ``non_conservative_force`` output. Empty uses
+   :mdp:`metatomic-variant`, ``off`` the output without variant.
+
+.. mdp:: metatomic-variant-nc-stress
+
+   Variant of the ``non_conservative_stress`` output. Empty uses
+   :mdp:`metatomic-variant`, ``off`` the output without variant.
+
+
 .. _mdp-fmm:
 
 Fast Multipole Method (FMM) Interface
