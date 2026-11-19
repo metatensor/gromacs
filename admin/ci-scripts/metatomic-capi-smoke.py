@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Run a two-atom LJ plugin through grompp/mdrun and check energy and forces.
+"""Run metatomic-core's Lennard-Jones model through grompp/mdrun and check energy and forces.
 
-Usage: python3 metatomic-capi-smoke.py /absolute/path/to/gmx /absolute/path/to/plugin
+Usage: python3 metatomic-capi-smoke.py /absolute/path/to/gmx /absolute/path/to/metatomic-lj-plugin.so
+
+The plugin is installed with libmetatomic, in <prefix>/libexec/metatomic.
 
 Serial runs check the model in nm and in Angstrom. Two-rank runs with domain
 decomposition (each atom on its own rank, so the pair crosses ranks) check a 3D
@@ -24,7 +26,8 @@ import subprocess
 import sys
 import tempfile
 
-SIGMA, EPSILON, CUTOFF = 0.34, 0.99, 0.9  # the test plugin's Lennard-Jones, nm and kJ/mol
+SIGMA, EPSILON, CUTOFF = 0.34, 0.99, 0.9  # Lennard-Jones parameters of the model, nm and kJ/mol
+NM = {'nm': 1, 'Angstrom': 10}  # lengths in nm, in the length unit of the model
 
 TOPOLOGY = '''[ defaults ]
 1 2 no 1 1
@@ -74,7 +77,9 @@ def expected(x, box, periodic):
         if r >= CUTOFF:
             continue
         sr6 = (SIGMA / r) ** 6
-        energy += 4 * EPSILON * (sr6 * sr6 - sr6)
+        cr6 = (SIGMA / CUTOFF) ** 6
+        # the energy of metatomic-core's model is shifted to zero at the cutoff
+        energy += 4 * EPSILON * (sr6 * sr6 - sr6) - 4 * EPSILON * (cr6 * cr6 - cr6)
         derivative = 4 * EPSILON * (-12 * sr6 * sr6 + 6 * sr6) / r
         for axis in range(3):
             forces[j][axis] -= derivative * d[axis] / r
@@ -120,7 +125,8 @@ def main():
             (root / f'{name}.top').write_text(TOPOLOGY.format(count=len(x)))
             (root / f'{name}.gro').write_text(
                 f'Argon\n{len(x)}\n{atoms}{box[0]:10.5f}{box[1]:10.5f}{box[2]:10.5f}\n')
-            options = f'length_unit={unit} energy_unit=\"kJ/mol\"'
+            options = (f'sigma={SIGMA * NM[unit]:.12g} epsilon={EPSILON} cutoff={CUTOFF * NM[unit]:.12g} '
+                       f'atomic_type=18 length_unit={unit} energy_unit=\"kJ/mol\"')
             # the classical cutoffs bound the domain size; the model does not use them
             cutoff = 0.5 if name in ('dd-thin', 'dd-empty-ranks') else 1.0
             (root / f'{name}.mdp').write_text(f'''integrator = md
@@ -145,7 +151,7 @@ constraints = none
 comm-mode = none
 metatomic-active = true
 metatomic-input-group = System
-metatomic-model = gromacs-test-pair-model
+metatomic-model = metatomic-lj-model
 metatomic-plugin = {plugin}
 metatomic-model-options = {options}
 metatomic-check-consistency = true

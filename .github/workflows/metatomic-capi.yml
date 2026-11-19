@@ -129,8 +129,9 @@ jobs:
           cmake --build torch-build
           cmake --install torch-build
           find prefix -name 'metatomic-torch-plugin.so' -o -name 'metatomic-torch-plugin.dylib' | grep -q .
-          # the unit tests load this plugin without metatomic-plugin, through the
-          # default search next to libmetatomic, and skip when it is missing
+          # the unit tests load the Lennard-Jones model of this plugin through the
+          # default search next to libmetatomic, and skip when it is missing; the
+          # smoke test runs it through grompp and mdrun
           test -f prefix/libexec/metatomic/metatomic-lj-plugin.so
 
       - name: ccache files
@@ -155,7 +156,7 @@ jobs:
       - name: Build
         run: |
           ccache -z
-          cmake --build build --target gmx metatomic-test-plugin ${TESTS:-$GMX_TESTS}
+          cmake --build build --target gmx ${TESTS:-$GMX_TESTS}
           ccache -s
 
       - name: Run unit tests
@@ -174,4 +175,4 @@ jobs:
       - name: Test plugin loading through grompp and mdrun
         env:
           GMX_MPIEXEC: ${{ matrix.mpi == 'library' && 'mpirun --oversubscribe -np' || '' }}
-        run: python3 gromacs/admin/ci-scripts/metatomic-capi-smoke.py "$GMX" build/lib/metatomic-test-plugin.so
+        run: python3 gromacs/admin/ci-scripts/metatomic-capi-smoke.py "$GMX" prefix/libexec/metatomic/metatomic-lj-plugin.so

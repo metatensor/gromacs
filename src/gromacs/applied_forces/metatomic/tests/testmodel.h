@@ -31,13 +31,19 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out https://www.gromacs.org.
  */
-// Shared analytic model for unit tests and the dynamically loaded smoke-test plugin.
+/*! \internal \file
+ * \brief
+ * Model for the unit tests of what the Lennard-Jones model of metatomic-core does
+ * not cover: the inputs a model requests, a model without pair lists, and which
+ * gradients GROMACS asks for.
+ *
+ * \author Eric Boittier <eric.boittier@epfl.ch>
+ * \ingroup module_applied_forces
+ */
 #ifndef GMX_METATOMIC_TESTMODEL_H
 #define GMX_METATOMIC_TESTMODEL_H
-#include <cmath>
 
 #include <algorithm>
-#include <array>
 #include <memory>
 #include <metatomic.hpp>
 #include <optional>
@@ -45,72 +51,47 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
 namespace gmx::test
 {
-//! Lennard-Jones parameters in GROMACS units: nm and kJ/mol.
-constexpr double c_sigma   = 0.34;
-constexpr double c_epsilon = 0.99;
-constexpr double c_cutoff  = 0.9;
-//! Argon, the only type the model accepts.
-constexpr int c_atomicNumber = 18;
 
-/*! \brief Lennard-Jones pair model with explicit positions and strain gradients.
+/*! \brief Model with a zero energy per system, which declares positions and strain gradients.
  *
- * Built with the length and energy units given as model options, so the same
- * physical potential can be declared in nm or in Angstrom. With selected atoms
- * (domain decomposition), the energy is that of the selected atoms: half of each
- * pair for each selected end, as metatomic-core's Lennard-Jones plugin does.
+ * It reads no pairs, can request a charge input that GROMACS does not provide, and
+ * counts the evaluations that ask it for the strain gradient.
  */
-class PairModel final : public metatomic::BaseModel
+class RecorderModel final : public metatomic::BaseModel
 {
 public:
-    PairModel(const std::string& lengthUnit, const std::string& energyUnit, bool requestCharges, bool readsPairs) :
-        lengthUnit_(lengthUnit),
-        energyUnit_(energyUnit),
-        toLength_(metatomic::unit_conversion_factor("nm", lengthUnit)),
-        toEnergy_(metatomic::unit_conversion_factor("kJ/mol", energyUnit)),
-        requestCharges_(requestCharges),
-        readsPairs_(readsPairs),
-        pairs_(metatomic::PairListOptions::builder()
-                       .cutoff(c_cutoff * toLength_)
-                       .full_list(false)
-                       .strict(false)
-                       .build())
-    {
-    }
+    explicit RecorderModel(bool requestCharges) : requestCharges_(requestCharges) {}
 
     metatomic::ModelCapabilities capabilities() const override
     {
-        auto energy = metatomic::Quantity::builder()
-                              .name("energy")
-                              .unit(energyUnit_)
-                              .sample_kind(metatomic::SampleKind::System)
-                              .add_gradient(metatomic::Gradients::Positions)
-                              .add_gradient(metatomic::Gradients::Strain)
-                              .build();
         return metatomic::ModelCapabilities::builder()
-                .atomic_types({ c_atomicNumber })
-                .interaction_range(c_cutoff * toLength_)
-                .length_unit(lengthUnit_)
+                .atomic_types({ 18 })
+                .interaction_range(0.0)
+                .length_unit("nm")
                 .supported_devices({ metatomic::ModelCapabilities::Device::CPU })
                 .dtype(metatomic::ModelCapabilities::DType::Float64)
-                .add_output(energy)
+                .add_output(metatomic::Quantity::builder()
+                                    .name("energy")
+                                    .unit("kJ/mol")
+                                    .sample_kind(metatomic::SampleKind::System)
+                                    .add_gradient(metatomic::Gradients::Positions)
+                                    .add_gradient(metatomic::Gradients::Strain)
+                                    .build())
                 .build();
     }
 
     metatomic::ModelMetadata metadata() const override
     {
-        return metatomic::ModelMetadata::builder().name("GROMACS test pair model").build();
+        return metatomic::ModelMetadata::builder().name("GROMACS test recorder model").build();
     }
 
     std::vector<metatomic::PairListOptions>
     requested_pair_lists(const std::vector<metatomic::Quantity>& /*requestedOutputs*/) const override
     {
-        if (!readsPairs_)
-        {
-            return {};
-        }
-        return { pairs_ };
+        return {};
     }
 
     std::vector<metatomic::Quantity>
@@ -128,68 +109,13 @@ public:
     }
 
     std::vector<metatensor::TensorMap> execute_inner(const std::vector<metatomic::System>& systems,
-                                                     std::optional<metatensor::Labels> selectedAtoms,
+                                                     std::optional<metatensor::Labels> /*selectedAtoms*/,
                                                      const std::vector<metatomic::Quantity>& requestedOutputs) override
     {
-        if (systems.size() != 1)
-        {
-            throw metatomic::Error("the test model takes one system");
-        }
-        const auto& system  = systems[0];
-        const auto  nAtoms  = system.size();
-        auto        pairs   = system.pairs(pairs_);
-        const auto  samples = pairs.samples().values();
-        const auto  vectors = pairs.values<double>();
-
-        const double sigma   = c_sigma * toLength_;
-        const double epsilon = c_epsilon * toEnergy_;
-        const double cutoff  = c_cutoff * toLength_;
-
-        double                energy = 0;
-        std::vector<double>   positionsGradient(3 * nAtoms, 0.0);
-        std::array<double, 9> strainGradient{};
-        for (size_t pair = 0; pair < pairs.samples().count(); ++pair)
-        {
-            const double d[3] = { vectors(pair, 0, 0), vectors(pair, 1, 0), vectors(pair, 2, 0) };
-            const double r    = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-            if (r >= cutoff)
-            {
-                continue;
-            }
-            const auto i      = static_cast<size_t>(samples(pair, 0));
-            const auto j      = static_cast<size_t>(samples(pair, 1));
-            const auto weight = [&]
-            {
-                if (!selectedAtoms.has_value())
-                {
-                    return 1.0;
-                }
-                const auto selected = [&](size_t atom)
-                { return selectedAtoms->position({ 0, static_cast<int32_t>(atom) }).has_value(); };
-                return 0.5 * (selected(i) + selected(j));
-            }();
-            if (weight == 0.0)
-            {
-                continue;
-            }
-            const double sr6 = std::pow(sigma / r, 6);
-            energy += weight * 4 * epsilon * (sr6 * sr6 - sr6);
-            const double dEdr = weight * 4 * epsilon * (-12 * sr6 * sr6 + 6 * sr6) / r;
-            for (int a = 0; a < 3; ++a)
-            {
-                // d = x_j - x_i + shift
-                positionsGradient[3 * j + a] += dEdr * d[a] / r;
-                positionsGradient[3 * i + a] -= dEdr * d[a] / r;
-                for (int b = 0; b < 3; ++b)
-                {
-                    strainGradient[3 * a + b] += d[a] * dEdr * d[b] / r;
-                }
-            }
-        }
-
-        auto block = metatensor::TensorBlock(
+        const auto nAtoms = systems.at(0).size();
+        auto       block  = metatensor::TensorBlock(
                 std::make_unique<metatensor::SimpleDataArray<double>>(
-                        std::vector<uintptr_t>{ 1, 1 }, std::vector<double>{ energy }),
+                        std::vector<uintptr_t>{ 1, 1 }, std::vector<double>{ 0.0 }),
                 metatensor::Labels({ "system" }, { { 0 } }),
                 {},
                 metatensor::Labels({ "energy" }, { { 0 } }));
@@ -203,11 +129,11 @@ public:
                 "positions",
                 metatensor::TensorBlock(
                         std::make_unique<metatensor::SimpleDataArray<double>>(
-                                std::vector<uintptr_t>{ nAtoms, 3, 1 }, positionsGradient),
+                                std::vector<uintptr_t>{ nAtoms, 3, 1 }, std::vector<double>(3 * nAtoms)),
                         metatensor::Labels({ "sample", "system", "atom" }, gradientSamples.data(), nAtoms),
                         { metatensor::Labels({ "xyz" }, { { 0 }, { 1 }, { 2 } }) },
                         metatensor::Labels({ "energy" }, { { 0 } })));
-        // Like models that only compute the strain gradient on request
+
         const auto& gradients = requestedOutputs.front().gradients();
         if (std::find(gradients.begin(), gradients.end(), metatomic::Gradients::Strain) != gradients.end())
         {
@@ -216,8 +142,7 @@ public:
                     "strain",
                     metatensor::TensorBlock(
                             std::make_unique<metatensor::SimpleDataArray<double>>(
-                                    std::vector<uintptr_t>{ 1, 3, 3, 1 },
-                                    std::vector<double>(strainGradient.begin(), strainGradient.end())),
+                                    std::vector<uintptr_t>{ 1, 3, 3, 1 }, std::vector<double>(9)),
                             metatensor::Labels({ "sample" }, { { 0 } }),
                             { metatensor::Labels({ "xyz_1" }, { { 0 }, { 1 }, { 2 } }),
                               metatensor::Labels({ "xyz_2" }, { { 0 }, { 1 }, { 2 } }) },
@@ -231,43 +156,33 @@ public:
         return outputs;
     }
 
-    //! Number of evaluations asked for the strain gradient, by all PairModel instances
+    //! Number of evaluations asked for the strain gradient, by all RecorderModel instances
     static inline int strainRequests = 0;
 
 private:
-    std::string                lengthUnit_;
-    std::string                energyUnit_;
-    double                     toLength_;
-    double                     toEnergy_;
-    bool                       requestCharges_;
-    bool                       readsPairs_;
-    metatomic::PairListOptions pairs_;
+    bool requestCharges_;
 };
 
-//! Plugin callback creating a PairModel from `{"length_unit": ..., "energy_unit": ...}`.
-inline mta_status_t loadPairModel(const char* loadFrom, const char* optionsJson, mta_model_t* model)
+//! Plugin callback creating a RecorderModel, which requests a charge input with `request_charges`.
+inline mta_status_t loadRecorderModel(const char* loadFrom, const char* optionsJson, mta_model_t* model)
 {
-    if (std::string(loadFrom) != "gromacs-test-pair-model")
+    if (std::string(loadFrom) != "gromacs-test-recorder-model")
     {
         return MTA_UNSUPPORTED_MODEL_ERROR;
     }
     try
     {
-        const auto options = nlohmann::json::parse(optionsJson);
-        *model             = metatomic::BaseModel::to_mta_model(
-                std::make_unique<PairModel>(options.at("length_unit").get<std::string>(),
-                                            options.at("energy_unit").get<std::string>(),
-                                            options.contains("request_charges"),
-                                            !options.contains("no_pairs")));
+        *model = metatomic::BaseModel::to_mta_model(std::make_unique<RecorderModel>(
+                nlohmann::json::parse(optionsJson).contains("request_charges")));
         return MTA_SUCCESS;
     }
     catch (const std::exception& e)
     {
-        mta_set_last_error(e.what(), "gromacs-test-pair-model", nullptr, nullptr);
+        mta_set_last_error(e.what(), "gromacs-test-recorder-model", nullptr, nullptr);
         return MTA_MODEL_ERROR;
     }
 }
 
-
 } // namespace gmx::test
+
 #endif

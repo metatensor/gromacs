@@ -35,10 +35,11 @@
  * \brief
  * Tests the metatomic force provider against an analytic pair model.
  *
- * The model is a Lennard-Jones pair potential registered as an in-process
- * metatomic plugin, with positions and strain gradients, in a length unit
+ * The model is the Lennard-Jones model of metatomic-core, loaded from the plugin
+ * installed with libmetatomic, with its parameters in a length and energy unit
  * chosen per test. Energies, forces and virials are compared with the same
- * potential evaluated here in GROMACS units.
+ * potential evaluated here in GROMACS units. The small model of testmodel.h
+ * covers the inputs a model requests and the gradients GROMACS asks for.
  *
  * \author Eric Boittier <eric.boittier@epfl.ch>
  * \ingroup module_applied_forces
@@ -123,18 +124,25 @@ TEST(MetatomicCellShift, ShiftsAlongPeriodicDirectionsOnly)
 //! Relative tolerance: pair vectors are built from `real` positions.
 constexpr double c_tolerance = GMX_DOUBLE ? 1e-8 : 1e-4;
 
-//! Register the in-process plugin once per test binary.
+//! Lennard-Jones parameters in GROMACS units: nm and kJ/mol.
+constexpr double c_sigma   = 0.34;
+constexpr double c_epsilon = 0.99;
+constexpr double c_cutoff  = 0.9;
+//! Argon, the type of the test atoms.
+constexpr int c_atomicNumber = 18;
+
+//! Register the in-process plugin of the recorder model once per test binary.
 void registerTestPlugin()
 {
     static const bool registered = []
     {
-        mta_plugin_t plugin{ MTA_ABI_VERSION, "gromacs-test", loadPairModel };
+        mta_plugin_t plugin{ MTA_ABI_VERSION, "gromacs-test", loadRecorderModel };
         return mta_register_plugin(plugin) == MTA_SUCCESS;
     }();
     ASSERT_TRUE(registered);
 }
 
-//! Two-atom system evaluated by the force provider.
+//! Two argon atoms evaluated by the force provider, with the recorder model of testmodel.h.
 class MetatomicForceProviderTest : public ::testing::Test
 {
 public:
@@ -147,7 +155,7 @@ public:
             options_.params_.atoms_.atom[i].atomnumber = c_atomicNumber;
         }
         options_.params_.active      = true;
-        options_.params_.modelPath_  = "gromacs-test-pair-model";
+        options_.params_.modelPath_  = "gromacs-test-recorder-model";
         options_.params_.mtaIndices_ = { 0, 1 };
         options_.params_.numAtoms_   = 2;
         options_.params_.mtaAtoms_   = std::make_unique<LocalAtomSet>(
@@ -155,11 +163,6 @@ public:
         options_.params_.pbcType_ = std::make_unique<PbcType>(PbcType::Xyz);
     }
     ~MetatomicForceProviderTest() override { done_atom(&options_.params_.atoms_); }
-
-    void setModelUnits(const std::string& lengthUnit, const std::string& energyUnit)
-    {
-        options_.params_.modelOptions = "length_unit=" + lengthUnit + " energy_unit=" + energyUnit;
-    }
 
     /*! \brief Evaluate the pair (0, 1) with metatensor cell shift \p cellShift
      *
@@ -192,12 +195,63 @@ public:
         copy_mat(forceWithVirial.getVirial(), virial_);
     }
 
+protected:
+    MetatomicOptions    options_;
+    LocalAtomSetManager atomSets_;
+    MDLogger            logger_;
+    const MpiComm       mpiComm_ = MpiComm(MpiComm::SingleRank{});
+
+    std::vector<RVec> x_;
+    DVec              distance_;
+    std::vector<RVec> forces_;
+    real              energy_ = 0;
+    matrix            virial_;
+};
+
+/*! \brief The same atoms with the Lennard-Jones model of metatomic-core.
+ *
+ * metatomic-core installs its plugin next to libmetatomic, where metatomic-plugin = auto
+ * finds it. The tests skip when it is not installed; the CI checks that it is.
+ */
+class MetatomicLennardJonesTest : public MetatomicForceProviderTest
+{
+public:
+    void SetUp() override
+    {
+        const auto plugin =
+                std::filesystem::path(GMX_METATOMIC_PLUGINS_DIR) / "metatomic-lj-plugin.so";
+        if (!std::filesystem::exists(plugin))
+        {
+            GTEST_SKIP() << plugin << " is not installed";
+        }
+        options_.params_.pluginPath = "auto";
+        options_.params_.modelPath_ = "metatomic-lj-model";
+    }
+
+    //! Declare the parameters of the model in \p lengthUnit and \p energyUnit.
+    void setModelUnits(const std::string& lengthUnit, const std::string& energyUnit)
+    {
+        const double length           = metatomic::unit_conversion_factor("nm", lengthUnit);
+        const double energy           = metatomic::unit_conversion_factor("kJ/mol", energyUnit);
+        options_.params_.modelOptions = formatString(
+                "sigma=%.17g epsilon=%.17g cutoff=%.17g atomic_type=%d length_unit=%s "
+                "energy_unit=%s",
+                c_sigma * length,
+                c_epsilon * energy,
+                c_cutoff * length,
+                c_atomicNumber,
+                lengthUnit.c_str(),
+                energyUnit.c_str());
+    }
+
     //! Compare with the Lennard-Jones energy, forces and virial (zero without) of the last evaluation.
     void checkAgainstLennardJones(bool withVirial = true) const
     {
-        const double r      = norm(distance_);
-        const double sr6    = std::pow(c_sigma / r, 6);
-        const double energy = 4 * c_epsilon * (sr6 * sr6 - sr6);
+        const double r   = norm(distance_);
+        const double sr6 = std::pow(c_sigma / r, 6);
+        // the energy of metatomic-core's model is shifted to zero at the cutoff
+        const double cr6    = std::pow(c_sigma / c_cutoff, 6);
+        const double energy = 4 * c_epsilon * (sr6 * sr6 - sr6) - 4 * c_epsilon * (cr6 * cr6 - cr6);
         const double dEdr   = 4 * c_epsilon * (-12 * sr6 * sr6 + 6 * sr6) / r;
 
         EXPECT_NEAR(energy, energy_, c_tolerance * std::abs(energy));
@@ -216,23 +270,11 @@ public:
             }
         }
     }
-
-protected:
-    MetatomicOptions    options_;
-    LocalAtomSetManager atomSets_;
-    MDLogger            logger_;
-    const MpiComm       mpiComm_ = MpiComm(MpiComm::SingleRank{});
-
-    std::vector<RVec> x_;
-    DVec              distance_;
-    std::vector<RVec> forces_;
-    real              energy_ = 0;
-    matrix            virial_;
 };
 
 const matrix c_cubicBox = { { 3, 0, 0 }, { 0, 3, 0 }, { 0, 0, 3 } };
 
-TEST_F(MetatomicForceProviderTest, ModelInNanometre)
+TEST_F(MetatomicLennardJonesTest, ModelInNanometre)
 {
     setModelUnits("nm", "kJ/mol");
     evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
@@ -240,14 +282,14 @@ TEST_F(MetatomicForceProviderTest, ModelInNanometre)
 }
 
 // metatomic converts model gradients from eV/Angstrom to kJ/mol/nm.
-TEST_F(MetatomicForceProviderTest, ModelInAngstromAndElectronvolt)
+TEST_F(MetatomicLennardJonesTest, ModelInAngstromAndElectronvolt)
 {
     setModelUnits("Angstrom", "eV");
     evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
     checkAgainstLennardJones();
 }
 
-TEST_F(MetatomicForceProviderTest, ChecksConsistencyOfInputsAndOutputs)
+TEST_F(MetatomicLennardJonesTest, ChecksConsistencyOfInputsAndOutputs)
 {
     setModelUnits("Angstrom", "eV");
     options_.params_.checkConsistency = true;
@@ -255,7 +297,7 @@ TEST_F(MetatomicForceProviderTest, ChecksConsistencyOfInputsAndOutputs)
     checkAgainstLennardJones();
 }
 
-TEST_F(MetatomicForceProviderTest, PairAcrossTriclinicBoundary)
+TEST_F(MetatomicLennardJonesTest, PairAcrossTriclinicBoundary)
 {
     // The lattice shift of a pair is n_a a + n_b b + n_c c, which differs from box . n
     // as soon as the box is not rectangular.
@@ -265,7 +307,7 @@ TEST_F(MetatomicForceProviderTest, PairAcrossTriclinicBoundary)
     checkAgainstLennardJones();
 }
 
-TEST_F(MetatomicForceProviderTest, NonperiodicSystemWithBox)
+TEST_F(MetatomicLennardJonesTest, NonperiodicSystemWithBox)
 {
     setModelUnits("nm", "kJ/mol");
     options_.params_.pbcType_         = std::make_unique<PbcType>(PbcType::No);
@@ -274,7 +316,7 @@ TEST_F(MetatomicForceProviderTest, NonperiodicSystemWithBox)
     checkAgainstLennardJones();
 }
 
-TEST_F(MetatomicForceProviderTest, TwoDimensionalPeriodicity)
+TEST_F(MetatomicLennardJonesTest, TwoDimensionalPeriodicity)
 {
     setModelUnits("Angstrom", "eV");
     options_.params_.pbcType_         = std::make_unique<PbcType>(PbcType::XY);
@@ -283,32 +325,14 @@ TEST_F(MetatomicForceProviderTest, TwoDimensionalPeriodicity)
     checkAgainstLennardJones();
 }
 
-TEST_F(MetatomicForceProviderTest, RejectsScrewPeriodicity)
+TEST_F(MetatomicLennardJonesTest, ForcesWithoutTheVirial)
 {
     setModelUnits("nm", "kJ/mol");
-    options_.params_.pbcType_ = std::make_unique<PbcType>(PbcType::Screw);
-    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), NotImplementedError);
-}
-
-TEST_F(MetatomicForceProviderTest, RejectsInputsGromacsCannotProvide)
-{
-    options_.params_.modelOptions = R"(length_unit=nm energy_unit=kJ/mol request_charges="")";
-    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), APIError);
-}
-
-TEST_F(MetatomicForceProviderTest, RequestsTheStrainGradientForTheVirialOnly)
-{
-    setModelUnits("nm", "kJ/mol");
-    const int strainRequests = PairModel::strainRequests;
     evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), false);
     checkAgainstLennardJones(false);
-    EXPECT_EQ(PairModel::strainRequests, strainRequests);
-    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), true);
-    checkAgainstLennardJones(true);
-    EXPECT_EQ(PairModel::strainRequests, strainRequests + 1);
 }
 
-TEST_F(MetatomicForceProviderTest, PlainPairlistRange)
+TEST_F(MetatomicLennardJonesTest, PlainPairlistRange)
 {
     gmx_mtop_t mtop;
     t_inputrec inputrec;
@@ -322,28 +346,31 @@ TEST_F(MetatomicForceProviderTest, PlainPairlistRange)
                        c_cutoff + 0.1,
                        relativeToleranceAsFloatingPoint(1.0, 1e-6));
     // a model without pair lists needs no plain pairlist
-    options_.params_.modelOptions = "length_unit=nm energy_unit=kJ/mol no_pairs=1";
+    options_.params_.pluginPath   = "auto";
+    options_.params_.modelPath_   = "gromacs-test-recorder-model";
+    options_.params_.modelOptions = "";
     EXPECT_EQ(MetatomicForceProvider(options_, logger_, mpiComm_).plainPairlistRange(ranges), 0);
 }
 
-TEST_F(MetatomicForceProviderTest, LoadsInstalledPluginsWithoutPluginPath)
+TEST_F(MetatomicForceProviderTest, RequestsTheStrainGradientForTheVirialOnly)
 {
-    // metatomic-core installs its Lennard-Jones plugin next to libmetatomic
-    const auto plugin = std::filesystem::path(GMX_METATOMIC_PLUGINS_DIR) / "metatomic-lj-plugin.so";
-    if (!std::filesystem::exists(plugin))
-    {
-        GTEST_SKIP() << plugin << " is not installed";
-    }
-    options_.params_.pluginPath   = "auto";
-    options_.params_.modelPath_   = "metatomic-lj-model";
-    options_.params_.modelOptions = formatString(
-            "sigma=%g epsilon=%g cutoff=%g atomic_type=%d length_unit=nm energy_unit=kJ/mol",
-            c_sigma,
-            c_epsilon,
-            c_cutoff,
-            c_atomicNumber);
-    // The energy of the model has the positions and strain gradients GROMACS needs.
-    EXPECT_NO_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_));
+    const int strainRequests = RecorderModel::strainRequests;
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), false);
+    EXPECT_EQ(RecorderModel::strainRequests, strainRequests);
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), true);
+    EXPECT_EQ(RecorderModel::strainRequests, strainRequests + 1);
+}
+
+TEST_F(MetatomicForceProviderTest, RejectsScrewPeriodicity)
+{
+    options_.params_.pbcType_ = std::make_unique<PbcType>(PbcType::Screw);
+    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), NotImplementedError);
+}
+
+TEST_F(MetatomicForceProviderTest, RejectsInputsGromacsCannotProvide)
+{
+    options_.params_.modelOptions = R"(request_charges="")";
+    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), APIError);
 }
 
 TEST_F(MetatomicForceProviderTest, FailsOnUnknownModel)
