@@ -58,6 +58,7 @@
 #include <string>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "gromacs/applied_forces/metatomic/metatomic_cellshift.h"
@@ -76,11 +77,12 @@
 #include "gromacs/topology/topology.h"
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/logger.h"
+#include "gromacs/utility/loggerbuilder.h"
 #include "gromacs/utility/mpicomm.h"
+#include "gromacs/utility/stringstream.h"
 #include "gromacs/utility/stringutil.h"
 #include "gromacs/utility/vec.h"
 
-#include "testutils/loggertest.h"
 #include "testutils/testasserts.h"
 
 #if GMX_METATOMIC_ACTIVE
@@ -93,6 +95,9 @@ namespace test
 {
 namespace
 {
+
+using ::testing::HasSubstr;
+using ::testing::Not;
 
 const matrix c_triclinicBox = { { 3, 0, 0 }, { 1.2, 3, 0 }, { -0.9, 1.1, 3 } };
 
@@ -194,6 +199,21 @@ public:
         provider.calculateForces(ForceProviderInput(x_, 2, {}, {}, 0.0, 0, box, mpiComm_, nullptr), &output);
         energy_ = enerd.term[InteractionFunction::MetatomicPotentialEnergy];
         copy_mat(forceWithVirial.getVirial(), virial_);
+    }
+
+    /*! \brief The warnings logged while the model is loaded.
+     *
+     * They include one for each installed plugin that fails to load, such as a
+     * metatomic-torch plugin without libtorch.
+     */
+    std::string setupWarnings()
+    {
+        StringOutputStream warnings;
+        LoggerBuilder      builder;
+        builder.addTargetStream(MDLogger::LogLevel::Warning, &warnings);
+        const LoggerOwner      logger = builder.build();
+        MetatomicForceProvider provider(options_, logger.logger(), mpiComm_);
+        return warnings.toString();
     }
 
 protected:
@@ -364,12 +384,9 @@ TEST_F(MetatomicForceProviderTest, RequestsTheStrainGradientForTheVirialOnly)
 
 TEST_F(MetatomicForceProviderTest, WarnsThatAModelWithoutStrainGradientAddsNoVirial)
 {
+    EXPECT_THAT(setupWarnings(), Not(HasSubstr("adds zero to the virial")));
     options_.params_.modelOptions = R"(without_strain="")";
-    LoggerTestHelper logHelper;
-    logHelper.expectEntryMatchingRegex(
-            MDLogger::LogLevel::Warning,
-            "strain gradient of 'energy', so it adds zero to the virial");
-    MetatomicForceProvider provider(options_, logHelper.logger(), mpiComm_);
+    EXPECT_THAT(setupWarnings(), HasSubstr("strain gradient of 'energy', so it adds zero to the virial"));
 }
 
 TEST_F(MetatomicForceProviderTest, NeverAsksForAStrainGradientTheModelLacks)
@@ -383,9 +400,7 @@ TEST_F(MetatomicForceProviderTest, NeverAsksForAStrainGradientTheModelLacks)
 TEST_F(MetatomicForceProviderTest, PressureCouplingNeedsTheStrainGradient)
 {
     options_.params_.pressureCoupling = true;
-    LoggerTestHelper logHelper;
-    logHelper.expectNoEntries(MDLogger::LogLevel::Warning);
-    EXPECT_NO_THROW(MetatomicForceProvider provider(options_, logHelper.logger(), mpiComm_));
+    EXPECT_NO_THROW(MetatomicForceProvider provider(options_, logger_, mpiComm_));
     options_.params_.modelOptions = R"(without_strain="")";
     EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), InconsistentInputError);
 }
