@@ -1,9 +1,9 @@
 name: Metatomic C API
 
-# Builds metatomic at the pinned commit (C API and the TorchScript plugin in
-# one prefix), configures GROMACS with GMX_METATOMIC=ON, and runs the CPU unit
-# tests plus a grompp/mdrun smoke test with the shared analytic plugin, on one
-# rank and with domain decomposition over two (thread-MPI, and Open MPI).
+# Builds metatomic-core at the pinned commit, configures GROMACS with
+# GMX_METATOMIC=ON, and runs the CPU unit tests plus a grompp/mdrun smoke test
+# with the Lennard-Jones plugin of metatomic-core, on one rank and with domain
+# decomposition over two (thread-MPI, and Open MPI).
 
 on:
   # Branches under review run through their pull request; a push trigger for
@@ -17,9 +17,10 @@ permissions:
   contents: read
 
 env:
-  # metatomic-torch plugin commit. Move this to the metatomic-core branch once
-  # that plugin is merged there.
-  METATOMIC_CORE_COMMIT: 28b30995575a4821b63256bb27da8c54d5ff6ff8
+  # metatomic-core with strain gradients in the Lennard-Jones plugin
+  # (metatensor/metatomic#395). Move this to the metatomic-core branch once
+  # that pull request is merged.
+  METATOMIC_CORE_COMMIT: 08941235f101a351bb563573c9152b3fd6ce9fc2
   METATENSOR_CORE_VERSION: 0.2.6
   GMX_TESTS: >-
     mta_applied_forces-test mdrunutility-test nbnxm-test topology-test
@@ -108,9 +109,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: prefix
-          key: metatomic-capi-${{ runner.os }}-${{ env.METATOMIC_CORE_COMMIT }}-metatensor-${{ env.METATENSOR_CORE_VERSION }}-torch-plugin
+          key: metatomic-capi-${{ runner.os }}-${{ env.METATOMIC_CORE_COMMIT }}-metatensor-${{ env.METATENSOR_CORE_VERSION }}
 
-      - name: Build metatomic-core and the TorchScript plugin
+      - name: Build metatomic-core
         if: steps.core-cache.outputs.cache-hit != 'true'
         run: |
           cmake -S metatomic/metatomic-core -B core-build -G Ninja \
@@ -118,17 +119,6 @@ jobs:
             -DCMAKE_PREFIX_PATH="$METATENSOR_PREFIX"
           cmake --build core-build
           cmake --install core-build
-          "$RUNNER_TEMP/venv/bin/pip" install -q --extra-index-url https://download.pytorch.org/whl/cpu \
-            "torch>=2.7" "metatensor-torch>=0.10,<0.11"
-          TORCH=$("$RUNNER_TEMP/venv/bin/python" -c 'import torch; print(torch.utils.cmake_prefix_path)')
-          MTS_TORCH=$("$RUNNER_TEMP/venv/bin/python" -c 'import metatensor.torch; print(metatensor.torch.utils.cmake_prefix_path)')
-          cmake -S metatomic/metatomic-torch -B torch-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/prefix" \
-            -DMETATOMIC_TORCH_PLUGIN=ON \
-            -DCMAKE_PREFIX_PATH="$PWD/prefix;$TORCH;$MTS_TORCH;$METATENSOR_PREFIX"
-          cmake --build torch-build
-          cmake --install torch-build
-          find prefix -name 'metatomic-torch-plugin.so' -o -name 'metatomic-torch-plugin.dylib' | grep -q .
           # the unit tests load the Lennard-Jones model of this plugin through the
           # default search next to libmetatomic, and skip when it is missing; the
           # smoke test runs it through grompp and mdrun
