@@ -4,6 +4,6 @@
   <Bool Name="active">false</Bool>
   <String Name="inputGroup">System</String>
   <String Name="modelPath"></String>
-  <String Name="pluginPath">auto</String>
+  <String Name="pluginPath"></String>
   <Bool Name="checkConsistency">false</Bool>
 </ReferenceData>

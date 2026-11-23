@@ -6,7 +6,7 @@
 metatomic-active         = true
 metatomic-input-group    = System
 metatomic-model          = 
-metatomic-plugin         = auto
+metatomic-plugin         = 
 metatomic-model-options  = 
 metatomic-check-consistency = false
 metatomic-variant        = 

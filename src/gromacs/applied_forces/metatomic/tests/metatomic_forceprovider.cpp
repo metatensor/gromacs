@@ -210,7 +210,7 @@ protected:
 
 /*! \brief The same atoms with the Lennard-Jones model of metatomic-core.
  *
- * metatomic-core installs its plugin next to libmetatomic, where metatomic-plugin = auto
+ * metatomic-core installs its plugin next to libmetatomic, where an empty metatomic-plugin
  * finds it. The tests skip when it is not installed; the CI checks that it is.
  */
 class MetatomicLennardJonesTest : public MetatomicForceProviderTest
@@ -224,7 +224,7 @@ public:
         {
             GTEST_SKIP() << plugin << " is not installed";
         }
-        options_.params_.pluginPath = "auto";
+        options_.params_.pluginPath = "";
         options_.params_.modelPath_ = "metatomic-lj-model";
     }
 
@@ -346,7 +346,7 @@ TEST_F(MetatomicLennardJonesTest, PlainPairlistRange)
                        c_cutoff + 0.1,
                        relativeToleranceAsFloatingPoint(1.0, 1e-6));
     // a model without pair lists needs no plain pairlist
-    options_.params_.pluginPath   = "auto";
+    options_.params_.pluginPath   = "";
     options_.params_.modelPath_   = "gromacs-test-recorder-model";
     options_.params_.modelOptions = "";
     EXPECT_EQ(MetatomicForceProvider(options_, logger_, mpiComm_).plainPairlistRange(ranges), 0);
