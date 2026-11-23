@@ -80,6 +80,7 @@
 #include "gromacs/utility/stringutil.h"
 #include "gromacs/utility/vec.h"
 
+#include "testutils/loggertest.h"
 #include "testutils/testasserts.h"
 
 #if GMX_METATOMIC_ACTIVE
@@ -359,6 +360,34 @@ TEST_F(MetatomicForceProviderTest, RequestsTheStrainGradientForTheVirialOnly)
     EXPECT_EQ(RecorderModel::strainRequests, strainRequests);
     evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), true);
     EXPECT_EQ(RecorderModel::strainRequests, strainRequests + 1);
+}
+
+TEST_F(MetatomicForceProviderTest, WarnsThatAModelWithoutStrainGradientAddsNoVirial)
+{
+    options_.params_.modelOptions = R"(without_strain="")";
+    LoggerTestHelper logHelper;
+    logHelper.expectEntryMatchingRegex(
+            MDLogger::LogLevel::Warning,
+            "strain gradient of 'energy', so it adds zero to the virial");
+    MetatomicForceProvider provider(options_, logHelper.logger(), mpiComm_);
+}
+
+TEST_F(MetatomicForceProviderTest, NeverAsksForAStrainGradientTheModelLacks)
+{
+    options_.params_.modelOptions = R"(without_strain="")";
+    const int strainRequests      = RecorderModel::strainRequests;
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), true);
+    EXPECT_EQ(RecorderModel::strainRequests, strainRequests);
+}
+
+TEST_F(MetatomicForceProviderTest, PressureCouplingNeedsTheStrainGradient)
+{
+    options_.params_.pressureCoupling = true;
+    LoggerTestHelper logHelper;
+    logHelper.expectNoEntries(MDLogger::LogLevel::Warning);
+    EXPECT_NO_THROW(MetatomicForceProvider provider(options_, logHelper.logger(), mpiComm_));
+    options_.params_.modelOptions = R"(without_strain="")";
+    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), InconsistentInputError);
 }
 
 TEST_F(MetatomicForceProviderTest, RejectsScrewPeriodicity)

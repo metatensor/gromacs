@@ -314,6 +314,8 @@ struct MetatomicData
 
     //! Non-conservative mode: forces/stress are outputs, not energy gradients.
     bool nonConservative = false;
+    //! The model provides the virial: the strain gradient, or the non-conservative stress.
+    bool modelVirial = false;
 
     //! Home-atom selection. Rebuilt when numHomeMta_ changes.
     std::optional<metatensor::Labels> selectedAtoms;
@@ -442,19 +444,23 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
 
     data_->nonConservative = params.nonConservative;
+    // where the virial of the model comes from, for the messages when it does not
+    std::string virialSource;
     if (!data_->nonConservative)
     {
         // The forces need the positions gradient, the virial the strain gradient.
         const auto& declared = energyCap->gradients();
         const auto  declares = [&declared](metatomic::Gradients gradient)
         { return std::find(declared.begin(), declared.end(), gradient) != declared.end(); };
-        if (!declares(metatomic::Gradients::Positions) || !declares(metatomic::Gradients::Strain))
+        if (!declares(metatomic::Gradients::Positions))
         {
-            GMX_THROW(InconsistentInputError(formatString(
-                    "The model's '%s' output does not declare gradients with respect to both "
-                    "positions and strain, which GROMACS needs for the forces and the virial.",
-                    data_->energyName.c_str())));
+            GMX_THROW(InconsistentInputError(
+                    formatString("The model's '%s' output does not declare gradients with respect "
+                                 "to positions, which GROMACS needs for the forces.",
+                                 data_->energyName.c_str())));
         }
+        data_->modelVirial = declares(metatomic::Gradients::Strain);
+        virialSource       = formatString("the strain gradient of '%s'", data_->energyName.c_str());
     }
     {
         // Models may compute the strain gradient only on request, so it is only
@@ -469,9 +475,14 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                     .gradients(data_->nonConservative ? std::vector<Gradients>{} : gradients)
                     .build();
         };
-        data_->energyIndex = data_->requested.size();
-        data_->requested.push_back(energy({ Gradients::Positions }));
-        data_->requestedWithVirial.push_back(energy({ Gradients::Positions, Gradients::Strain }));
+        std::vector<Gradients> gradients = { Gradients::Positions };
+        data_->energyIndex               = data_->requested.size();
+        data_->requested.push_back(energy(gradients));
+        if (data_->modelVirial)
+        {
+            gradients.push_back(Gradients::Strain);
+        }
+        data_->requestedWithVirial.push_back(energy(gradients));
     }
 
     if (params.uncertaintyThreshold != "off")
@@ -522,8 +533,10 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
 
         const auto stressName = quantity_name(
                 "non_conservative_stress", output_variant(params.variant, params.variantNcStress));
+        virialSource = formatString("the '%s' output", stressName.c_str());
         if (find_output(modelOutputs, stressName) != nullptr)
         {
+            data_->modelVirial   = true;
             data_->ncStressIndex = data_->requestedWithVirial.size();
             data_->requestedWithVirial.push_back(metatomic::Quantity::builder()
                                                          .name(stressName)
@@ -536,6 +549,23 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 .appendTextFormatted("Metatomic: non-conservative mode enabled. Forces from '%s'%s",
                                      forceName.c_str(),
                                      data_->ncStressIndex.has_value() ? ", with stress" : "");
+    }
+
+    if (!data_->modelVirial)
+    {
+        if (params.pressureCoupling)
+        {
+            GMX_THROW(InconsistentInputError(
+                    formatString("Pressure coupling needs the virial of the metatomic model, "
+                                 "which comes from %s. The model does not provide it.",
+                                 virialSource.c_str())));
+        }
+        GMX_LOG(logger_.warning)
+                .asParagraph()
+                .appendTextFormatted(
+                        "The metatomic model does not provide %s, so it adds zero to the virial. "
+                        "The virial and pressure that GROMACS reports leave out the model.",
+                        virialSource.c_str());
     }
 
     // The pair lists and extra inputs a model needs depend on the outputs it computes,
@@ -1112,7 +1142,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
             selected = data_->selectedAtoms;
         }
 
-        const bool                     computeVirial = outputs->forceWithVirial_.computeVirial_;
+        // A model without virial is never asked for it, as warned at setup.
+        const bool computeVirial = outputs->forceWithVirial_.computeVirial_ && data_->modelVirial;
         std::vector<metatomic::System> systems;
         systems.push_back(std::move(system));
         std::vector<metatensor::TensorMap> modelOutputs;
@@ -1215,7 +1246,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                     add_atom_vectors<float>(block, 1, nAtoms, &forces);
                 }
             }
-            if (computeVirial && data_->ncStressIndex.has_value())
+            if (computeVirial)
             {
                 auto&  stressMap = modelOutputs[data_->ncStressIndex.value()];
                 matrix stressVirial;

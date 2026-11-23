@@ -57,13 +57,16 @@ namespace gmx::test
 
 /*! \brief Model with a zero energy per system, which declares positions and strain gradients.
  *
- * It reads no pairs, can request a charge input that GROMACS does not provide, and
- * counts the evaluations that ask it for the strain gradient.
+ * It reads no pairs, can request a charge input that GROMACS does not provide or leave
+ * out the strain gradient, and counts the evaluations that ask it for the strain gradient.
  */
 class RecorderModel final : public metatomic::BaseModel
 {
 public:
-    explicit RecorderModel(bool requestCharges) : requestCharges_(requestCharges) {}
+    RecorderModel(bool requestCharges, bool declaresStrain) :
+        requestCharges_(requestCharges), declaresStrain_(declaresStrain)
+    {
+    }
 
     metatomic::ModelCapabilities capabilities() const override
     {
@@ -77,8 +80,10 @@ public:
                                     .name("energy")
                                     .unit("kJ/mol")
                                     .sample_kind(metatomic::SampleKind::System)
-                                    .add_gradient(metatomic::Gradients::Positions)
-                                    .add_gradient(metatomic::Gradients::Strain)
+                                    .gradients(declaresStrain_
+                                                       ? std::vector{ metatomic::Gradients::Positions,
+                                                                      metatomic::Gradients::Strain }
+                                                       : std::vector{ metatomic::Gradients::Positions })
                                     .build())
                 .build();
     }
@@ -161,9 +166,14 @@ public:
 
 private:
     bool requestCharges_;
+    bool declaresStrain_;
 };
 
-//! Plugin callback creating a RecorderModel, which requests a charge input with `request_charges`.
+/*! \brief Plugin callback creating a RecorderModel.
+ *
+ * It requests a charge input with the option `request_charges`, and declares no strain
+ * gradient with `without_strain`.
+ */
 inline mta_status_t loadRecorderModel(const char* loadFrom, const char* optionsJson, mta_model_t* model)
 {
     if (std::string(loadFrom) != "gromacs-test-recorder-model")
@@ -172,8 +182,9 @@ inline mta_status_t loadRecorderModel(const char* loadFrom, const char* optionsJ
     }
     try
     {
-        *model = metatomic::BaseModel::to_mta_model(std::make_unique<RecorderModel>(
-                nlohmann::json::parse(optionsJson).contains("request_charges")));
+        const auto options = nlohmann::json::parse(optionsJson);
+        *model             = metatomic::BaseModel::to_mta_model(std::make_unique<RecorderModel>(
+                options.contains("request_charges"), !options.contains("without_strain")));
         return MTA_SUCCESS;
     }
     catch (const std::exception& e)

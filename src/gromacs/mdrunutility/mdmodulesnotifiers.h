@@ -517,6 +517,8 @@ struct MDModulesNotifiers
      *                              PME ranks
      * \tparam PbcType&             Provides modules with the periodic boundary condition type
      *                              that is used during the simulation
+     * \tparam PressureCoupling&    Provides modules with the pressure coupling algorithm,
+     *                              PressureCoupling::No without pressure coupling
      * \tparam SimulationTimeStep&  Provides modules with the simulation time-step that allows
      *                              them to interconvert between step and time information
      * \tparam EnsembleTemperature& Provides modules with the (eventual) constant ensemble
@@ -549,6 +551,7 @@ struct MDModulesNotifiers
                            MDModulesEnergyOutputToMetatomicRequestChecker*,
                            SeparatePmeRanksPermitted*,
                            const PbcType&,
+                           const PressureCoupling&,
                            const SimulationTimeStep&,
                            const EnsembleTemperature&,
                            const MpiComm&,

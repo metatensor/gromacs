@@ -3796,7 +3796,11 @@ atoms in :mdp:`metatomic-input-group`. :ref:`gmx grompp` removes the
 classical interactions among these atoms from the topology, as for
 :mdp:`nnpot-input-group`; their interactions with the other atoms stay
 classical. Systems periodic in three or two dimensions and nonperiodic systems
-are supported, screw periodic boundary conditions are not. This needs a
+are supported, screw periodic boundary conditions are not. Pressure coupling
+needs the virial of the model, from the strain gradient of its energy or, with
+:mdp:`metatomic-non-conservative`, its ``non_conservative_stress`` output.
+Without pressure coupling, a model without it runs with a warning, and the
+virial and pressure that |Gromacs| reports leave out the model. This needs a
 |Gromacs| configured with ``-DGMX_METATOMIC=ON`` and the metatomic library.
 
 .. mdp:: metatomic-active

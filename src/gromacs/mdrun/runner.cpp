@@ -1827,6 +1827,7 @@ int Mdrunner::mdrunner()
         setupNotifier.notify(&atomSets);
         setupNotifier.notify(mtop);
         setupNotifier.notify(inputrec->pbcType);
+        setupNotifier.notify(inputrec->pressureCouplingOptions.epc);
         setupNotifier.notify(SimulationTimeStep{ inputrec->delta_t });
         setupNotifier.notify(startingBehavior);
         setupNotifier.notify(EnsembleTemperature{ *inputrec });

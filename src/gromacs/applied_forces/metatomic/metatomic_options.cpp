@@ -56,6 +56,7 @@
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/fileio/warninp.h"
 #include "gromacs/mdtypes/imdpoptionprovider_helpers.h"
+#include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/options/basicoptions.h"
 #include "gromacs/options/optionsection.h"
 #include "gromacs/selection/indexutil.h"
@@ -446,6 +447,11 @@ void MetatomicOptions::setTopology(const gmx_mtop_t& top)
 void MetatomicOptions::setPbcType(const PbcType& pbcType)
 {
     params_.pbcType_ = std::make_unique<PbcType>(pbcType);
+}
+
+void MetatomicOptions::setPressureCoupling(const PressureCoupling& pressureCoupling)
+{
+    params_.pressureCoupling = pressureCoupling != PressureCoupling::No;
 }
 
 void MetatomicOptions::setComm(const MpiComm& mpiComm)

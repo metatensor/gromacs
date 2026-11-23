@@ -56,6 +56,7 @@
 struct gmx_mtop_t;
 class WarningHandler;
 enum class PbcType;
+enum class PressureCoupling : int;
 
 
 namespace gmx
@@ -116,6 +117,8 @@ struct MetatomicParameters
     t_atoms                       atoms_;
     int                           numAtoms_;
     std::unique_ptr<PbcType>      pbcType_;
+    //! Whether mdrun couples the pressure, which needs the virial of the model
+    bool pressureCoupling = false;
 };
 
 class MetatomicOptions final : public IMdpOptionProvider
@@ -135,6 +138,7 @@ public:
     void setWarningHandler(WarningHandler*);
     void setTopology(const gmx_mtop_t&);
     void setPbcType(const PbcType&);
+    void setPressureCoupling(const PressureCoupling&);
     void setComm(const MpiComm&);
     //! set local atom set for Metatomic input during simulation setup
     void setLocalInputAtomSet(const LocalAtomSet&);

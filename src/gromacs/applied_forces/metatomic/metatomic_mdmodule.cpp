@@ -123,6 +123,7 @@ public:
      * - the local atom set manager, to follow the atoms of the model: LocalAtomSetManager*
      * - the topology: const gmx_mtop_t&
      * - the periodic boundary conditions: const PbcType&
+     * - the pressure coupling, which needs the virial of the model: const PressureCoupling&
      * - the MPI communicator: const MpiComm&
      * - the logger: const MDLogger&
      * - the request for an energy term: MDModulesEnergyOutputToMetatomicRequestChecker*
@@ -151,6 +152,10 @@ public:
 
         const auto setPbcTypeFunction = [this](const PbcType& pbc) { options_.setPbcType(pbc); };
         notifiers->simulationSetupNotifier_.subscribe(setPbcTypeFunction);
+
+        const auto setPressureCouplingFunction = [this](const PressureCoupling& pressureCoupling)
+        { options_.setPressureCoupling(pressureCoupling); };
+        notifiers->simulationSetupNotifier_.subscribe(setPressureCouplingFunction);
 
         const auto setCommFunction = [this](const MpiComm& mpiComm) { options_.setComm(mpiComm); };
         notifiers->simulationSetupNotifier_.subscribe(setCommFunction);
