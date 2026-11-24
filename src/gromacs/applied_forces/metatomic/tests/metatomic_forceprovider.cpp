@@ -39,7 +39,8 @@
  * installed with libmetatomic, with its parameters in a length and energy unit
  * chosen per test. Energies, forces and virials are compared with the same
  * potential evaluated here in GROMACS units. The small model of testmodel.h
- * covers the inputs a model requests and the gradients GROMACS asks for.
+ * covers the inputs a model requests, the gradients GROMACS asks for, the
+ * non-conservative force and stress, and the energy-uncertainty warning.
  *
  * \author Eric Boittier <eric.boittier@epfl.ch>
  * \ingroup module_applied_forces
@@ -98,6 +99,7 @@ namespace
 
 using ::testing::HasSubstr;
 using ::testing::Not;
+using ::testing::ThrowsMessage;
 
 const matrix c_triclinicBox = { { 3, 0, 0 }, { 1.2, 3, 0 }, { -0.9, 1.1, 3 } };
 
@@ -172,7 +174,8 @@ public:
 
     /*! \brief Evaluate the pair (0, 1) with metatensor cell shift \p cellShift
      *
-     * \p x1 is chosen such that x1 + cellShift . box - x0 = \p distance.
+     * \p x1 is chosen such that x1 + cellShift . box - x0 = \p distance. The
+     * warnings logged during the evaluation go to evaluationWarnings_.
      */
     void evaluate(const matrix box, const RVec& distance, const IVec& cellShift, bool computeVirial = true)
     {
@@ -184,7 +187,11 @@ public:
         // the pair vector the model sees, up to rounding inside the force provider
         distance_ = x_[1].toDVec() + shift - x_[0].toDVec();
 
-        MetatomicForceProvider provider(options_, logger_, mpiComm_);
+        StringOutputStream warnings;
+        LoggerBuilder      builder;
+        builder.addTargetStream(MDLogger::LogLevel::Warning, &warnings);
+        const LoggerOwner      logger = builder.build();
+        MetatomicForceProvider provider(options_, logger.logger(), mpiComm_);
         provider.gatherAtomNumbersIndices(MDModulesAtomsRedistributedSignal(box, x_, {}, {}, std::nullopt));
         // GROMACS shifts the first atom of a pair, metatensor the second
         const std::vector<MDModulesPairlistConstructedSignal::PairlistEntry> pairlist = {
@@ -199,6 +206,7 @@ public:
         provider.calculateForces(ForceProviderInput(x_, 2, {}, {}, 0.0, 0, box, mpiComm_, nullptr), &output);
         energy_ = enerd.term[InteractionFunction::MetatomicPotentialEnergy];
         copy_mat(forceWithVirial.getVirial(), virial_);
+        evaluationWarnings_ = warnings.toString();
     }
 
     /*! \brief The warnings logged while the model is loaded.
@@ -227,6 +235,7 @@ protected:
     std::vector<RVec> forces_;
     real              energy_ = 0;
     matrix            virial_;
+    std::string       evaluationWarnings_;
 };
 
 /*! \brief The same atoms with the Lennard-Jones model of metatomic-core.
@@ -403,6 +412,71 @@ TEST_F(MetatomicForceProviderTest, PressureCouplingNeedsTheStrainGradient)
     EXPECT_NO_THROW(MetatomicForceProvider provider(options_, logger_, mpiComm_));
     options_.params_.modelOptions = R"(without_strain="")";
     EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), InconsistentInputError);
+}
+
+TEST_F(MetatomicForceProviderTest, AppliesNonConservativeForcesAndStress)
+{
+    options_.params_.nonConservative  = true;
+    options_.params_.modelOptions     = R"(non_conservative="")";
+    options_.params_.checkConsistency = true;
+    const double forceFactor =
+            metatomic::unit_conversion_factor(RecorderModel::c_ncForceUnit, "kJ/mol/nm");
+    const double stressFactor =
+            metatomic::unit_conversion_factor(RecorderModel::c_ncStressUnit, "kJ/mol/nm^3");
+    const double volume = det(c_cubicBox);
+
+    for (const bool computeVirial : { false, true })
+    {
+        evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0), computeVirial);
+        for (size_t atom = 0; atom < 2; ++atom)
+        {
+            for (size_t d = 0; d < 3; ++d)
+            {
+                const double force = forceFactor * RecorderModel::ncForce(atom, d);
+                EXPECT_NEAR(force, forces_[atom][d], c_tolerance * std::abs(force))
+                        << "atom " << atom << ", dimension " << d;
+            }
+        }
+        // the virial is half the stress times the volume, zero when not asked for
+        for (size_t a = 0; a < 3; ++a)
+        {
+            for (size_t b = 0; b < 3; ++b)
+            {
+                const double virial =
+                        computeVirial ? 0.5 * volume * stressFactor * RecorderModel::ncStress(a, b) : 0.0;
+                EXPECT_NEAR(virial, virial_[a][b], c_tolerance * std::abs(virial) + 1e-12)
+                        << "virial " << a << ", " << b << " with computeVirial " << computeVirial;
+            }
+        }
+    }
+}
+
+TEST_F(MetatomicForceProviderTest, NonConservativeModeNeedsTheNonConservativeForce)
+{
+    options_.params_.nonConservative = true;
+    EXPECT_THAT([&] { MetatomicForceProvider provider(options_, logger_, mpiComm_); },
+                ThrowsMessage<APIError>(HasSubstr("does not provide 'non_conservative_force'")));
+}
+
+TEST_F(MetatomicForceProviderTest, WarnsAboutAtomsAboveTheUncertaintyThreshold)
+{
+    // atom 0 has an uncertainty of 6 kJ/mol and atom 1 of 12 kJ/mol, around the threshold of 10
+    options_.params_.uncertaintyThreshold = "10";
+    options_.params_.modelOptions         = R"(uncertainty="6")";
+    options_.params_.checkConsistency     = true;
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    EXPECT_THAT(evaluationWarnings_,
+                HasSubstr("uncertainty on atomic energies for 1 atoms is larger than the threshold "
+                          "of 10.0000 kJ/mol"));
+
+    options_.params_.modelOptions = R"(uncertainty="4")";
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    EXPECT_THAT(evaluationWarnings_, Not(HasSubstr("uncertainty on atomic energies")));
+
+    options_.params_.modelOptions         = R"(uncertainty="6")";
+    options_.params_.uncertaintyThreshold = "off";
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    EXPECT_THAT(evaluationWarnings_, Not(HasSubstr("uncertainty on atomic energies")));
 }
 
 TEST_F(MetatomicForceProviderTest, RejectsScrewPeriodicity)
