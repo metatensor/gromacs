@@ -72,9 +72,9 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     (void)logger_;
     (void)mpiComm_;
     (void)box_;
-    GMX_THROW(
-            InternalError("This version of GROMACS can not use metatomic atomistic models. "
-                          "Please reconfigure with `-DGMX_METATOMIC=ON` to enable this interface"));
+    GMX_THROW(NotImplementedError(
+            "This version of GROMACS can not use metatomic atomistic models. "
+            "Please reconfigure with `-DGMX_METATOMIC=ON` to enable this interface"));
 }
 
 MetatomicForceProvider::~MetatomicForceProvider() {}

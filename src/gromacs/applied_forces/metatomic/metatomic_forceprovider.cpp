@@ -394,14 +394,18 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
     catch (const std::exception& e)
     {
-        GMX_THROW(APIError("Failed to load metatomic model: " + std::string(e.what())));
+        GMX_THROW(InvalidInputError(formatString("Failed to load the metatomic model '%s': %s",
+                                                 options_.params_.modelPath_.c_str(),
+                                                 e.what())));
     }
 
     data_->useFloat64 = data_->capabilities.dtype() == metatomic::ModelCapabilities::DType::Float64;
     if (data_->capabilities.dtype() != metatomic::ModelCapabilities::DType::Float64
         && data_->capabilities.dtype() != metatomic::ModelCapabilities::DType::Float32)
     {
-        GMX_THROW(APIError("Unsupported dtype from model capabilities"));
+        GMX_THROW(InvalidInputError(
+                "The metatomic model uses a dtype other than float32 and float64, which GROMACS "
+                "does not support."));
     }
     data_->checkConsistency = options_.params_.checkConsistency;
     const PbcType* pbcType  = options_.params_.pbcType_.get();
@@ -424,6 +428,23 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         data_->pbc = { 1, 1, 1 };
     }
 
+    // The atomic numbers are the model's atomic types. A model reports a type it does not
+    // know only when it runs, after the setup of the whole simulation.
+    const auto& atomicTypes = data_->capabilities.atomic_types();
+    for (const Index atom : options_.params_.mtaIndices_)
+    {
+        const int atomNumber = options_.params_.atoms_.atom[atom].atomnumber;
+        if (std::find(atomicTypes.begin(), atomicTypes.end(), atomNumber) == atomicTypes.end())
+        {
+            GMX_THROW(InconsistentInputError(formatString(
+                    "Atom %d of metatomic-input-group has the atomic number %d, which the "
+                    "metatomic model does not support. The model supports the atomic numbers %s.",
+                    static_cast<int>(atom) + 1,
+                    atomNumber,
+                    formatAndJoin(atomicTypes, ", ", StringFormatter("%d")).c_str())));
+        }
+    }
+
     GMX_LOG(logger_.info)
             .asParagraph()
             .appendTextFormatted("Metatomic model: length unit %s, dtype %s",
@@ -436,11 +457,11 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     const auto* energyCap    = find_output(modelOutputs, data_->energyName);
     if (energyCap == nullptr)
     {
-        GMX_THROW(
-                APIError(formatString("The model at '%s' does not provide an '%s' output. "
-                                      "Metatomic interface cannot proceed.",
-                                      params.modelPath_.c_str(),
-                                      data_->energyName.c_str())));
+        GMX_THROW(InconsistentInputError(
+                formatString("The metatomic model at '%s' does not provide an '%s' output. Check "
+                             "metatomic-variant.",
+                             params.modelPath_.c_str(),
+                             data_->energyName.c_str())));
     }
 
     data_->nonConservative = params.nonConservative;
@@ -518,10 +539,10 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 "non_conservative_force", output_variant(params.variant, params.variantNcForces));
         if (find_output(modelOutputs, forceName) == nullptr)
         {
-            GMX_THROW(
-                    APIError(formatString("The model does not provide '%s' output, "
-                                          "we can not enable non-conservative simulations",
-                                          forceName.c_str())));
+            GMX_THROW(InconsistentInputError(
+                    formatString("The metatomic model does not provide a '%s' output, which "
+                                 "metatomic-non-conservative = yes needs.",
+                                 forceName.c_str())));
         }
         data_->ncForceIndex = data_->requested.size();
         data_->requested.push_back(metatomic::Quantity::builder()
@@ -578,13 +599,16 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     }
     catch (const std::exception& e)
     {
-        GMX_THROW(APIError("Failed to query the metatomic model: " + std::string(e.what())));
+        GMX_THROW(
+                InvalidInputError("The metatomic model failed to give the pair lists and inputs "
+                                  "it needs: "
+                                  + std::string(e.what())));
     }
     if (!inputs.empty())
     {
-        GMX_THROW(APIError(
-                formatString("The model requests the input '%s', which GROMACS can not provide.",
-                             inputs.front().name().c_str())));
+        GMX_THROW(InconsistentInputError(formatString(
+                "The metatomic model requests the input '%s', which GROMACS can not provide.",
+                inputs.front().name().c_str())));
     }
     data_->cutoffNm.reserve(data_->pairLists.size());
     for (const auto& pairs : data_->pairLists)
@@ -1187,7 +1211,7 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         }
         catch (const std::exception& e)
         {
-            GMX_THROW(APIError("[Metatomic] Model evaluation failed: " + std::string(e.what())));
+            GMX_THROW(InvalidInputError("The metatomic model failed: " + std::string(e.what())));
         }
 
         if (data_->uqIndex.has_value())

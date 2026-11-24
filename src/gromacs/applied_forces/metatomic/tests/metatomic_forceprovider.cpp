@@ -483,7 +483,8 @@ TEST_F(MetatomicForceProviderTest, NonConservativeModeNeedsTheNonConservativeFor
 {
     options_.params_.nonConservative = true;
     EXPECT_THAT([&] { MetatomicForceProvider provider(options_, logger_, mpiComm_); },
-                ThrowsMessage<APIError>(HasSubstr("does not provide 'non_conservative_force'")));
+                ThrowsMessage<InconsistentInputError>(
+                        HasSubstr("does not provide a 'non_conservative_force' output")));
 }
 
 TEST_F(MetatomicForceProviderTest, WarnsAboutAtomsAboveTheUncertaintyThreshold)
@@ -516,13 +517,23 @@ TEST_F(MetatomicForceProviderTest, RejectsScrewPeriodicity)
 TEST_F(MetatomicForceProviderTest, RejectsInputsGromacsCannotProvide)
 {
     options_.params_.modelOptions = R"(request_charges="")";
-    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), APIError);
+    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), InconsistentInputError);
 }
 
 TEST_F(MetatomicForceProviderTest, FailsOnUnknownModel)
 {
     options_.params_.modelPath_ = "no-such-model";
-    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), APIError);
+    EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), InvalidInputError);
+}
+
+TEST_F(MetatomicForceProviderTest, RejectsAtomicNumbersTheModelDoesNotSupport)
+{
+    options_.params_.atoms_.atom[1].atomnumber = 8;
+    EXPECT_THAT([&] { MetatomicForceProvider provider(options_, logger_, mpiComm_); },
+                ThrowsMessage<InconsistentInputError>(
+                        HasSubstr("Atom 2 of metatomic-input-group has the atomic number 8, which "
+                                  "the metatomic model does not support. The model supports the "
+                                  "atomic numbers 18.")));
 }
 
 #endif // GMX_METATOMIC_ACTIVE
