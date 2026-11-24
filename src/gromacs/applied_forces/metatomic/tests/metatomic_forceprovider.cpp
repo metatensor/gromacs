@@ -371,6 +371,45 @@ TEST_F(MetatomicLennardJonesTest, PlainPairlistRange)
     EXPECT_EQ(MetatomicForceProvider(options_, logger_, mpiComm_).plainPairlistRange(ranges), 0);
 }
 
+TEST_F(MetatomicLennardJonesTest, PlainPairlistRangeEndsAtRlist)
+{
+    setModelUnits("nm", "kJ/mol");
+    gmx_mtop_t mtop;
+    t_inputrec inputrec;
+    inputrec.ensembleTemperatureSetting = EnsembleTemperatureSetting::NotAvailable;
+    // the range and the warnings for rlist \p rlist, in dynamics without an ensemble
+    // temperature (a buffer of 0.1 nm) or in energy minimization (no buffer needed)
+    const auto range = [&](real rlist, IntegrationAlgorithm integrator)
+    {
+        inputrec.eI    = integrator;
+        inputrec.rlist = rlist;
+        StringOutputStream warnings;
+        LoggerBuilder      builder;
+        builder.addTargetStream(MDLogger::LogLevel::Warning, &warnings);
+        const LoggerOwner logger = builder.build();
+        const real        value  = MetatomicForceProvider(options_, logger.logger(), mpiComm_)
+                                   .plainPairlistRange(PlainPairlistRanges(mtop, inputrec));
+        return std::make_pair(value, warnings.toString());
+    };
+
+    // the model cutoff of 0.9 nm beyond rlist
+    EXPECT_THAT([&] { range(0.8, IntegrationAlgorithm::MD); },
+                ThrowsMessage<InconsistentInputError>(HasSubstr(
+                        "The metatomic model reads pairs up to 0.900 nm, but the GROMACS pair "
+                        "list only reaches rlist = 0.800 nm. Raise rlist to at least 1.000 nm")));
+
+    // rlist leaves room for a buffer of 0.02 nm only
+    const auto [shortRange, warnings] = range(0.92, IntegrationAlgorithm::MD);
+    EXPECT_REAL_EQ_TOL(shortRange, 0.92, relativeToleranceAsFloatingPoint(1.0, 1e-6));
+    EXPECT_THAT(warnings,
+                HasSubstr("the buffer of the pair list is 0.020 nm, less than the 0.100 nm the "
+                          "atoms can move between pair searches, because rlist is 0.920 nm"));
+
+    // energy minimization needs no buffer, and a full buffer gives no warning
+    EXPECT_THAT(range(0.92, IntegrationAlgorithm::Steep).second, Not(HasSubstr("buffer")));
+    EXPECT_THAT(range(1.2, IntegrationAlgorithm::MD).second, Not(HasSubstr("buffer")));
+}
+
 TEST_F(MetatomicForceProviderTest, RequestsTheStrainGradientForTheVirialOnly)
 {
     const int strainRequests = RecorderModel::strainRequests;

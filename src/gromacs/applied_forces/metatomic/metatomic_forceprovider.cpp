@@ -644,12 +644,39 @@ real MetatomicForceProvider::plainPairlistRange(const PlainPairlistRanges& range
     // leaves the buffer for the motion until the next search to the requester. Twice the
     // RMS displacement over a pairlist lifetime, as PlainPairlistRanges::rmsdDistance()
     // recommends, and at least 0.1 nm for fast ML hydrogens. The normal pairlist holds no
-    // pairs beyond rlist, so the buffer ends there; the cutoff itself must fit (mdrun
-    // stops otherwise).
-    const double rmsd  = ranges.rmsdDistance().value_or(0.0);
-    const double range = std::max(pairCutoff,
-                                  std::min(pairCutoff + std::max(2 * rmsd, 0.1),
-                                           static_cast<double>(ranges.pairlistCutoff())));
+    // pairs beyond rlist, so the buffer ends there.
+    const std::optional<real> rmsd   = ranges.rmsdDistance();
+    const double              buffer = std::max(2 * static_cast<double>(rmsd.value_or(0.0)), 0.1);
+    const double              rlist  = ranges.pairlistCutoff();
+    if (pairCutoff > rlist)
+    {
+        GMX_THROW(InconsistentInputError(formatString(
+                "The metatomic model reads pairs up to %.3f nm, but the GROMACS pair list only "
+                "reaches rlist = %.3f nm. Raise rlist to at least %.3f nm, by setting rvdw and "
+                "rcoulomb to at least that, or rlist with verlet-buffer-tolerance = -1.",
+                pairCutoff,
+                rlist,
+                pairCutoff + buffer)));
+    }
+    const double range = std::min(pairCutoff + buffer, rlist);
+    // without motion between searches (energy minimization, or a search at every step),
+    // the buffer is not needed
+    const bool atomsMove = !rmsd.has_value() || rmsd.value() > 0;
+    if (range < pairCutoff + buffer && atomsMove)
+    {
+        GMX_LOG(logger_.warning)
+                .asParagraph()
+                .appendTextFormatted(
+                        "Metatomic: the buffer of the pair list is %.3f nm, less than the %.3f nm "
+                        "the atoms can move between pair searches, because rlist is %.3f nm. The "
+                        "model misses the pairs that come within its cutoff between searches, "
+                        "and the energy drifts. Raise rlist to at least %.3f nm, or lower "
+                        "nstlist.",
+                        range - pairCutoff,
+                        buffer,
+                        rlist,
+                        pairCutoff + buffer);
+    }
     GMX_LOG(logger_.info)
             .asParagraph()
             .appendTextFormatted(

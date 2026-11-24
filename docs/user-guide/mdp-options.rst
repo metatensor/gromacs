@@ -3800,7 +3800,14 @@ are supported, screw periodic boundary conditions are not. Pressure coupling
 needs the virial of the model, from the strain gradient of its energy or, with
 :mdp:`metatomic-non-conservative`, its ``non_conservative_stress`` output.
 Without pressure coupling, a model without it runs with a warning, and the
-virial and pressure that |Gromacs| reports leave out the model. This needs a
+virial and pressure that |Gromacs| reports leave out the model. On a single
+rank, the model reads its pairs from the |Gromacs| pair list, so :mdp:`rlist`
+must be at least the largest pair-list cutoff of the model, and should leave a
+buffer for the motion of the atoms between pair searches (twice their RMS
+displacement over :mdp:`nstlist` steps, at least 0.1 nm). With only metatomic
+atoms, set :mdp:`rvdw` and :mdp:`rcoulomb` to the cutoff plus this buffer, or
+:mdp:`rlist` with :mdp:`verlet-buffer-tolerance` = -1. With domain
+decomposition, the model finds its pairs itself at every step. This needs a
 |Gromacs| configured with ``-DGMX_METATOMIC=ON`` and the metatomic library.
 
 .. mdp:: metatomic-active
