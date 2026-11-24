@@ -177,7 +177,7 @@ static metatomic::DLPackTensor wrap_dlpack(void* data, std::vector<int64_t> shap
 }
 
 template<typename T>
-static int64_t count_above(metatensor::TensorBlock& block, double threshold)
+static int count_above(metatensor::TensorBlock& block, double threshold)
 {
     auto   values = block.values<T>();
     size_t n      = 1;
@@ -186,7 +186,7 @@ static int64_t count_above(metatensor::TensorBlock& block, double threshold)
         n *= extent;
     }
     const T* data   = values.data();
-    int64_t  nAbove = 0;
+    int      nAbove = 0;
     for (size_t i = 0; i < n; ++i)
     {
         if (static_cast<double>(data[i]) > threshold)
@@ -998,6 +998,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     matrix virialMatrix;
     clear_mat(virialMatrix);
     std::vector<double> forces(static_cast<size_t>(numLocalMta_) * 3, 0.0);
+    // home atoms whose energy uncertainty is above the threshold
+    int numAboveThreshold = 0;
 
     // A rank without home atoms has nothing to evaluate, but takes part in the force exchange.
     if (numHomeMta_ > 0)
@@ -1163,25 +1165,13 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         if (data_->uqIndex.has_value())
         {
-            auto&      uqMap   = modelOutputs[data_->uqIndex.value()];
-            const auto nBlocks = uqMap.keys().count();
-            int64_t    nAbove  = 0;
-            for (size_t blockId = 0; blockId < nBlocks; ++blockId)
+            auto& uqMap = modelOutputs[data_->uqIndex.value()];
+            for (size_t blockId = 0; blockId < uqMap.keys().count(); ++blockId)
             {
                 auto block = uqMap.block_by_id(blockId);
-                nAbove += modelIsDouble ? count_above<double>(block, data_->uncertaintyThreshold)
-                                        : count_above<float>(block, data_->uncertaintyThreshold);
-            }
-            if (nAbove > 0)
-            {
-                GMX_LOG(logger_.warning)
-                        .asParagraph()
-                        .appendTextFormatted(
-                                "Metatomic: uncertainty on atomic energies for %ld atoms "
-                                "is larger than the threshold of %.4f kJ/mol. "
-                                "Consider retraining the model.",
-                                static_cast<long>(nAbove),
-                                data_->uncertaintyThreshold);
+                numAboveThreshold += modelIsDouble
+                                             ? count_above<double>(block, data_->uncertaintyThreshold)
+                                             : count_above<float>(block, data_->uncertaintyThreshold);
             }
         }
 
@@ -1265,6 +1255,27 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 }
                 msmul(stressVirial, det(inputs.box_), virialMatrix);
             }
+        }
+    }
+
+    // With domain decomposition, every rank counts its own home atoms, and only the main
+    // rank logs.
+    if (data_->uqIndex.has_value())
+    {
+        if (parallel)
+        {
+            mpiComm_.sumReduce(1, &numAboveThreshold);
+        }
+        if (numAboveThreshold > 0)
+        {
+            GMX_LOG(logger_.warning)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "Metatomic: uncertainty on atomic energies for %d atoms "
+                            "is larger than the threshold of %.4f kJ/mol. "
+                            "Consider retraining the model.",
+                            numAboveThreshold,
+                            data_->uncertaintyThreshold);
         }
     }
 

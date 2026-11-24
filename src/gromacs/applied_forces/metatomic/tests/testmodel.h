@@ -344,6 +344,17 @@ inline mta_status_t loadRecorderModel(const char* loadFrom, const char* optionsJ
     }
 }
 
+//! Register the in-process plugin of the recorder model once per test binary.
+inline bool registerRecorderPlugin()
+{
+    static const bool registered = []
+    {
+        mta_plugin_t plugin{ MTA_ABI_VERSION, "gromacs-test", loadRecorderModel };
+        return mta_register_plugin(plugin) == MTA_SUCCESS;
+    }();
+    return registered;
+}
+
 } // namespace gmx::test
 
 #endif

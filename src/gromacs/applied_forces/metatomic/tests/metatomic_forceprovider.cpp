@@ -139,24 +139,13 @@ constexpr double c_cutoff  = 0.9;
 //! Argon, the type of the test atoms.
 constexpr int c_atomicNumber = 18;
 
-//! Register the in-process plugin of the recorder model once per test binary.
-void registerTestPlugin()
-{
-    static const bool registered = []
-    {
-        mta_plugin_t plugin{ MTA_ABI_VERSION, "gromacs-test", loadRecorderModel };
-        return mta_register_plugin(plugin) == MTA_SUCCESS;
-    }();
-    ASSERT_TRUE(registered);
-}
-
 //! Two argon atoms evaluated by the force provider, with the recorder model of testmodel.h.
 class MetatomicForceProviderTest : public ::testing::Test
 {
 public:
     MetatomicForceProviderTest()
     {
-        registerTestPlugin();
+        EXPECT_TRUE(registerRecorderPlugin());
         init_t_atoms(&options_.params_.atoms_, 2, false);
         for (int i = 0; i < 2; ++i)
         {

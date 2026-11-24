@@ -42,4 +42,14 @@ target_link_libraries(mta_applied_forces-test PRIVATE applied_forces math pbcuti
 if (GMX_METATOMIC_ACTIVE)
     # the force provider tests register a model plugin of their own
     target_link_libraries(mta_applied_forces-test PRIVATE metatomic::shared)
+
+    # the uncertainty warning with domain decomposition, over two ranks
+    gmx_add_mpi_unit_test(MTAAppliedForcesMpiTest mta_applied_forces-mpi-test 2
+        CPP_SOURCE_FILES
+            metatomic_forceprovider_mpi.cpp
+    )
+    # the target only exists with thread-MPI or an MPI library
+    if (TARGET mta_applied_forces-mpi-test)
+        target_link_libraries(mta_applied_forces-mpi-test PRIVATE applied_forces topology metatomic::shared)
+    endif()
 endif()

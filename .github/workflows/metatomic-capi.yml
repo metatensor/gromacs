@@ -146,7 +146,7 @@ jobs:
       - name: Build
         run: |
           ccache -z
-          cmake --build build --target gmx ${TESTS:-$GMX_TESTS}
+          cmake --build build --target gmx mta_applied_forces-mpi-test ${TESTS:-$GMX_TESTS}
           ccache -s
 
       - name: Run unit tests
@@ -158,6 +158,15 @@ jobs:
             echo "::endgroup::"
           done
           exit $failed
+
+      # run directly, without -ntmpi or mpirun, the two-rank tests would be skipped
+      - name: Run two-rank unit tests
+        run: |
+          if [ "${{ matrix.mpi }}" = library ]; then
+            mpirun --oversubscribe -np 2 build/bin/mta_applied_forces-mpi-test
+          else
+            build/bin/mta_applied_forces-mpi-test -ntmpi 2
+          fi
 
       - name: Test CMake discovery and reconfiguration
         run: python3 gromacs/admin/ci-scripts/metatomic-cmake-smoke.py
