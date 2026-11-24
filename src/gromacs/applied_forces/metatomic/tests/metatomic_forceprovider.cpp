@@ -534,11 +534,11 @@ TEST_F(MetatomicForceProviderTest, FailsOnUnknownModel)
 TEST_F(MetatomicForceProviderTest, RejectsAtomicNumbersTheModelDoesNotSupport)
 {
     options_.params_.atoms_.atom[1].atomnumber = 8;
-    EXPECT_THAT([&] { MetatomicForceProvider provider(options_, logger_, mpiComm_); },
-                ThrowsMessage<InconsistentInputError>(
-                        HasSubstr("Atom 2 of metatomic-input-group has the atomic number 8, which "
-                                  "the metatomic model does not support. The model supports the "
-                                  "atomic numbers 18.")));
+    EXPECT_THAT([&] { evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0)); },
+                ThrowsMessage<InvalidInputError>(HasSubstr(
+                        "The metatomic model failed: invalid parameter: this model does not "
+                        "support the following atomic types which are present in the input "
+                        "systems: 8")));
 }
 
 #endif // GMX_METATOMIC_ACTIVE

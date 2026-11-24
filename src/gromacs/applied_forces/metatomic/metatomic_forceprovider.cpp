@@ -428,23 +428,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         data_->pbc = { 1, 1, 1 };
     }
 
-    // The atomic numbers are the model's atomic types. A model reports a type it does not
-    // know only when it runs, after the setup of the whole simulation.
-    const auto& atomicTypes = data_->capabilities.atomic_types();
-    for (const Index atom : options_.params_.mtaIndices_)
-    {
-        const int atomNumber = options_.params_.atoms_.atom[atom].atomnumber;
-        if (std::find(atomicTypes.begin(), atomicTypes.end(), atomNumber) == atomicTypes.end())
-        {
-            GMX_THROW(InconsistentInputError(formatString(
-                    "Atom %d of metatomic-input-group has the atomic number %d, which the "
-                    "metatomic model does not support. The model supports the atomic numbers %s.",
-                    static_cast<int>(atom) + 1,
-                    atomNumber,
-                    formatAndJoin(atomicTypes, ", ", StringFormatter("%d")).c_str())));
-        }
-    }
-
     GMX_LOG(logger_.info)
             .asParagraph()
             .appendTextFormatted("Metatomic model: length unit %s, dtype %s",
