@@ -21,7 +21,7 @@ env:
   # (metatensor/metatomic#395). Move this to the metatomic-core branch once
   # that pull request is merged.
   METATOMIC_CORE_COMMIT: 08941235f101a351bb563573c9152b3fd6ce9fc2
-  METATENSOR_CORE_VERSION: 0.2.6
+  METATENSOR_CORE_VERSION: 0.2.7
   GMX_TESTS: >-
     mta_applied_forces-test mdrunutility-test nbnxm-test topology-test
     nnpot_applied_forces-test qmmm_applied_forces-test
