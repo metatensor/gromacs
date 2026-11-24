@@ -55,10 +55,6 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
         # mdrun loads the plugins installed with this libmetatomic when the
         # metatomic-plugin mdp option is empty
         set(GMX_METATOMIC_PLUGINS_DIR "${METATOMIC_PLUGINS_DIR}")
-
-        # The install RPATH of the binaries gets the directories of libmetatomic and
-        # libmetatensor through CMAKE_INSTALL_RPATH_USE_LINK_PATH, set with shared
-        # libraries in the main CMakeLists.txt.
     elseif(GMX_METATOMIC STREQUAL "ON")
         message(FATAL_ERROR
             "metatomic with metatensor >= 0.2.4 was not found. Install "
