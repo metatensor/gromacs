@@ -671,22 +671,26 @@ real MetatomicForceProvider::plainPairlistRange(const PlainPairlistRanges& range
     // pairs beyond rlist, so the buffer ends there.
     const std::optional<real> rmsd   = ranges.rmsdDistance();
     const double              buffer = std::max(2 * static_cast<double>(rmsd.value_or(0.0)), 0.1);
-    const double              rlist  = ranges.pairlistCutoff();
-    if (pairCutoff > rlist)
+    // rounded to the precision of rlist, so that rlist set to the cutoff, or to the cutoff
+    // plus the buffer, is enough
+    const real cutoff = static_cast<real>(pairCutoff);
+    const real wanted = static_cast<real>(pairCutoff + buffer);
+    const real rlist  = ranges.pairlistCutoff();
+    if (cutoff > rlist)
     {
         GMX_THROW(InconsistentInputError(formatString(
                 "The metatomic model reads pairs up to %.3f nm, but the GROMACS pair list only "
                 "reaches rlist = %.3f nm. Raise rlist to at least %.3f nm, by setting rvdw and "
                 "rcoulomb to at least that, or rlist with verlet-buffer-tolerance = -1.",
-                pairCutoff,
+                cutoff,
                 rlist,
-                pairCutoff + buffer)));
+                wanted)));
     }
-    const double range = std::min(pairCutoff + buffer, rlist);
+    const real range = std::min(wanted, rlist);
     // without motion between searches (energy minimization, or a search at every step),
     // the buffer is not needed
     const bool atomsMove = !rmsd.has_value() || rmsd.value() > 0;
-    if (range < pairCutoff + buffer && atomsMove)
+    if (range < wanted && atomsMove)
     {
         GMX_LOG(logger_.warning)
                 .asParagraph()
@@ -696,10 +700,10 @@ real MetatomicForceProvider::plainPairlistRange(const PlainPairlistRanges& range
                         "model misses the pairs that come within its cutoff between searches, "
                         "and the energy drifts. Raise rlist to at least %.3f nm, or lower "
                         "nstlist.",
-                        range - pairCutoff,
+                        range - cutoff,
                         buffer,
                         rlist,
-                        pairCutoff + buffer);
+                        wanted);
     }
     GMX_LOG(logger_.info)
             .asParagraph()
@@ -707,8 +711,8 @@ real MetatomicForceProvider::plainPairlistRange(const PlainPairlistRanges& range
                     "Metatomic: plain pairlist range %.3f nm (pair-list cutoff %.3f nm + %.3f nm "
                     "buffer; interaction range %.3f nm)",
                     range,
-                    pairCutoff,
-                    range - pairCutoff,
+                    cutoff,
+                    range - cutoff,
                     interactionRange);
     return range;
 }

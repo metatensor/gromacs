@@ -408,6 +408,11 @@ TEST_F(MetatomicLennardJonesTest, PlainPairlistRangeEndsAtRlist)
     // energy minimization needs no buffer, and a full buffer gives no warning
     EXPECT_THAT(range(0.92, IntegrationAlgorithm::Steep).second, Not(HasSubstr("buffer")));
     EXPECT_THAT(range(1.2, IntegrationAlgorithm::MD).second, Not(HasSubstr("buffer")));
+
+    // rlist set to the cutoff is enough, although 0.9 rounds down in single precision
+    EXPECT_REAL_EQ_TOL(range(0.9, IntegrationAlgorithm::Steep).first,
+                       0.9,
+                       relativeToleranceAsFloatingPoint(1.0, 1e-6));
 }
 
 TEST_F(MetatomicForceProviderTest, RequestsTheStrainGradientForTheVirialOnly)
