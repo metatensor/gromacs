@@ -197,7 +197,7 @@ TEST_F(MetatomicOptionsTest, OutputDefaultValuesWhenActive)
     checker.checkString(stream.toString(), "Mdp output");
 }
 
-TEST_F(MetatomicOptionsTest, GromppChecksPluginUncertaintyThresholdAndModelOptions)
+TEST_F(MetatomicOptionsTest, GromppChecksUncertaintyThresholdAndModelOptions)
 {
     MetatomicOptions metatomicOptions;
     fillOptionsFromMdpValues(metatomicBuildInputMdpValues(), &metatomicOptions);
@@ -219,13 +219,6 @@ TEST_F(MetatomicOptionsTest, GromppChecksPluginUncertaintyThresholdAndModelOptio
         EXPECT_THROW_GMX(write(), InconsistentInputError) << threshold;
     }
     metatomicOptions.params_.uncertaintyThreshold = "10";
-
-    for (const char* plugin : { "", "./ext" })
-    {
-        metatomicOptions.params_.pluginPath = plugin;
-        EXPECT_NO_THROW(write()) << plugin;
-    }
-    metatomicOptions.params_.pluginPath = "";
 
     metatomicOptions.params_.modelOptions = "cutoff=5.0";
     EXPECT_NO_THROW(write());
