@@ -17,10 +17,10 @@ permissions:
   contents: read
 
 env:
-  # metatomic-core with strain gradients in the Lennard-Jones plugin
-  # (metatensor/metatomic#395). Move this to the metatomic-core branch once
-  # that pull request is merged.
-  METATOMIC_CORE_COMMIT: 08941235f101a351bb563573c9152b3fd6ce9fc2
+  # A commit of the metatomic-core branch, with strain gradients in the
+  # Lennard-Jones plugin (metatensor/metatomic#395). The metatomic-core build
+  # is cached under this commit, so pin a commit rather than the branch.
+  METATOMIC_CORE_COMMIT: d174789a73829cf12beab94a516480101bac5d6f
   METATENSOR_CORE_VERSION: 0.2.7
   GMX_TESTS: >-
     mta_applied_forces-test mdrunutility-test nbnxm-test topology-test
