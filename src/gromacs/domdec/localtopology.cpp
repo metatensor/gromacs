@@ -845,6 +845,18 @@ static int make_local_bondeds_excls(const gmx_domdec_t&     dd,
     /* We only use exclusions from i-zones to i- and j-zones */
     const int numIZonesForExclusions = (dd.haveExclusions ? zones.numIZones() : 0);
 
+    /* The loop below also builds the exclusion lists. With domain decomposition, a rank
+     * has its home atoms (zone 0) and copies of atoms from neighbouring domains (the
+     * other zones). The nbnxm pair search builds pair lists from the atoms of some zones,
+     * the i-zones, to the atoms of others, and needs an exclusion list for every atom in
+     * an i-zone. Without inter-atomic bonded interactions, for instance with single-atom
+     * molecules, the loop would only cover the home zone. The intermolecular exclusion
+     * group that grompp adds for an embedded region (QM/MM, NNPot, metatomic) then leaves
+     * the atoms of the other i-zones without exclusion lists, and the pair search stops
+     * at its assertion of one list per i-zone atom.
+     */
+    nzone_bondeds = std::max(nzone_bondeds, numIZonesForExclusions);
+
     const gmx_reverse_top_t& rt = *dd.reverse_top;
 
     const real cutoffSquared = gmx::square(cutoff);

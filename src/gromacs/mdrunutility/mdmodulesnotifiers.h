@@ -221,6 +221,16 @@ struct MDModulesEnergyOutputToNNPotRequestChecker
     bool energyOutputToNNPot_ = false;
 };
 
+/*! \libinternal \brief Check if the Metatomic module writes its energy to the energy file.
+ *
+ * The energy then has its own term, "Metatomic Potential", in the .edr file.
+ */
+struct MDModulesEnergyOutputToMetatomicRequestChecker
+{
+    //! Write the "Metatomic Potential" energy term
+    bool energyOutputToMetatomic_ = false;
+};
+
 /*!
  * \brief Indicates whether an MD module is a direct (short-range coulomb interactions) provider.
  *
@@ -499,11 +509,16 @@ struct MDModulesNotifiers
      * \tparam MDModulesEnergyOutputToNNPotRequestChecker*
      *                              Enables NNPot module to report if it wants to write its energy
      *                              output to the "NN Potential" field in the energy files
+     * \tparam MDModulesEnergyOutputToMetatomicRequestChecker*
+     *                              Enables the Metatomic module to report if it wants to write its energy
+     *                              output to the "Metatomic Potential" term in the energy files
      * \tparam SeparatePmeRanksPermitted*
      *                              Enables modules to report if they want to disable dedicated
      *                              PME ranks
      * \tparam PbcType&             Provides modules with the periodic boundary condition type
      *                              that is used during the simulation
+     * \tparam PressureCoupling&    Provides modules with the pressure coupling algorithm,
+     *                              PressureCoupling::No without pressure coupling
      * \tparam SimulationTimeStep&  Provides modules with the simulation time-step that allows
      *                              them to interconvert between step and time information
      * \tparam EnsembleTemperature& Provides modules with the (eventual) constant ensemble
@@ -533,8 +548,10 @@ struct MDModulesNotifiers
                            MDModulesEnergyOutputToDensityFittingRequestChecker*,
                            MDModulesEnergyOutputToQMMMRequestChecker*,
                            MDModulesEnergyOutputToNNPotRequestChecker*,
+                           MDModulesEnergyOutputToMetatomicRequestChecker*,
                            SeparatePmeRanksPermitted*,
                            const PbcType&,
+                           const PressureCoupling&,
                            const SimulationTimeStep&,
                            const EnsembleTemperature&,
                            const MpiComm&,

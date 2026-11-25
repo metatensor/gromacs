@@ -1,0 +1,177 @@
+name: Metatomic C API
+
+# Builds metatomic-core at the pinned commit, configures GROMACS with
+# GMX_METATOMIC=ON, and runs the CPU unit tests plus a grompp/mdrun smoke test
+# with the Lennard-Jones plugin of metatomic-core, on one rank and with domain
+# decomposition over two (thread-MPI, and Open MPI).
+
+on:
+  # Branches under review run through their pull request; a push trigger for
+  # them too would run every job twice per push.
+  push:
+    branches: [metatomic-next-gromacs]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # A commit of the metatomic-core branch, with strain gradients in the
+  # Lennard-Jones plugin (metatensor/metatomic#395). The metatomic-core build
+  # is cached under this commit, so pin a commit rather than the branch.
+  METATOMIC_CORE_COMMIT: d174789a73829cf12beab94a516480101bac5d6f
+  METATENSOR_CORE_VERSION: 0.2.7
+  GMX_TESTS: >-
+    mta_applied_forces-test mdrunutility-test nbnxm-test topology-test
+    nnpot_applied_forces-test qmmm_applied_forces-test
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  NINJA_STATUS: "[%f/%t %o/sec] "
+
+jobs:
+  unit-tests:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GCC, OpenMP
+            os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+            openmp: "ON"
+            mpi: thread
+          - name: macOS Clang, no OpenMP
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+            openmp: "OFF"
+            mpi: thread
+          # compiles the force provider's MPI calls against a real MPI library and
+          # runs the two-rank smoke test through mpirun
+          - name: Linux GCC, Open MPI
+            os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+            openmp: "ON"
+            mpi: library
+            tests: mta_applied_forces-test mdrunutility-test
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      TESTS: ${{ matrix.tests }}
+      GMX: build/bin/${{ matrix.mpi == 'library' && 'gmx_mpi' || 'gmx' }}
+
+    steps:
+      - name: Checkout GROMACS
+        uses: actions/checkout@v6
+        with:
+          path: gromacs
+          show-progress: false
+          persist-credentials: false
+
+      - name: Checkout metatomic-core
+        uses: actions/checkout@v6
+        with:
+          repository: metatensor/metatomic
+          ref: ${{ env.METATOMIC_CORE_COMMIT }}
+          path: metatomic
+          show-progress: false
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build tools
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q ninja-build ccache \
+              || { sudo apt-get update -q && sudo apt-get install -y -q ninja-build ccache; }
+            if [ "${{ matrix.mpi }}" = library ]; then
+              sudo apt-get install -y -q libopenmpi-dev openmpi-bin \
+                || { sudo apt-get update -q && sudo apt-get install -y -q libopenmpi-dev openmpi-bin; }
+            fi
+          else
+            brew install ninja ccache
+          fi
+          cargo --version
+
+      - name: Install metatensor-core
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "metatensor-core==$METATENSOR_CORE_VERSION"
+          echo "METATENSOR_PREFIX=$("$RUNNER_TEMP/venv/bin/python" -c 'import metatensor.utils; print(metatensor.utils.cmake_prefix_path)')" >> "$GITHUB_ENV"
+
+      - name: Cache metatomic-core
+        id: core-cache
+        uses: actions/cache@v5
+        with:
+          path: prefix
+          key: metatomic-capi-${{ runner.os }}-${{ env.METATOMIC_CORE_COMMIT }}-metatensor-${{ env.METATENSOR_CORE_VERSION }}
+
+      - name: Build metatomic-core
+        if: steps.core-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S metatomic/metatomic-core -B core-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/prefix" \
+            -DCMAKE_PREFIX_PATH="$METATENSOR_PREFIX"
+          cmake --build core-build
+          cmake --install core-build
+          # the unit tests load the Lennard-Jones model of this plugin through the
+          # default search next to libmetatomic, and skip when it is missing; the
+          # smoke test runs it through grompp and mdrun
+          test -f prefix/libexec/metatomic/metatomic-lj-plugin.so
+
+      - name: ccache files
+        uses: actions/cache@v5
+        with:
+          path: .ccache
+          key: metatomic-capi-ccache-${{ matrix.os }}-${{ matrix.mpi }}-${{ github.sha }}
+          restore-keys: metatomic-capi-ccache-${{ matrix.os }}-${{ matrix.mpi }}-
+
+      - name: Configure GROMACS
+        run: |
+          cmake -S gromacs -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DGMX_METATOMIC=ON -DGMX_NNPOT=OFF \
+            -DCMAKE_PREFIX_PATH="$PWD/prefix;$METATENSOR_PREFIX" \
+            -DGMX_GPU=OFF -DGMX_OPENMP=${{ matrix.openmp }} -DGMX_HWLOC=OFF \
+            -DGMX_MPI=${{ matrix.mpi == 'library' && 'ON' || 'OFF' }} \
+            -DGMX_FFT_LIBRARY=fftpack -DGMX_BUILD_UNITTESTS=ON \
+            -DREGRESSIONTEST_DOWNLOAD=OFF
+
+      - name: Build
+        run: |
+          ccache -z
+          cmake --build build --target gmx mta_applied_forces-mpi-test ${TESTS:-$GMX_TESTS}
+          ccache -s
+
+      - name: Run unit tests
+        run: |
+          failed=0
+          for t in ${TESTS:-$GMX_TESTS}; do
+            echo "::group::$t"
+            build/bin/$t || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed
+
+      # run directly, without -ntmpi or mpirun, the two-rank tests would be skipped
+      - name: Run two-rank unit tests
+        run: |
+          if [ "${{ matrix.mpi }}" = library ]; then
+            mpirun --oversubscribe -np 2 build/bin/mta_applied_forces-mpi-test
+          else
+            build/bin/mta_applied_forces-mpi-test -ntmpi 2
+          fi
+
+      - name: Test CMake discovery and reconfiguration
+        run: python3 gromacs/admin/ci-scripts/metatomic-cmake-smoke.py
+
+      - name: Test plugin loading through grompp and mdrun
+        env:
+          GMX_MPIEXEC: ${{ matrix.mpi == 'library' && 'mpirun --oversubscribe -np' || '' }}
+        run: python3 gromacs/admin/ci-scripts/metatomic-capi-smoke.py "$GMX" prefix/libexec/metatomic/metatomic-lj-plugin.so

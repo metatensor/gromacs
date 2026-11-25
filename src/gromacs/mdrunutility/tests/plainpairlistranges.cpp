@@ -104,6 +104,16 @@ TEST(PlainPairlistRanges, RmsdDistance)
     EXPECT_REAL_EQ_TOL(rmsdDistance.value(), 0.0776441, tolerance);
 }
 
+TEST(PlainPairlistRanges, PairlistCutoffIsRlist)
+{
+    const auto mtop = testSystem();
+    t_inputrec ir;
+    ir.rlist = 0.576;
+
+    PlainPairlistRanges ppr(*mtop, ir);
+    EXPECT_EQ(ppr.pairlistCutoff(), ir.rlist);
+}
+
 } // namespace
 } // namespace test
 } // namespace gmx
