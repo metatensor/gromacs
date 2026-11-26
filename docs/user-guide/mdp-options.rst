@@ -3905,6 +3905,18 @@ decomposition, the model finds its pairs itself at every step. This needs a
    energy term. Every rank evaluates all pairs of these atoms, which suits
    groups of up to a few thousand atoms.
 
+.. mdp:: metatomic-link-atoms
+
+   (false)
+   With :mdp:`metatomic-oniom`, cap each bond between an atom of
+   :mdp:`metatomic-input-group` and an atom outside it with a hydrogen atom,
+   0.1 nm from the atom of the group along the bond, so that the model does not
+   see a dangling bond. The topology keeps the bond and the other classical
+   interactions of the outside atom. The force on a cap is spread onto the two
+   atoms of its bond. An outside atom bonded to several atoms of the group gets
+   one cap per bond. The model must be trained for hydrogen-capped fragments.
+   Capped bonds must be shorter than 0.3 nm.
+
 
 .. _mdp-fmm:
 

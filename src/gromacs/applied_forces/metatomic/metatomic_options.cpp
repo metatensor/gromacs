@@ -94,16 +94,18 @@ static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
 static const std::string VARIANT_NC_FORCES_TAG     = "variant-nc-forces";
 static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
 static const std::string ONIOM_TAG                 = "oniom";
+static const std::string LINK_ATOMS_TAG            = "link-atoms";
+static const std::string LINK_FRONTIER_KEY         = "metatomic-link-frontier";
 
 namespace
 {
 
-//! \brief Preprocess the topology for the atoms given to the model.
-void preprocessTopology(gmx_mtop_t*           mtop,
-                        ArrayRef<const Index> mtaIndices,
-                        bool                  oniom,
-                        const MDLogger&       logger,
-                        WarningHandler*       wi)
+//! \brief Preprocess the topology for the atoms given to the model, and return the bonds they cut.
+std::vector<LinkFrontierAtom> preprocessTopology(gmx_mtop_t*           mtop,
+                                                 ArrayRef<const Index> mtaIndices,
+                                                 bool                  oniom,
+                                                 const MDLogger&       logger,
+                                                 WarningHandler*       wi)
 {
     // convert mtaIndices to set for faster lookup
     std::set<int> mtaIndicesSet(mtaIndices.begin(), mtaIndices.end());
@@ -139,8 +141,13 @@ void preprocessTopology(gmx_mtop_t*           mtop,
     // 7) Check for constrained bonds in subsystem
     checkConstrainedBonds(mtop, mtaIndicesSet, isMTABlock, wi);
 
+    // 8) The bonds between QM and MM atoms; the caller logs what it does with them
+    const MDLogger silent;
+    auto           linkFrontier = buildLinkFrontier(mtop, mtaIndicesSet, isMTABlock, silent);
+
     // finalize topology
     mtop->finalize();
+    return linkFrontier;
 }
 //! metatomic-uncertainty-threshold is off or a non-negative number of kJ/mol.
 void checkUncertaintyThreshold(const std::string& value)
@@ -283,6 +290,7 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG);
     addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ONIOM_TAG);
+    addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG);
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -302,6 +310,7 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(StringOption(VARIANT_NC_FORCES_TAG.c_str()).store(&params_.variantNcForces));
     section.addOption(StringOption(VARIANT_NC_STRESS_TAG.c_str()).store(&params_.variantNcStress));
     section.addOption(BooleanOption(ONIOM_TAG.c_str()).store(&params_.oniom));
+    section.addOption(BooleanOption(LINK_ATOMS_TAG.c_str()).store(&params_.linkAtoms));
 }
 
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
@@ -338,6 +347,7 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
         addMdpOutputValue<std::string>(
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG, params_.variantNcStress);
         addMdpOutputValue<bool>(builder, METATOMIC_MODULE_NAME, ONIOM_TAG, params_.oniom);
+        addMdpOutputValue<bool>(builder, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG, params_.linkAtoms);
     }
 }
 
@@ -374,7 +384,38 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
     {
         return;
     }
-    preprocessTopology(top, params_.mtaIndices_, params_.oniom, logger(), wi_);
+    if (params_.linkAtoms && !params_.oniom)
+    {
+        GMX_THROW(InconsistentInputError("metatomic-link-atoms requires metatomic-oniom = yes."));
+    }
+    const auto cutBonds = preprocessTopology(top, params_.mtaIndices_, params_.oniom, logger(), wi_);
+    if (params_.linkAtoms)
+    {
+        // The model sees a cap in place of each MM atom of a cut bond, so these atoms join the
+        // atoms it sees, after those of the input group. The topology keeps their classical
+        // interactions, including the bond.
+        params_.linkFrontier_ = cutBonds;
+        std::set<Index> capped;
+        for (const auto& bond : cutBonds)
+        {
+            capped.insert(bond.getMMIndex());
+        }
+        params_.mtaIndices_.insert(params_.mtaIndices_.end(), capped.begin(), capped.end());
+        GMX_LOG(logger().info)
+                .appendTextFormatted("Metatomic: %zu link atoms cap the bonds to %zu MM atoms",
+                                     cutBonds.size(),
+                                     capped.size());
+    }
+}
+
+int MetatomicParameters::numEmbeddedAtoms() const
+{
+    std::set<int> capped;
+    for (const auto& bond : linkFrontier_)
+    {
+        capped.insert(bond.getMMIndex());
+    }
+    return static_cast<int>(mtaIndices_.size() - capped.size());
 }
 
 void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
@@ -397,6 +438,17 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
     for (const auto& indexValue : params_.mtaIndices_)
     {
         GroupIndexAdder.addValue(indexValue);
+    }
+
+    // The bonds that link atoms cap, as (embedded, MM) global atom indices
+    if (!params_.linkFrontier_.empty())
+    {
+        auto linkAdder = treeBuilder.addUniformArray<std::int64_t>(LINK_FRONTIER_KEY);
+        for (const auto& bond : params_.linkFrontier_)
+        {
+            linkAdder.addValue(bond.getEmbeddedIndex());
+            linkAdder.addValue(bond.getMMIndex());
+        }
     }
 }
 
@@ -433,6 +485,17 @@ void MetatomicOptions::readParamsFromKvt(const KeyValueTreeObject& tree)
         options << property.key() << '=' << std::quoted(property.value().cast<std::string>()) << ' ';
     }
     params_.modelOptions = options.str();
+
+    params_.linkFrontier_.clear();
+    if (tree.keyExists(LINK_FRONTIER_KEY))
+    {
+        const auto bonds = tree[LINK_FRONTIER_KEY].asArray().values();
+        for (size_t i = 0; i + 1 < bonds.size(); i += 2)
+        {
+            params_.linkFrontier_.emplace_back(static_cast<int>(bonds[i].cast<std::int64_t>()),
+                                               static_cast<int>(bonds[i + 1].cast<std::int64_t>()));
+        }
+    }
 }
 
 

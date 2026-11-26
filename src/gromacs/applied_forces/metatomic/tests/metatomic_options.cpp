@@ -48,10 +48,12 @@
 
 #include "config.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <set>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "gromacs/applied_forces/nnpot/nnpot.h"
@@ -296,8 +298,15 @@ static std::unique_ptr<gmx_mtop_t> makeMtopFromFile(const std::string& simulatio
     return mtop;
 }
 
-//! Number of bonded interactions of \p numAtoms atoms with at least \p minEmbedded atoms in \p embedded
-static int countInteractions(const gmx_mtop_t& mtop, int numAtoms, const std::set<int>& embedded, int minEmbedded)
+/*! \brief Number of interactions of \p numAtoms atoms with at least \p minEmbedded atoms in \p embedded
+ *
+ * The interactions in all of \p category: bonded interactions by default.
+ */
+static int countInteractions(const gmx_mtop_t&                mtop,
+                             int                              numAtoms,
+                             const std::set<int>&             embedded,
+                             int                              minEmbedded,
+                             InteractionFunctionCategoryFlags category = sc_ifcBondedForce)
 {
     int count = 0;
     for (size_t b = 0; b < mtop.molblock.size(); ++b)
@@ -308,7 +317,7 @@ static int countInteractions(const gmx_mtop_t& mtop, int numAtoms, const std::se
             const int start = mtop.moleculeBlockIndices[b].globalAtomStart + mol * moltype.atoms.nr;
             for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
             {
-                if (!(interaction_function[ftype].categories & sc_ifcBondedForce) || NRAL(ftype) != numAtoms)
+                if ((interaction_function[ftype].categories & category) != category || NRAL(ftype) != numAtoms)
                 {
                     continue;
                 }
@@ -363,6 +372,74 @@ TEST_F(MetatomicOptionsTest, OniomKeepsTheAnglesAndDihedralsWithAnMMAtom)
         EXPECT_EQ(countInteractions(*mtop, 3, mlSet, 2), oniom ? boundaryAngles : 0);
         EXPECT_EQ(countInteractions(*mtop, 4, mlSet, 3), oniom ? boundaryDihedrals : 0);
     }
+}
+
+TEST_F(MetatomicOptionsTest, LinkAtomsCapTheCutBondsAndKeepThem)
+{
+    // CA, HA and the methyl group of alanine_vacuo: the bonds CA-N and CA-C are cut
+    const std::vector<int> ml = { 8, 9, 10, 11, 12, 13 };
+    const std::set<int>    mlSet(ml.begin(), ml.end());
+    auto                   mtop          = makeMtopFromFile("alanine_vacuo");
+    const auto             boundaryBonds = [&]
+    {
+        // bonds with parameters, not the connections that replace removed bonds
+        const auto bonds = sc_ifcChemicalBond | sc_ifcBType;
+        return countInteractions(*mtop, 2, mlSet, 1, bonds) - countInteractions(*mtop, 2, mlSet, 2, bonds);
+    };
+    ASSERT_EQ(boundaryBonds(), 2);
+
+    MetatomicOptions options;
+    fillOptionsFromMdpValues(metatomicBuildDefaultMdpValues(), &options);
+    options.params_.oniom                = true;
+    options.params_.linkAtoms            = true;
+    const std::vector<IndexGroup> groups = { { "System", ml } };
+    options.setInputGroupIndices(IndexGroupsAndNames(groups));
+    MDLogger logger;
+    options.setLogger(logger);
+    WarningHandler wi(true, 0);
+    options.setWarningHandler(&wi);
+    options.modifyTopology(mtop.get());
+
+    // the model sees N and C after the input group, with a cap in place of each
+    const auto& params = options.parameters();
+    EXPECT_EQ(params.mtaIndices_, (std::vector<Index>{ 8, 9, 10, 11, 12, 13, 6, 14 }));
+    EXPECT_EQ(params.numEmbeddedAtoms(), 6);
+    ASSERT_EQ(params.linkFrontier_.size(), 2U);
+    EXPECT_EQ(params.linkFrontier_[0].getEmbeddedIndex(), 8);
+    EXPECT_EQ(params.linkFrontier_[0].getMMIndex(), 6);
+    EXPECT_EQ(params.linkFrontier_[1].getEmbeddedIndex(), 8);
+    EXPECT_EQ(params.linkFrontier_[1].getMMIndex(), 14);
+    // the topology keeps the cut bonds, and the non-bonded pairs of N and C with the input group
+    EXPECT_EQ(boundaryBonds(), 2);
+    std::vector<int> excluded(mtop->intermolecularExclusionGroup.begin(),
+                              mtop->intermolecularExclusionGroup.end());
+    std::sort(excluded.begin(), excluded.end());
+    EXPECT_EQ(excluded, ml);
+
+    // the tpr file keeps the capped bonds
+    KeyValueTreeBuilder builder;
+    options.writeParamsToKvt(builder.rootObject());
+    options.params_.linkFrontier_.clear();
+    options.readParamsFromKvt(builder.build());
+    ASSERT_EQ(options.parameters().linkFrontier_.size(), 2U);
+    EXPECT_EQ(options.parameters().linkFrontier_[1].getEmbeddedIndex(), 8);
+    EXPECT_EQ(options.parameters().linkFrontier_[1].getMMIndex(), 14);
+    EXPECT_EQ(options.parameters().numEmbeddedAtoms(), 6);
+}
+
+TEST_F(MetatomicOptionsTest, LinkAtomsRequireOniom)
+{
+    auto             mtop = makeMtopFromFile("alanine_vacuo");
+    MetatomicOptions options;
+    fillOptionsFromMdpValues(metatomicBuildDefaultMdpValues(), &options);
+    options.params_.linkAtoms            = true;
+    const std::vector<IndexGroup> groups = { { "System", { 8, 9, 10 } } };
+    options.setInputGroupIndices(IndexGroupsAndNames(groups));
+    MDLogger logger;
+    options.setLogger(logger);
+    EXPECT_THAT([&] { options.modifyTopology(mtop.get()); },
+                ::testing::ThrowsMessage<InconsistentInputError>(::testing::HasSubstr(
+                        "metatomic-link-atoms requires metatomic-oniom = yes.")));
 }
 
 TEST_F(MetatomicOptionsTest, InternalsToKvtAndBack)

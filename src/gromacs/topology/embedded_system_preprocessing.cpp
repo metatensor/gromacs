@@ -65,6 +65,38 @@ static bool isEmbeddedAtom(Index globalAtomIndex, const std::set<int>& embeddedI
     return (embeddedIndices.find(globalAtomIndex) != embeddedIndices.end());
 }
 
+//! Spread \p forceOnLink over the atoms of the bond along \p direction, from the embedded atom
+static std::tuple<RVec, RVec> spreadLinkAtomForceAlongDirection(const RVec& forceOnLink,
+                                                                const RVec& direction,
+                                                                real        linkDistance)
+{
+    // adapted from vsite.cpp::spread_vsite2FD()
+    const real distance = norm(direction);
+    if (distance == 0.0_real)
+    {
+        GMX_THROW(InconsistentInputError(
+                "Link atom force redistribution found a zero-length boundary bond."));
+    }
+    const real invDist        = 1.0_real / distance;
+    const real b              = linkDistance * invDist;
+    const real projectedForce = dot(direction, forceOnLink) * invDist * invDist;
+
+    const RVec forceOnMM       = b * (forceOnLink - projectedForce * direction);
+    const RVec forceOnEmbedded = forceOnLink - forceOnMM;
+
+    return { forceOnEmbedded, forceOnMM };
+}
+
+std::tuple<RVec, RVec> spreadLinkAtomForce(const RVec& forceOnLink,
+                                           const RVec& embeddedPosition,
+                                           const RVec& mmPosition,
+                                           const RVec& mmShift,
+                                           real        linkDistance)
+{
+    return spreadLinkAtomForceAlongDirection(
+            forceOnLink, mmPosition + mmShift - embeddedPosition, linkDistance);
+}
+
 LinkFrontierAtom::LinkFrontierAtom(int embeddedIndex, int mmIndex) :
     embeddedIndex_(embeddedIndex), mmIndex_(mmIndex)
 {
@@ -132,18 +164,9 @@ void LinkFrontierAtom::setLinkAtomNumber(const int& linkAtomNumber)
 
 std::tuple<RVec, RVec> LinkFrontierAtom::spreadForce(const RVec& forceOnLink, const t_pbc& pbc) const
 {
-    // adapted from vsite.cpp::spread_vsite2FD()
-    RVec forceOnEmbedded, forceOnMM, distance;
-
+    RVec distance;
     pbc_dx_aiuc(&pbc, posMM_, posEmb_, distance);
-    const real invDist        = 1. / norm(distance);
-    const real b              = linkDistance_ * invDist;
-    const real projectedForce = dot(distance, forceOnLink) * invDist * invDist;
-
-    forceOnMM       = b * (forceOnLink - projectedForce * distance);
-    forceOnEmbedded = forceOnLink - forceOnMM;
-
-    return { forceOnEmbedded, forceOnMM };
+    return spreadLinkAtomForceAlongDirection(forceOnLink, distance, linkDistance_);
 }
 
 std::vector<bool> splitEmbeddedBlocks(gmx_mtop_t* mtop, const std::set<int>& embeddedIndices)

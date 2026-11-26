@@ -16,5 +16,6 @@ metatomic-non-conservative = false
 metatomic-variant-nc-forces = 
 metatomic-variant-nc-stress = 
 metatomic-oniom          = false
+metatomic-link-atoms     = false
 </String>
 </ReferenceData>

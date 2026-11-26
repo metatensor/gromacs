@@ -145,8 +145,15 @@ public:
 
         const auto setLocalAtomSetFunction = [this](LocalAtomSetManager* localAtomSetManager)
         {
-            LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().mtaIndices_);
+            const auto&  params  = options_.parameters();
+            LocalAtomSet atomSet = localAtomSetManager->add(params.mtaIndices_);
             options_.setLocalInputAtomSet(atomSet);
+            if (params.oniom)
+            {
+                // the input group, without the MM atoms that carry link atoms
+                embeddedAtoms_ = std::make_unique<LocalAtomSet>(localAtomSetManager->add(
+                        makeConstArrayRef(params.mtaIndices_).subArray(0, params.numEmbeddedAtoms())));
+            }
         };
         notifiers->simulationSetupNotifier_.subscribe(setLocalAtomSetFunction);
 
@@ -234,9 +241,11 @@ public:
         const auto& params = options_.parameters();
         if (params.oniom)
         {
+            const auto embedded =
+                    makeConstArrayRef(params.mtaIndices_).subArray(0, params.numEmbeddedAtoms());
             std::vector<real> charges;
             std::vector<int>  groups;
-            for (const Index i : params.mtaIndices_)
+            for (const Index i : embedded)
             {
                 const auto& atom = params.atoms_.atom[i];
                 if (atom.q != atom.qB)
@@ -249,14 +258,14 @@ public:
                 groups.push_back(params.energyGroups_[i]);
             }
             embeddedCoulomb_ = std::make_unique<EmbeddedCoulombCorrectionProvider>(
-                    *params.mtaAtoms_, charges, groups, params.numEnergyGroups_, *params.pbcType_, options_.mpiComm());
+                    *embeddedAtoms_, charges, groups, params.numEnergyGroups_, *params.pbcType_, options_.mpiComm());
             forceProviders->addForceProvider(embeddedCoulomb_.get(), "Metatomic embedded Coulomb");
             GMX_LOG(options_.logger().info)
                     .asParagraph()
                     .appendTextFormatted(
                             "Metatomic ONIOM: removing the classical Coulomb interaction between "
                             "the %zu embedded atoms, including pairs beyond rcoulomb.",
-                            params.mtaIndices_.size());
+                            embedded.size());
         }
     }
 
@@ -277,6 +286,8 @@ private:
     MetatomicOptions options_;
 
     std::unique_ptr<MetatomicForceProvider> force_provider_;
+    //! The atoms of the input group, with ONIOM
+    std::unique_ptr<LocalAtomSet> embeddedAtoms_;
     //! Removes the classical Coulomb interaction between the embedded atoms, with ONIOM
     std::unique_ptr<EmbeddedCoulombCorrectionProvider> embeddedCoulomb_;
     //! False for a model that reads no pairs

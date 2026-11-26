@@ -51,6 +51,7 @@
 
 #include "gromacs/mdtypes/imdpoptionprovider.h"
 #include "gromacs/topology/atoms.h"
+#include "gromacs/topology/embedded_system_preprocessing.h"
 
 // some forward declarations
 struct gmx_mtop_t;
@@ -118,7 +119,14 @@ struct MetatomicParameters
      * among the embedded atoms are removed.
      */
     bool oniom = false;
+    //! With ONIOM, cap the bonds cut between embedded and MM atoms with hydrogen link atoms
+    bool linkAtoms = false;
 
+    /*! \brief Global indices of the atoms the model sees.
+     *
+     * The atoms of metatomic-input-group come first. With link atoms, the MM atoms of the
+     * bonds they cap follow: the model sees a cap in place of each.
+     */
     std::vector<Index>            mtaIndices_;
     std::unique_ptr<LocalAtomSet> mtaAtoms_;
     t_atoms                       atoms_;
@@ -130,6 +138,11 @@ struct MetatomicParameters
     std::vector<int> energyGroups_;
     //! Number of energy groups
     int numEnergyGroups_ = 1;
+    //! The bonds between embedded and MM atoms that link atoms cap, in global atom indices
+    std::vector<LinkFrontierAtom> linkFrontier_;
+
+    //! Number of atoms of metatomic-input-group, the first of mtaIndices_
+    int numEmbeddedAtoms() const;
 };
 
 class MetatomicOptions final : public IMdpOptionProvider

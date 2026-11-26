@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "gromacs/mdtypes/iforceprovider.h"
+#include "gromacs/topology/embedded_system_preprocessing.h"
 
 #include "metatomic_options.h"
 
@@ -93,6 +94,18 @@ class PlainPairlistRanges;
  * d = x[I]+shift - x[J]. Metatensor convention: r_ij = x[J] + cell_shift*box
  * - x[I]. Therefore metatensor cell shifts = negated GROMACS cell shifts.
  * With DD, pairs are minimum-image pairs (findPairs).
+ *
+ * ## Link atoms (metatomic-link-atoms)
+ *
+ * Each bond between an embedded atom and an MM atom gets a hydrogen cap, at the link
+ * distance from the embedded atom along the bond. The MM atoms of these bonds are MTA
+ * atoms after those of the input group: the first cap on an MM atom takes its row in the
+ * model input, further caps on the same atom get rows after the local atoms. The pairs of
+ * the caps are found from their positions. The force on a cap is spread onto the two atoms
+ * of its bond, and the virial gets the term of the fixed cap distance. With DD, the
+ * environment reaches twice the longest capped bond further, so that the rank has both atoms
+ * of every cap it needs, and a cap beyond the local atoms belongs to the home rank of its MM
+ * atom.
  */
 class MetatomicForceProvider final : public IForceProvider
 {
@@ -145,6 +158,25 @@ private:
      */
     void returnEnvironmentForces(ArrayRef<const double> forces, ForceProviderOutput* outputs);
 
+    /*! \brief Place the link caps of the bonds whose two atoms the model sees.
+     *
+     * Fills caps_, the types and positions the model sees (modelTypes_, modelPositions_), and
+     * its pairs (modelPairs_, modelShifts_): those of pairlistMta_ without the MM atoms of the
+     * caps, and the pairs of the caps within the largest pair-list cutoff.
+     *
+     * \param[in] box  Current simulation box.
+     */
+    void placeLinkCaps(const matrix box);
+
+    /*! \brief Spread the forces on the caps onto the atoms of their bonds.
+     *
+     * \param[in]     box     Current simulation box.
+     * \param[in,out] forces  Forces on the rows of the model input, flat; the rows of the caps
+     *                        beyond the local atoms are removed.
+     * \param[in,out] virial  With a value, gets the term of the fixed cap distance.
+     */
+    void spreadLinkCapForces(const matrix box, std::vector<double>* forces, matrix* virial) const;
+
     const MetatomicOptions& options_;
     const MDLogger&         logger_;
     const MpiComm&          mpiComm_;
@@ -183,6 +215,35 @@ private:
     std::vector<int32_t> pairlistMta_;
     //! Cell shifts for each pair (metatensor convention: shift applied to second atom).
     std::vector<IVec> cellShiftsMta_;
+
+    //! A link cap of the current step
+    struct LinkCap
+    {
+        //! Row of the embedded atom of the bond
+        int32_t embedded;
+        //! Row of the MM atom of the bond
+        int32_t mm;
+        //! Row of the cap: the MM atom's for its first cap, after the local atoms for others
+        int32_t row;
+        //! Cell shift of the MM atom to the minimum image of the bond
+        IVec shift;
+        //! Distance of the cap from the embedded atom
+        real distance;
+    };
+    //! The bonds capped by link atoms, with the indices in mtaIndices_ of their atoms
+    std::vector<LinkFrontierAtom> linkBonds_;
+    //! The caps of the current step
+    std::vector<LinkCap> caps_;
+    //! Row of each MTA atom the model sees, -1 for the others
+    std::vector<int32_t> rowOfMta_;
+    //! Whether each row of the model input is a cap
+    std::vector<char> isCapRow_;
+    //! With caps, the types and positions of the rows of the model input
+    std::vector<int32_t> modelTypes_;
+    std::vector<RVec>    modelPositions_;
+    //! With caps, the pairs of the model input and their cell shifts, as pairlistMta_
+    std::vector<int32_t> modelPairs_;
+    std::vector<IVec>    modelShifts_;
 
     //! Samples of the pairs given to the model, flat [n_pairs * 5]: i, j, cs_a, cs_b, cs_c.
     //! Filled from pairlistMta_/cellShiftsMta_, kept to reuse the allocation.
