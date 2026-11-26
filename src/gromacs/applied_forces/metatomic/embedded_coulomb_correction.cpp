@@ -67,8 +67,9 @@ EmbeddedCoulombCorrection computeEmbeddedCoulombCorrection(ArrayRef<const RVec> 
                                                            const t_pbc&               pbc,
                                                            const interaction_const_t& ic,
                                                            ArrayRef<const int>        energyGroups,
-                                                           int numEnergyGroups,
-                                                           int numThreads)
+                                                           int                 numEnergyGroups,
+                                                           ArrayRef<const int> sites,
+                                                           int                 numThreads)
 {
     const auto& coulomb = ic.coulomb;
     const bool  ewald   = usingPmeOrEwald(coulomb.type);
@@ -84,6 +85,7 @@ EmbeddedCoulombCorrection computeEmbeddedCoulombCorrection(ArrayRef<const RVec> 
     GMX_RELEASE_ASSERT(q.ssize() == n, "Need one charge per embedded atom");
     GMX_RELEASE_ASSERT(energyGroups.empty() || energyGroups.ssize() == n,
                        "Need one energy group per embedded atom");
+    GMX_RELEASE_ASSERT(sites.empty() || sites.ssize() == n, "Need one site per embedded atom");
 
     EmbeddedCoulombCorrection result;
     result.forces.assign(n, { 0, 0, 0 });
@@ -123,6 +125,10 @@ EmbeddedCoulombCorrection computeEmbeddedCoulombCorrection(ArrayRef<const RVec> 
             {
                 for (int j = i + 1; j < n; j++)
                 {
+                    if (!sites.empty() && sites[i] != sites[j])
+                    {
+                        continue;
+                    }
                     const double qq = coulomb.epsfac * q[i] * q[j];
                     if (qq == 0)
                     {
@@ -202,11 +208,13 @@ EmbeddedCoulombCorrectionProvider::EmbeddedCoulombCorrectionProvider(const Local
                                                                      std::vector<int> energyGroups,
                                                                      int            numEnergyGroups,
                                                                      PbcType        pbcType,
-                                                                     const MpiComm& mpiComm) :
+                                                                     const MpiComm& mpiComm,
+                                                                     std::vector<int> sites) :
     atoms_(atoms),
     charges_(std::move(charges)),
     energyGroups_(std::move(energyGroups)),
     numEnergyGroups_(numEnergyGroups),
+    sites_(std::move(sites)),
     pbcType_(pbcType),
     mpiComm_(mpiComm),
     positions_(3 * charges_.size())
@@ -248,6 +256,7 @@ void EmbeddedCoulombCorrectionProvider::calculateForces(const ForceProviderInput
                                              *input.interactionConst_,
                                              energyGroups_,
                                              numEnergyGroups_,
+                                             sites_,
                                              gmx_omp_nthreads_get(ModuleMultiThread::Default));
 
     auto force = output->forceWithVirial_.force_;

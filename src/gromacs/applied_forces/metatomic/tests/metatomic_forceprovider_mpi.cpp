@@ -189,6 +189,12 @@ void checkLinkCaps(const MpiComm&                       mpiComm,
             atomSets.add(ArrayRef<const Index>(options.params_.mtaIndices_)));
     options.params_.pbcType_      = std::make_unique<PbcType>(PbcType::Xyz);
     options.params_.linkFrontier_ = system.linkFrontier();
+    if (!system.sites.empty())
+    {
+        options.params_.mtaSites_         = system.sites;
+        options.params_.siteChargeValues_ = { 0, 0 };
+        options.params_.siteSpinValues_   = { 1, 1 };
+    }
 
     matrix box;
     for (int a = 0; a < DIM; ++a)
@@ -269,6 +275,11 @@ TEST(MetatomicForceProviderMpi, SpreadsTheForcesOnLinkCapsAcrossRanks)
     {
         SCOPED_TRACE("every capped bond across ranks");
         checkLinkCaps(mpiComm, LinkCapSystem(), { { 1, 3 }, { 0, 2, 4 } });
+    }
+    // two sites, each across the ranks
+    {
+        SCOPED_TRACE("two sites across ranks");
+        checkLinkCaps(mpiComm, LinkCapSystem::inTwoSites(), { { 0, 1 }, { 2, 3, 4 } });
     }
     // rank 0 has the MM atom only, and its cap needs embedded atom 1, beyond the interaction
     // range of the MM atom

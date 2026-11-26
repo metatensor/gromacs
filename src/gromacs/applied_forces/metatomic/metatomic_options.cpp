@@ -47,20 +47,28 @@
 #include "config.h"
 
 #include <cctype>
+#include <cmath>
 
 #include <algorithm>
 #include <iomanip>
+#include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
+#include <type_traits>
 
 #include "gromacs/domdec/localatomset.h"
 #include "gromacs/fileio/warninp.h"
+#include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/imdpoptionprovider_helpers.h"
 #include "gromacs/mdtypes/md_enums.h"
 #include "gromacs/options/basicoptions.h"
 #include "gromacs/options/optionsection.h"
 #include "gromacs/selection/indexutil.h"
 #include "gromacs/topology/embedded_system_preprocessing.h"
+#include "gromacs/topology/exclusionblocks.h"
+#include "gromacs/topology/ifunc.h"
+#include "gromacs/topology/mtop_lookup.h"
 #include "gromacs/topology/mtop_util.h"
 #include "gromacs/topology/topology.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
@@ -96,13 +104,137 @@ static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
 static const std::string ONIOM_TAG                 = "oniom";
 static const std::string LINK_ATOMS_TAG            = "link-atoms";
 static const std::string LINK_FRONTIER_KEY         = "metatomic-link-frontier";
+static const std::string SITE_GROUPS_TAG           = "site-groups";
+static const std::string SITE_CHARGES_TAG          = "site-charges";
+static const std::string SITE_SPINS_TAG            = "site-spin-multiplicities";
+static const std::string SITES_KEY                 = "metatomic-sites";
 
 namespace
 {
 
-//! \brief Preprocess the topology for the atoms given to the model, and return the bonds they cut.
+/*! \brief Excludes the non-bonded interactions within each site, keeping those between sites
+ *
+ * GROMACS has a single intermolecular exclusion group, which would exclude all pairs of
+ * embedded atoms. With several sites, the pairs within a site are added to the exclusions
+ * of its molecule instead, so each site must lie within one molecule. Must run after
+ * splitEmbeddedBlocks(), which gives each molecule with embedded atoms its own block.
+ */
+void addSiteExclusions(gmx_mtop_t*           mtop,
+                       ArrayRef<const Index> mtaIndices,
+                       ArrayRef<const int>   sites,
+                       int                   numSites,
+                       const MDLogger&       logger)
+{
+    std::vector<std::vector<int>> siteAtoms(numSites);
+    std::vector<int>              siteBlock(numSites, -1);
+    MTopLookUp                    lookUp(*mtop);
+    for (size_t k = 0; k < mtaIndices.size(); k++)
+    {
+        const auto location = lookUp.getMolblockAtomIndex(mtaIndices[k]);
+        const int  block    = location.molBlock;
+        const int  atom     = location.atomIndex;
+        const int  s        = sites[k];
+        if (siteBlock[s] >= 0 && siteBlock[s] != block)
+        {
+            GMX_THROW(InconsistentInputError(
+                    formatString("Site %d spans more than one molecule; with several "
+                                 "metatomic-site-groups each site must lie within one molecule.",
+                                 s + 1)));
+        }
+        GMX_RELEASE_ASSERT(mtop->molblock[block].nmol == 1,
+                           "Each molecule with embedded atoms has a block of its own");
+        siteBlock[s] = block;
+        siteAtoms[s].push_back(atom);
+    }
+
+    int                                        numPairs = 0;
+    std::map<int, std::vector<ExclusionBlock>> newExclusions;
+    for (int s = 0; s < numSites; s++)
+    {
+        if (siteBlock[s] < 0)
+        {
+            continue;
+        }
+        auto& blocks = newExclusions[siteBlock[s]];
+        blocks.resize(mtop->moltype[mtop->molblock[siteBlock[s]].type].atoms.nr);
+        for (const int i : siteAtoms[s])
+        {
+            for (const int j : siteAtoms[s])
+            {
+                if (i != j)
+                {
+                    blocks[i].atomNumber.push_back(j);
+                }
+            }
+        }
+        numPairs += siteAtoms[s].size() * (siteAtoms[s].size() - 1) / 2;
+    }
+    for (auto& [block, blocks] : newExclusions)
+    {
+        mergeExclusions(&mtop->moltype[mtop->molblock[block].type].excls, blocks);
+    }
+    GMX_LOG(logger.info)
+            .appendTextFormatted(
+                    "Excluded the %d atom pairs within %d sites; pairs between sites keep their "
+                    "classical interactions\n",
+                    numPairs,
+                    numSites);
+}
+
+/*! \brief Rejects a chemical bond between atoms of two sites.
+ *
+ * The model sees each site alone, and the topology preprocessing removes the bond.
+ */
+void checkNoBondsBetweenSites(const gmx_mtop_t& mtop, ArrayRef<const Index> mtaIndices, ArrayRef<const int> sites)
+{
+    std::map<int, int> siteOf;
+    for (size_t k = 0; k < mtaIndices.size(); k++)
+    {
+        siteOf.emplace(mtaIndices[k], sites[k]);
+    }
+    for (size_t b = 0; b < mtop.molblock.size(); ++b)
+    {
+        const auto& moltype = mtop.moltype[mtop.molblock[b].type];
+        for (int mol = 0; mol < mtop.molblock[b].nmol; ++mol)
+        {
+            const int start = mtop.moleculeBlockIndices[b].globalAtomStart + mol * moltype.atoms.nr;
+            for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
+            {
+                if (!(interaction_function[ftype].categories & sc_ifcChemicalBond) || NRAL(ftype) != 2)
+                {
+                    continue;
+                }
+                const auto& iatoms = moltype.ilist[ftype].iatoms;
+                for (size_t j = 0; j < iatoms.size(); j += 3)
+                {
+                    const auto first  = siteOf.find(iatoms[j + 1] + start);
+                    const auto second = siteOf.find(iatoms[j + 2] + start);
+                    if (first != siteOf.end() && second != siteOf.end() && first->second != second->second)
+                    {
+                        GMX_THROW(InconsistentInputError(formatString(
+                                "Atoms %d and %d are bonded but in sites %d and %d. The model "
+                                "evaluates each site alone, so the bond would have no energy; put "
+                                "both atoms in one of metatomic-site-groups.",
+                                first->first + 1,
+                                second->first + 1,
+                                first->second + 1,
+                                second->second + 1)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/*! \brief Preprocess the topology for the atoms given to the model, and return the bonds they cut.
+ *
+ * With several sites, \p sites gives the site of each atom, and only the pairs within a site
+ * are excluded.
+ */
 std::vector<LinkFrontierAtom> preprocessTopology(gmx_mtop_t*           mtop,
                                                  ArrayRef<const Index> mtaIndices,
+                                                 ArrayRef<const int>   sites,
+                                                 int                   numSites,
                                                  bool                  oniom,
                                                  const MDLogger&       logger,
                                                  WarningHandler*       wi)
@@ -123,8 +255,16 @@ std::vector<LinkFrontierAtom> preprocessTopology(gmx_mtop_t*           mtop,
     // 1) Split QM-containing molecules from other molecules in blocks
     std::vector<bool> isMTABlock = splitEmbeddedBlocks(mtop, mtaIndicesSet);
 
-    // 2) Exclude non-bonded interactions between QM atoms
-    addEmbeddedNBExclusions(mtop, mtaIndicesSet, logger);
+    // 2) Exclude non-bonded interactions between QM atoms, within each site with several sites
+    if (numSites > 1)
+    {
+        checkNoBondsBetweenSites(*mtop, mtaIndices, sites);
+        addSiteExclusions(mtop, mtaIndices, sites, numSites, logger);
+    }
+    else
+    {
+        addEmbeddedNBExclusions(mtop, mtaIndicesSet, logger);
+    }
 
     // 3) Build atomNumbers vector with atomic numbers of all atoms
     std::vector<int> atomNumbers = buildEmbeddedAtomNumbers(*mtop);
@@ -291,6 +431,10 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG);
     addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ONIOM_TAG);
     addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG);
+    for (const auto& tag : { SITE_GROUPS_TAG, SITE_CHARGES_TAG, SITE_SPINS_TAG })
+    {
+        addMdpTransformFromString<std::string>(rules, stringIdentityTransform, METATOMIC_MODULE_NAME, tag);
+    }
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -311,6 +455,9 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(StringOption(VARIANT_NC_STRESS_TAG.c_str()).store(&params_.variantNcStress));
     section.addOption(BooleanOption(ONIOM_TAG.c_str()).store(&params_.oniom));
     section.addOption(BooleanOption(LINK_ATOMS_TAG.c_str()).store(&params_.linkAtoms));
+    section.addOption(StringOption(SITE_GROUPS_TAG.c_str()).store(&params_.siteGroups));
+    section.addOption(StringOption(SITE_CHARGES_TAG.c_str()).store(&params_.siteCharges));
+    section.addOption(StringOption(SITE_SPINS_TAG.c_str()).store(&params_.siteSpinMultiplicities));
 }
 
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
@@ -348,6 +495,10 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG, params_.variantNcStress);
         addMdpOutputValue<bool>(builder, METATOMIC_MODULE_NAME, ONIOM_TAG, params_.oniom);
         addMdpOutputValue<bool>(builder, METATOMIC_MODULE_NAME, LINK_ATOMS_TAG, params_.linkAtoms);
+        addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, SITE_GROUPS_TAG, params_.siteGroups);
+        addMdpOutputValue<std::string>(builder, METATOMIC_MODULE_NAME, SITE_CHARGES_TAG, params_.siteCharges);
+        addMdpOutputValue<std::string>(
+                builder, METATOMIC_MODULE_NAME, SITE_SPINS_TAG, params_.siteSpinMultiplicities);
     }
 }
 
@@ -376,6 +527,103 @@ void MetatomicOptions::setInputGroupIndices(const IndexGroupsAndNames& indexGrou
                 "Group %s defining metatomic potential input atoms should not be empty.",
                 params_.inputGroup.c_str())));
     }
+
+    // Sites: every input atom in exactly one site group; one site without groups
+    params_.mtaSites_.clear();
+    const auto siteNames = splitString(params_.siteGroups);
+    const int  numSites  = siteNames.empty() ? 1 : static_cast<int>(siteNames.size());
+    if (!siteNames.empty())
+    {
+        std::map<Index, int> siteOf;
+        for (int s = 0; s < numSites; s++)
+        {
+            for (const Index atom : indexGroupsAndNames.indices(siteNames[s]))
+            {
+                if (!siteOf.emplace(atom, s).second)
+                {
+                    GMX_THROW(InconsistentInputError(formatString(
+                            "Atom %d is in more than one of metatomic-site-groups (%s and %s).",
+                            static_cast<int>(atom) + 1,
+                            siteNames[siteOf[atom]].c_str(),
+                            siteNames[s].c_str())));
+                }
+            }
+        }
+        for (const Index atom : params_.mtaIndices_)
+        {
+            const auto it = siteOf.find(atom);
+            if (it == siteOf.end())
+            {
+                GMX_THROW(InconsistentInputError(
+                        formatString("Atom %d of %s is in none of metatomic-site-groups.",
+                                     static_cast<int>(atom) + 1,
+                                     params_.inputGroup.c_str())));
+            }
+            params_.mtaSites_.push_back(it->second);
+        }
+        if (siteOf.size() != params_.mtaIndices_.size())
+        {
+            GMX_THROW(InconsistentInputError(formatString(
+                    "metatomic-site-groups contain %zu atoms, but %s has %zu; the sites must "
+                    "divide the input group.",
+                    siteOf.size(),
+                    params_.inputGroup.c_str(),
+                    params_.mtaIndices_.size())));
+        }
+    }
+
+    // One value per site, or one value for all
+    const auto perSite = [numSites](const std::string& option, const std::string& text, const auto fallback)
+    {
+        using T = std::decay_t<decltype(fallback)>;
+        std::vector<T> values;
+        for (const auto& word : splitString(text))
+        {
+            try
+            {
+                std::size_t  used  = 0;
+                const double value = std::stod(word, &used);
+                if (used != word.size() || (std::is_integral_v<T> && value != std::round(value)))
+                {
+                    throw std::invalid_argument(word);
+                }
+                values.push_back(static_cast<T>(value));
+            }
+            catch (const std::exception&)
+            {
+                GMX_THROW(InconsistentInputError(formatString(
+                        "Cannot read '%s' in metatomic-%s.", word.c_str(), option.c_str())));
+            }
+        }
+        if (values.empty())
+        {
+            values.assign(numSites, fallback);
+        }
+        else if (values.size() == 1)
+        {
+            // a copy, as assign() overwrites the value it would read
+            const T value = values[0];
+            values.assign(numSites, value);
+        }
+        else if (static_cast<int>(values.size()) != numSites)
+        {
+            GMX_THROW(InconsistentInputError(formatString(
+                    "metatomic-%s has %zu values for %d sites; give one value, or one per site.",
+                    option.c_str(),
+                    values.size(),
+                    numSites)));
+        }
+        return values;
+    };
+    params_.siteChargeValues_ = perSite(SITE_CHARGES_TAG, params_.siteCharges, real(0));
+    params_.siteSpinValues_   = perSite(SITE_SPINS_TAG, params_.siteSpinMultiplicities, int(1));
+    for (const int multiplicity : params_.siteSpinValues_)
+    {
+        if (multiplicity < 1)
+        {
+            GMX_THROW(InconsistentInputError("metatomic-site-spin-multiplicities must be >= 1."));
+        }
+    }
 }
 
 void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
@@ -388,7 +636,8 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
     {
         GMX_THROW(InconsistentInputError("metatomic-link-atoms requires metatomic-oniom = yes."));
     }
-    const auto cutBonds = preprocessTopology(top, params_.mtaIndices_, params_.oniom, logger(), wi_);
+    const auto cutBonds = preprocessTopology(
+            top, params_.mtaIndices_, params_.mtaSites_, params_.numSites(), params_.oniom, logger(), wi_);
     if (params_.oniom && !params_.linkAtoms && !cutBonds.empty() && wi_ != nullptr)
     {
         wi_->addWarning(formatString(
@@ -407,16 +656,54 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
         // atoms it sees, after those of the input group. The topology keeps their classical
         // interactions, including the bond.
         params_.linkFrontier_ = cutBonds;
-        std::set<Index> capped;
+        // the MM atom of a cap is in the site of its embedded atom
+        std::map<Index, int> siteOf;
+        for (size_t k = 0; k < params_.mtaIndices_.size(); k++)
+        {
+            siteOf.emplace(params_.mtaIndices_[k], params_.siteOf(k));
+        }
+        std::map<Index, int> capped;
         for (const auto& bond : cutBonds)
         {
-            capped.insert(bond.getMMIndex());
+            const int site            = siteOf.at(bond.getEmbeddedIndex());
+            const auto [it, inserted] = capped.emplace(bond.getMMIndex(), site);
+            if (!inserted && it->second != site)
+            {
+                GMX_THROW(InconsistentInputError(formatString(
+                        "Atom %d is bonded to atoms of two sites; it cannot carry link atoms of "
+                        "both.",
+                        bond.getMMIndex() + 1)));
+            }
         }
-        params_.mtaIndices_.insert(params_.mtaIndices_.end(), capped.begin(), capped.end());
+        for (const auto& [atom, site] : capped)
+        {
+            params_.mtaIndices_.push_back(atom);
+            if (!params_.mtaSites_.empty())
+            {
+                params_.mtaSites_.push_back(site);
+            }
+        }
         GMX_LOG(logger().info)
                 .appendTextFormatted("Metatomic: %zu link atoms cap the bonds to %zu MM atoms",
                                      cutBonds.size(),
                                      capped.size());
+    }
+}
+
+void MetatomicOptions::addExclusionDistanceExemptions(ExclusionDistanceExemptions* exemptions) const
+{
+    if (!params_.active || !params_.oniom)
+    {
+        return;
+    }
+    std::vector<std::vector<int>> sites(params_.numSites());
+    for (int k = 0; k < params_.numEmbeddedAtoms(); k++)
+    {
+        sites[params_.siteOf(k)].push_back(static_cast<int>(params_.mtaIndices_[k]));
+    }
+    for (auto& site : sites)
+    {
+        exemptions->groups.push_back(std::move(site));
     }
 }
 
@@ -450,6 +737,27 @@ void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)
     for (const auto& indexValue : params_.mtaIndices_)
     {
         GroupIndexAdder.addValue(indexValue);
+    }
+
+    // The site of each atom given to the model, and the charge and spin multiplicity of each site
+    if (!params_.mtaSites_.empty())
+    {
+        auto sitesAdder = treeBuilder.addUniformArray<std::int64_t>(SITES_KEY);
+        for (const int site : params_.mtaSites_)
+        {
+            sitesAdder.addValue(site);
+        }
+    }
+    auto chargeAdder = treeBuilder.addUniformArray<real>(METATOMIC_MODULE_NAME + "-" + SITE_CHARGES_TAG);
+    for (const real charge : params_.siteChargeValues_)
+    {
+        chargeAdder.addValue(charge);
+    }
+    auto spinAdder =
+            treeBuilder.addUniformArray<std::int64_t>(METATOMIC_MODULE_NAME + "-" + SITE_SPINS_TAG);
+    for (const int multiplicity : params_.siteSpinValues_)
+    {
+        spinAdder.addValue(multiplicity);
     }
 
     // The bonds that link atoms cap, as (embedded, MM) global atom indices
@@ -497,6 +805,44 @@ void MetatomicOptions::readParamsFromKvt(const KeyValueTreeObject& tree)
         options << property.key() << '=' << std::quoted(property.value().cast<std::string>()) << ' ';
     }
     params_.modelOptions = options.str();
+
+    // Sites; without them, one site of charge 0 and multiplicity 1
+    params_.mtaSites_.clear();
+    params_.siteChargeValues_ = { 0 };
+    params_.siteSpinValues_   = { 1 };
+    if (tree.keyExists(SITES_KEY))
+    {
+        for (const auto& value : tree[SITES_KEY].asArray().values())
+        {
+            params_.mtaSites_.push_back(static_cast<int>(value.cast<std::int64_t>()));
+        }
+    }
+    const std::string chargesKey = METATOMIC_MODULE_NAME + "-" + SITE_CHARGES_TAG;
+    if (tree.keyExists(chargesKey))
+    {
+        params_.siteChargeValues_.clear();
+        for (const auto& value : tree[chargesKey].asArray().values())
+        {
+            params_.siteChargeValues_.push_back(value.cast<real>());
+        }
+    }
+    const std::string spinsKey = METATOMIC_MODULE_NAME + "-" + SITE_SPINS_TAG;
+    if (tree.keyExists(spinsKey))
+    {
+        params_.siteSpinValues_.clear();
+        for (const auto& value : tree[spinsKey].asArray().values())
+        {
+            params_.siteSpinValues_.push_back(static_cast<int>(value.cast<std::int64_t>()));
+        }
+    }
+    if ((!params_.mtaSites_.empty() && params_.mtaSites_.size() != params_.mtaIndices_.size())
+        || params_.siteChargeValues_.size() != params_.siteSpinValues_.size()
+        || std::any_of(params_.mtaSites_.begin(),
+                       params_.mtaSites_.end(),
+                       [this](int site) { return site < 0 || site >= params_.numSites(); }))
+    {
+        GMX_THROW(InconsistentInputError("Inconsistent metatomic site data in the tpr file."));
+    }
 
     params_.linkFrontier_.clear();
     if (tree.keyExists(LINK_FRONTIER_KEY))

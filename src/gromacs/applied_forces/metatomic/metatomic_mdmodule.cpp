@@ -57,6 +57,7 @@
 #include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
 #include "gromacs/utility/logger.h"
+#include "gromacs/utility/stringutil.h"
 
 #include "embedded_coulomb_correction.h"
 #include "metatomic_forceprovider.h"
@@ -86,6 +87,8 @@ public:
      * after each notification the Metatomic module subscribes to:
      * - the index groups, to find the atoms of the model: const IndexGroupsAndNames&
      * - the topology, to remove the classical interactions among these atoms: gmx_mtop_t*
+     * - with ONIOM, the exclusions the embedded Coulomb correction completes at any distance,
+     *   which grompp does not check against the cut-off: ExclusionDistanceExemptions*
      * - writing the module parameters to the .tpr file: KeyValueTreeObjectBuilder
      * - the logger: const MDLogger&
      * - the grompp warning handler: WarningHandler*
@@ -103,6 +106,10 @@ public:
 
         const auto modifyTopologyFunction = [this](gmx_mtop_t* top) { options_.modifyTopology(top); };
         notifiers->preProcessingNotifier_.subscribe(modifyTopologyFunction);
+
+        const auto exemptExclusionsFunction = [this](ExclusionDistanceExemptions* exemptions)
+        { options_.addExclusionDistanceExemptions(exemptions); };
+        notifiers->preProcessingNotifier_.subscribe(exemptExclusionsFunction);
 
         const auto writeParamsToKvtFunction = [this](KeyValueTreeObjectBuilder kvt)
         { options_.writeParamsToKvt(kvt); };
@@ -257,15 +264,29 @@ public:
                 charges.push_back(atom.q);
                 groups.push_back(params.energyGroups_[i]);
             }
-            embeddedCoulomb_ = std::make_unique<EmbeddedCoulombCorrectionProvider>(
-                    *embeddedAtoms_, charges, groups, params.numEnergyGroups_, *params.pbcType_, options_.mpiComm());
+            // with several sites only pairs within a site are corrected, as only they are excluded
+            std::vector<int> sites;
+            if (params.numSites() > 1)
+            {
+                sites.assign(params.mtaSites_.begin(), params.mtaSites_.begin() + embedded.ssize());
+            }
+            embeddedCoulomb_ = std::make_unique<EmbeddedCoulombCorrectionProvider>(*embeddedAtoms_,
+                                                                                   charges,
+                                                                                   groups,
+                                                                                   params.numEnergyGroups_,
+                                                                                   *params.pbcType_,
+                                                                                   options_.mpiComm(),
+                                                                                   sites);
             forceProviders->addForceProvider(embeddedCoulomb_.get(), "Metatomic embedded Coulomb");
             GMX_LOG(options_.logger().info)
                     .asParagraph()
                     .appendTextFormatted(
                             "Metatomic ONIOM: removing the classical Coulomb interaction between "
-                            "the %zu embedded atoms, including pairs beyond rcoulomb.",
-                            embedded.size());
+                            "the %zu embedded atoms%s, including pairs beyond rcoulomb.",
+                            embedded.size(),
+                            params.numSites() > 1
+                                    ? formatString(" within each of %d sites", params.numSites()).c_str()
+                                    : "");
         }
     }
 

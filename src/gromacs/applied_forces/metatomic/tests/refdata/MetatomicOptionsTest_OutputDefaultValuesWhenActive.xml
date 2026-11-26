@@ -17,5 +17,8 @@ metatomic-variant-nc-forces =
 metatomic-variant-nc-stress = 
 metatomic-oniom          = false
 metatomic-link-atoms     = false
+metatomic-site-groups    = 
+metatomic-site-charges   = 
+metatomic-site-spin-multiplicities = 
 </String>
 </ReferenceData>

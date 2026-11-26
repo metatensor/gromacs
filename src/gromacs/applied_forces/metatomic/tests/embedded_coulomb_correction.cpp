@@ -219,23 +219,25 @@ TEST(EmbeddedCoulombCorrection, SplitsEnergyOverEnergyGroups)
     EXPECT_EQ(result.groupPairEnergies[GID(0, 0, 2)], 0);
 }
 
-TEST(EmbeddedCoulombCorrection, SameResultOnSeveralThreads)
+TEST(EmbeddedCoulombCorrection, SameResultOnSeveralThreadsAndOnlyWithinSites)
 {
-    // 60 charged atoms spread over the box. Without OpenMP, or when the runtime gives fewer
-    // threads than asked for, a single thread does all pairs.
+    // 60 charged atoms spread over the box, in two sites. Without OpenMP, or when the runtime
+    // gives fewer threads than asked for, a single thread does all pairs.
     std::vector<RVec> x;
     std::vector<real> q;
+    std::vector<int>  sites;
     for (int i = 0; i < 60; i++)
     {
         x.push_back({ real(0.1 + 0.037 * i),
                       real(0.2 + std::fmod(0.61 * i, c_box - 0.4)),
                       real(0.3 + std::fmod(0.29 * i, c_box - 0.6)) });
         q.push_back(real(0.1 * ((i % 5) - 2)));
+        sites.push_back(i % 2);
     }
     for (const auto& ic : { pmeConstants(), reactionFieldConstants() })
     {
-        const auto serial   = computeEmbeddedCoulombCorrection(x, q, cubicPbc(), ic, {}, 1, 1);
-        const auto threaded = computeEmbeddedCoulombCorrection(x, q, cubicPbc(), ic, {}, 1, 4);
+        const auto serial = computeEmbeddedCoulombCorrection(x, q, cubicPbc(), ic, {}, 1, sites, 1);
+        const auto threaded = computeEmbeddedCoulombCorrection(x, q, cubicPbc(), ic, {}, 1, sites, 4);
         EXPECT_GT(serial.numPairs, 0);
         EXPECT_EQ(serial.numPairs, threaded.numPairs);
         EXPECT_NEAR(serial.energy, threaded.energy, 1e-9 * std::abs(serial.energy) + 1e-12);
@@ -246,6 +248,26 @@ TEST(EmbeddedCoulombCorrection, SameResultOnSeveralThreads)
                 EXPECT_NEAR(serial.forces[i][d], threaded.forces[i][d], 1e-4);
             }
         }
+        // the pairs between the sites are left alone: all pairs give more, and the sum of the
+        // sites alone gives the same
+        const auto allPairs = computeEmbeddedCoulombCorrection(x, q, cubicPbc(), ic, {}, 1, {}, 4);
+        EXPECT_GT(allPairs.numPairs, serial.numPairs);
+        double sumOfSites = 0;
+        for (const int site : { 0, 1 })
+        {
+            std::vector<RVec> siteX;
+            std::vector<real> siteQ;
+            for (size_t i = 0; i < x.size(); i++)
+            {
+                if (sites[i] == site)
+                {
+                    siteX.push_back(x[i]);
+                    siteQ.push_back(q[i]);
+                }
+            }
+            sumOfSites += computeEmbeddedCoulombCorrection(siteX, siteQ, cubicPbc(), ic).energy;
+        }
+        EXPECT_NEAR(serial.energy, sumOfSites, 1e-6 * std::abs(sumOfSites) + 1e-9);
     }
 }
 

@@ -84,6 +84,16 @@ struct LinkCapSystem
                                     { 2.87, 0.90, 1.10 } };
     std::vector<std::pair<int, int>> bonds       = { { 0, 3 }, { 2, 3 }, { 1, 4 } };
     int                              numEmbedded = 3;
+    //! Site of each atom, empty for a single site; the model sees no pairs between sites
+    std::vector<int> sites;
+
+    //! The default atoms in two sites: atoms 0, 2 and 3, and atoms 1 and 4
+    static LinkCapSystem inTwoSites()
+    {
+        LinkCapSystem system;
+        system.sites = { 0, 1, 0, 0, 1 };
+        return system;
+    }
 
     /*! \brief A cap with a neighbour beyond the interaction range of the cap's MM atom.
      *
@@ -151,10 +161,15 @@ struct LinkCapSystem
     double energy(const std::vector<DVec>& x, const DMatrix& box) const
     {
         std::vector<DVec> atoms(x.begin(), x.begin() + numEmbedded);
+        std::vector<int> atomSites(sites.begin(), sites.begin() + (sites.empty() ? 0 : numEmbedded));
         for (const auto& [embedded, mm] : bonds)
         {
             const DVec bond = minimumImage(x[mm] - x[embedded], box);
             atoms.push_back(x[embedded] + (capDistance / bond.norm()) * bond);
+            if (!sites.empty())
+            {
+                atomSites.push_back(sites[embedded]);
+            }
         }
         // metatomic-core's model shifts the energy to zero at the cutoff
         const auto lennardJones = [this](double r)
@@ -167,6 +182,10 @@ struct LinkCapSystem
         {
             for (size_t j = i + 1; j < atoms.size(); ++j)
             {
+                if (!sites.empty() && atomSites[i] != atomSites[j])
+                {
+                    continue;
+                }
                 const double r = minimumImage(atoms[j] - atoms[i], box).norm();
                 if (r < cutoff)
                 {

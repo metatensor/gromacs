@@ -100,6 +100,8 @@ struct EmbeddedCoulombCorrection
  * \param[in] ic      Non-bonded interaction constants.
  * \param[in] energyGroups     Energy group of each atom, empty for a single group.
  * \param[in] numEnergyGroups  Number of energy groups.
+ * \param[in] sites   Site of each atom, empty for a single site; only pairs within a site
+ *                    are corrected, as the classical interaction between sites is kept.
  * \param[in] numThreads  OpenMP threads for the pair loop.
  */
 EmbeddedCoulombCorrection computeEmbeddedCoulombCorrection(ArrayRef<const RVec>       x,
@@ -108,6 +110,7 @@ EmbeddedCoulombCorrection computeEmbeddedCoulombCorrection(ArrayRef<const RVec> 
                                                            const interaction_const_t& ic,
                                                            ArrayRef<const int> energyGroups    = {},
                                                            int                 numEnergyGroups = 1,
+                                                           ArrayRef<const int> sites           = {},
                                                            int                 numThreads      = 1);
 
 /*! \brief Force provider applying computeEmbeddedCoulombCorrection() to the embedded atoms.
@@ -126,13 +129,15 @@ public:
      *  \param[in] numEnergyGroups  Number of energy groups.
      *  \param[in] pbcType       Periodic boundary conditions.
      *  \param[in] mpiComm       Communicator of the simulation.
+     *  \param[in] sites         Site of each embedded atom, empty for a single site.
      */
     EmbeddedCoulombCorrectionProvider(const LocalAtomSet& atoms,
                                       std::vector<real>   charges,
                                       std::vector<int>    energyGroups,
                                       int                 numEnergyGroups,
                                       PbcType             pbcType,
-                                      const MpiComm&      mpiComm);
+                                      const MpiComm&      mpiComm,
+                                      std::vector<int>    sites = {});
 
     void calculateForces(const ForceProviderInput& input, ForceProviderOutput* output) override;
 
@@ -141,6 +146,7 @@ private:
     std::vector<real> charges_;
     std::vector<int>  energyGroups_;
     int               numEnergyGroups_;
+    std::vector<int>  sites_;
     PbcType           pbcType_;
     const MpiComm&    mpiComm_;
     //! Position of every embedded atom, summed over ranks.

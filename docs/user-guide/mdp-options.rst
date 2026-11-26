@@ -3917,6 +3917,28 @@ decomposition, the model finds its pairs itself at every step. This needs a
    one cap per bond. The model must be trained for hydrogen-capped fragments.
    Capped bonds must be shorter than 0.3 nm.
 
+.. mdp:: metatomic-site-groups
+
+   Index groups that divide :mdp:`metatomic-input-group` into sites, for example
+   the four hemes of hemoglobin. The model evaluates each site as a system of
+   its own, with the pairs within it only, and only the classical interactions
+   within a site are removed; those between sites stay. Each site must lie
+   within one molecule, and atoms of two sites must not be bonded. With link
+   atoms, a cap belongs to the site of its atom in the input group. Empty, the
+   default, makes the input group one site.
+
+.. mdp:: metatomic-site-charges
+
+   (0) [e]
+   Total charge of each site, or one value for all, given to a model that
+   requests a per-system ``charge`` input.
+
+.. mdp:: metatomic-site-spin-multiplicities
+
+   (1)
+   Spin multiplicity of each site, or one value for all, given to a model that
+   requests a ``spin_multiplicity`` input.
+
 
 .. _mdp-fmm:
 

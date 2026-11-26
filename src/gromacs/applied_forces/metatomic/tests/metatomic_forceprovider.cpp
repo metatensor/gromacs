@@ -520,6 +520,59 @@ TEST_F(MetatomicForceProviderTest, RejectsScrewPeriodicity)
     EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), NotImplementedError);
 }
 
+TEST_F(MetatomicForceProviderTest, GivesEachSiteItsChargeAndSpinMultiplicity)
+{
+    options_.params_.modelOptions     = R"(site_inputs="")";
+    options_.params_.checkConsistency = true;
+    // one site
+    options_.params_.siteChargeValues_ = { -1 };
+    options_.params_.siteSpinValues_   = { 3 };
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    EXPECT_REAL_EQ(energy_, RecorderModel::siteEnergy(-1, 3, 2));
+    // atom 0 in site 1 and atom 1 in site 0, each a system of its own
+    options_.params_.mtaSites_         = { 1, 0 };
+    options_.params_.siteChargeValues_ = { -2, 1 };
+    options_.params_.siteSpinValues_   = { 5, 2 };
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    EXPECT_REAL_EQ(energy_, RecorderModel::siteEnergy(-2, 5, 1) + RecorderModel::siteEnergy(1, 2, 1));
+}
+
+TEST_F(MetatomicForceProviderTest, AppliesTheNonConservativeForcesOfEachSite)
+{
+    options_.params_.nonConservative   = true;
+    options_.params_.modelOptions      = R"(non_conservative="")";
+    options_.params_.checkConsistency  = true;
+    options_.params_.mtaSites_         = { 1, 0 };
+    options_.params_.siteChargeValues_ = { 0, 0 };
+    options_.params_.siteSpinValues_   = { 1, 1 };
+    const double forceFactor =
+            metatomic::unit_conversion_factor(RecorderModel::c_ncForceUnit, "kJ/mol/nm");
+    const double stressFactor =
+            metatomic::unit_conversion_factor(RecorderModel::c_ncStressUnit, "kJ/mol/nm^3");
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    // each atom is atom 0 of its system
+    for (size_t atom = 0; atom < 2; ++atom)
+    {
+        for (size_t d = 0; d < 3; ++d)
+        {
+            const double force = forceFactor * RecorderModel::ncForce(0, d);
+            EXPECT_NEAR(force, forces_[atom][d], c_tolerance * std::abs(force))
+                    << "atom " << atom << ", dimension " << d;
+        }
+    }
+    // the stresses of the two systems add up
+    for (size_t a = 0; a < 3; ++a)
+    {
+        for (size_t b = 0; b < 3; ++b)
+        {
+            const double virial =
+                    2 * 0.5 * det(c_cubicBox) * stressFactor * RecorderModel::ncStress(a, b);
+            EXPECT_NEAR(virial, virial_[a][b], c_tolerance * std::abs(virial))
+                    << "virial " << a << ", " << b;
+        }
+    }
+}
+
 TEST_F(MetatomicForceProviderTest, RejectsInputsGromacsCannotProvide)
 {
     options_.params_.modelOptions = R"(request_charges="")";
@@ -554,9 +607,12 @@ TEST(MetatomicLinkCapTest, SpreadsTheForcesOnTheCapsAndAddsTheirVirial)
     {
         GTEST_SKIP() << plugin << " is not installed";
     }
-    for (const auto& system : { LinkCapSystem(), LinkCapSystem::withANeighbourBeyondTheRangeOfTheMMAtom() })
+    for (const auto& system : { LinkCapSystem(),
+                                LinkCapSystem::withANeighbourBeyondTheRangeOfTheMMAtom(),
+                                LinkCapSystem::inTwoSites() })
     {
-        SCOPED_TRACE(formatString("%zu atoms", system.positions.size()));
+        SCOPED_TRACE(formatString(
+                "%zu atoms in %zu sites", system.positions.size(), system.sites.empty() ? 1 : 2));
         const int           numAtoms = static_cast<int>(system.positions.size());
         MetatomicOptions    options;
         LocalAtomSetManager atomSets;
@@ -574,6 +630,12 @@ TEST(MetatomicLinkCapTest, SpreadsTheForcesOnTheCapsAndAddsTheirVirial)
                 atomSets.add(ArrayRef<const Index>(options.params_.mtaIndices_)));
         options.params_.pbcType_      = std::make_unique<PbcType>(PbcType::Xyz);
         options.params_.linkFrontier_ = system.linkFrontier();
+        if (!system.sites.empty())
+        {
+            options.params_.mtaSites_         = system.sites;
+            options.params_.siteChargeValues_ = { 0, 0 };
+            options.params_.siteSpinValues_   = { 1, 1 };
+        }
         ASSERT_EQ(options.params_.numEmbeddedAtoms(), system.numEmbedded);
 
         matrix            box;
