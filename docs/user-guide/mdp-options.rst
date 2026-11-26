@@ -3903,7 +3903,8 @@ decomposition, the model finds its pairs itself at every step. This needs a
    :mdp:`rcoulomb`; with reaction-field and plain cut-off, the reaction-field
    term of excluded pairs within :mdp:`rcoulomb`. It goes to the Coulomb (SR)
    energy term. Every rank evaluates all pairs of these atoms, which suits
-   groups of up to a few thousand atoms.
+   groups of up to a few thousand atoms. The scheme is described in
+   :ref:`metatomic`.
 
 .. mdp:: metatomic-link-atoms
 
