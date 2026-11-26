@@ -54,8 +54,11 @@
 #include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/imdmodule.h"
 #include "gromacs/utility/basenetwork.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
+#include "gromacs/utility/logger.h"
 
+#include "embedded_coulomb_correction.h"
 #include "metatomic_forceprovider.h"
 #include "metatomic_options.h"
 
@@ -224,6 +227,37 @@ public:
 
         createForceProvider();
         forceProviders->addForceProvider(force_provider_.get(), "Metatomic");
+
+        // With ONIOM, the embedded atoms are mutually excluded: remove the rest of their
+        // classical Coulomb interaction, which the kernels leave beyond (Ewald) or within
+        // (reaction-field) the cut-off.
+        const auto& params = options_.parameters();
+        if (params.oniom)
+        {
+            std::vector<real> charges;
+            std::vector<int>  groups;
+            for (const Index i : params.mtaIndices_)
+            {
+                const auto& atom = params.atoms_.atom[i];
+                if (atom.q != atom.qB)
+                {
+                    GMX_THROW(
+                            NotImplementedError("metatomic-oniom does not support perturbed "
+                                                "charges on embedded atoms."));
+                }
+                charges.push_back(atom.q);
+                groups.push_back(params.energyGroups_[i]);
+            }
+            embeddedCoulomb_ = std::make_unique<EmbeddedCoulombCorrectionProvider>(
+                    *params.mtaAtoms_, charges, groups, params.numEnergyGroups_, *params.pbcType_, options_.mpiComm());
+            forceProviders->addForceProvider(embeddedCoulomb_.get(), "Metatomic embedded Coulomb");
+            GMX_LOG(options_.logger().info)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "Metatomic ONIOM: removing the classical Coulomb interaction between "
+                            "the %zu embedded atoms, including pairs beyond rcoulomb.",
+                            params.mtaIndices_.size());
+        }
     }
 
     IMdpOptionProvider* mdpOptionProvider() override { return &options_; }
@@ -243,6 +277,8 @@ private:
     MetatomicOptions options_;
 
     std::unique_ptr<MetatomicForceProvider> force_provider_;
+    //! Removes the classical Coulomb interaction between the embedded atoms, with ONIOM
+    std::unique_ptr<EmbeddedCoulombCorrectionProvider> embeddedCoulomb_;
     //! False for a model that reads no pairs
     bool needsPairlist_ = true;
 };

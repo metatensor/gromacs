@@ -448,8 +448,14 @@ void MetatomicOptions::setWarningHandler(WarningHandler* wi)
 
 void MetatomicOptions::setTopology(const gmx_mtop_t& top)
 {
-    params_.atoms_    = gmx_mtop_global_atoms(top);
-    params_.numAtoms_ = params_.atoms_.nr;
+    params_.atoms_           = gmx_mtop_global_atoms(top);
+    params_.numAtoms_        = params_.atoms_.nr;
+    params_.numEnergyGroups_ = top.groups.groups[SimulationAtomGroupType::EnergyOutput].size();
+    params_.energyGroups_.resize(params_.numAtoms_);
+    for (int i = 0; i < params_.numAtoms_; i++)
+    {
+        params_.energyGroups_[i] = getGroupType(top.groups, SimulationAtomGroupType::EnergyOutput, i);
+    }
 }
 
 void MetatomicOptions::setPbcType(const PbcType& pbcType)

@@ -3897,7 +3897,13 @@ decomposition, the model finds its pairs itself at every step. This needs a
    topology then keeps every classical angle and dihedral with an atom outside
    :mdp:`metatomic-input-group`, and removes only those among its atoms. With
    false, angles with two or more of its atoms and dihedrals with three or
-   more are removed, as for :mdp:`nnpot-input-group`.
+   more are removed, as for :mdp:`nnpot-input-group`. With ONIOM, the classical
+   Coulomb interaction between these atoms is also removed at any distance:
+   with Ewald and PME, the reciprocal-space interaction of pairs beyond
+   :mdp:`rcoulomb`; with reaction-field and plain cut-off, the reaction-field
+   term of excluded pairs within :mdp:`rcoulomb`. It goes to the Coulomb (SR)
+   energy term. Every rank evaluates all pairs of these atoms, which suits
+   groups of up to a few thousand atoms.
 
 
 .. _mdp-fmm:

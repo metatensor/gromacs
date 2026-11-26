@@ -126,6 +126,10 @@ struct MetatomicParameters
     std::unique_ptr<PbcType>      pbcType_;
     //! Whether mdrun couples the pressure, which needs the virial of the model
     bool pressureCoupling = false;
+    //! Energy group of every atom, for the energy of the embedded Coulomb correction
+    std::vector<int> energyGroups_;
+    //! Number of energy groups
+    int numEnergyGroups_ = 1;
 };
 
 class MetatomicOptions final : public IMdpOptionProvider
