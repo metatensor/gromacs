@@ -389,6 +389,18 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
         GMX_THROW(InconsistentInputError("metatomic-link-atoms requires metatomic-oniom = yes."));
     }
     const auto cutBonds = preprocessTopology(top, params_.mtaIndices_, params_.oniom, logger(), wi_);
+    if (params_.oniom && !params_.linkAtoms && !cutBonds.empty() && wi_ != nullptr)
+    {
+        wi_->addWarning(formatString(
+                "%zu covalent bonds between atoms of metatomic-input-group and other atoms are cut "
+                "(the first between atoms %d and %d), but metatomic-link-atoms = no. The model "
+                "then sees the atoms of the group at the cut with a missing neighbour, a dangling "
+                "bond, which gives wrong energies and forces. Set metatomic-link-atoms = yes to "
+                "cap these bonds with hydrogen atoms, or add the bonded atoms to the group.",
+                cutBonds.size(),
+                cutBonds.front().getEmbeddedIndex() + 1,
+                cutBonds.front().getMMIndex() + 1));
+    }
     if (params_.linkAtoms)
     {
         // The model sees a cap in place of each MM atom of a cut bond, so these atoms join the

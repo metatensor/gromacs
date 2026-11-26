@@ -51,7 +51,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <memory>
+#include <numeric>
 #include <set>
+#include <tuple>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -425,6 +427,36 @@ TEST_F(MetatomicOptionsTest, LinkAtomsCapTheCutBondsAndKeepThem)
     EXPECT_EQ(options.parameters().linkFrontier_[1].getEmbeddedIndex(), 8);
     EXPECT_EQ(options.parameters().linkFrontier_[1].getMMIndex(), 14);
     EXPECT_EQ(options.parameters().numEmbeddedAtoms(), 6);
+}
+
+TEST_F(MetatomicOptionsTest, OniomWarnsAboutCutBondsWithoutLinkAtoms)
+{
+    // CA, HA and the methyl group of alanine_vacuo cut the bonds CA-N and CA-C; the whole
+    // molecule cuts none
+    std::vector<int> molecule(22);
+    std::iota(molecule.begin(), molecule.end(), 0);
+    for (const auto& [ml, oniom, linkAtoms, warnings] :
+         std::vector<std::tuple<std::vector<int>, bool, bool, int>>{
+                 { { 8, 9, 10, 11, 12, 13 }, true, false, 1 },
+                 { { 8, 9, 10, 11, 12, 13 }, true, true, 0 },
+                 { { 8, 9, 10, 11, 12, 13 }, false, false, 0 },
+                 { molecule, true, false, 0 } })
+    {
+        auto             mtop = makeMtopFromFile("alanine_vacuo");
+        MetatomicOptions options;
+        fillOptionsFromMdpValues(metatomicBuildDefaultMdpValues(), &options);
+        options.params_.oniom                = oniom;
+        options.params_.linkAtoms            = linkAtoms;
+        const std::vector<IndexGroup> groups = { { "System", ml } };
+        options.setInputGroupIndices(IndexGroupsAndNames(groups));
+        MDLogger logger;
+        options.setLogger(logger);
+        WarningHandler wi(true, 0);
+        options.setWarningHandler(&wi);
+        options.modifyTopology(mtop.get());
+        EXPECT_EQ(wi.warningCount(), warnings)
+                << "first atom " << ml[0] << ", oniom " << oniom << ", link atoms " << linkAtoms;
+    }
 }
 
 TEST_F(MetatomicOptionsTest, LinkAtomsRequireOniom)
