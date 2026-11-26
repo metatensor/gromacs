@@ -48,15 +48,24 @@
 
 #include "config.h"
 
+#include <filesystem>
+#include <memory>
+#include <set>
+
 #include <gtest/gtest.h>
 
 #include "gromacs/applied_forces/nnpot/nnpot.h"
 #include "gromacs/domdec/localatomset.h"
+#include "gromacs/fileio/confio.h"
 #include "gromacs/fileio/warninp.h"
+#include "gromacs/gmxpreprocess/grompp.h"
 #include "gromacs/mdrunutility/mdmodulesnotifiers.h"
 #include "gromacs/mdtypes/imdpoptionprovider_test_helper.h"
+#include "gromacs/pbcutil/pbc.h"
 #include "gromacs/selection/indexutil.h"
+#include "gromacs/topology/ifunc.h"
 #include "gromacs/topology/index.h"
+#include "gromacs/topology/topology.h"
 #include "gromacs/utility/arrayref.h"
 #include "gromacs/utility/keyvaluetree.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
@@ -65,6 +74,7 @@
 #include "gromacs/utility/stringstream.h"
 #include "gromacs/utility/textwriter.h"
 
+#include "testutils/cmdlinetest.h"
 #include "testutils/refdata.h"
 #include "testutils/testasserts.h"
 #include "testutils/testfilemanager.h"
@@ -259,6 +269,99 @@ TEST(MetatomicModelOptionsTest, RejectsMalformedOptions)
                               R"({"key":"value"})" })
     {
         EXPECT_THROW_GMX(parseMetatomicModelOptions(text), InconsistentInputError) << text;
+    }
+}
+
+//! Topology of \p simulationName in the simulation database, as grompp writes it with an empty mdp
+static std::unique_ptr<gmx_mtop_t> makeMtopFromFile(const std::string& simulationName)
+{
+    const std::filesystem::path simData = TestFileManager::getTestSimulationDatabaseDirectory();
+    TestFileManager             fileManager;
+    const std::string mdp = fileManager.getTemporaryFilePath(simulationName + ".mdp").string();
+    TextWriter::writeFileFromString(mdp, "");
+    const std::string tpr = fileManager.getTemporaryFilePath(simulationName + ".tpr").string();
+    CommandLine       grompp;
+    grompp.append("grompp");
+    grompp.addOption("-f", mdp);
+    grompp.addOption("-p", (simData / simulationName).replace_extension(".top").string());
+    grompp.addOption("-c", (simData / simulationName).replace_extension(".gro").string());
+    grompp.addOption("-o", tpr);
+    EXPECT_EQ(0, gmx_grompp(grompp.argc(), grompp.argv()));
+
+    bool    fullTopology;
+    PbcType pbcType;
+    matrix  box;
+    auto    mtop = std::make_unique<gmx_mtop_t>();
+    readConfAndTopology(tpr.c_str(), &fullTopology, mtop.get(), &pbcType, nullptr, nullptr, box);
+    return mtop;
+}
+
+//! Number of bonded interactions of \p numAtoms atoms with at least \p minEmbedded atoms in \p embedded
+static int countInteractions(const gmx_mtop_t& mtop, int numAtoms, const std::set<int>& embedded, int minEmbedded)
+{
+    int count = 0;
+    for (size_t b = 0; b < mtop.molblock.size(); ++b)
+    {
+        const auto& moltype = mtop.moltype[mtop.molblock[b].type];
+        for (int mol = 0; mol < mtop.molblock[b].nmol; ++mol)
+        {
+            const int start = mtop.moleculeBlockIndices[b].globalAtomStart + mol * moltype.atoms.nr;
+            for (const auto ftype : EnumerationWrapper<InteractionFunction>{})
+            {
+                if (!(interaction_function[ftype].categories & sc_ifcBondedForce) || NRAL(ftype) != numAtoms)
+                {
+                    continue;
+                }
+                const auto& iatoms = moltype.ilist[ftype].iatoms;
+                for (size_t j = 0; j < iatoms.size(); j += numAtoms + 1)
+                {
+                    int n = 0;
+                    for (int k = 1; k <= numAtoms; ++k)
+                    {
+                        n += static_cast<int>(embedded.count(iatoms[j + k] + start));
+                    }
+                    count += static_cast<int>(n >= minEmbedded);
+                }
+            }
+        }
+    }
+    return count;
+}
+
+TEST_F(MetatomicOptionsTest, OniomKeepsTheAnglesAndDihedralsWithAnMMAtom)
+{
+    // CA, HA and the methyl group of alanine_vacuo
+    const std::vector<int> ml = { 8, 9, 10, 11, 12, 13 };
+    const std::set<int>    mlSet(ml.begin(), ml.end());
+    for (const bool oniom : { false, true })
+    {
+        SCOPED_TRACE(oniom ? "with ONIOM" : "without ONIOM");
+        auto       mtop   = makeMtopFromFile("alanine_vacuo");
+        const auto before = [&](int numAtoms, int minEmbedded)
+        { return countInteractions(*mtop, numAtoms, mlSet, minEmbedded); };
+        const int angles = before(3, 0), boundaryAngles = before(3, 2) - before(3, 3);
+        const int dihedrals = before(4, 0), boundaryDihedrals = before(4, 3) - before(4, 4);
+        // the test tells the two rules apart only with terms that have both kinds of atoms
+        ASSERT_GT(boundaryAngles, 0);
+        ASSERT_GT(boundaryDihedrals, 0);
+        const int removedAngles    = before(3, 3) + (oniom ? 0 : boundaryAngles);
+        const int removedDihedrals = before(4, 4) + (oniom ? 0 : boundaryDihedrals);
+
+        MetatomicOptions options;
+        fillOptionsFromMdpValues(metatomicBuildDefaultMdpValues(), &options);
+        options.params_.oniom                = oniom;
+        const std::vector<IndexGroup> groups = { { "System", ml } };
+        options.setInputGroupIndices(IndexGroupsAndNames(groups));
+        MDLogger logger;
+        options.setLogger(logger);
+        WarningHandler wi(true, 0);
+        options.setWarningHandler(&wi);
+        options.modifyTopology(mtop.get());
+
+        EXPECT_EQ(countInteractions(*mtop, 3, mlSet, 0), angles - removedAngles);
+        EXPECT_EQ(countInteractions(*mtop, 4, mlSet, 0), dihedrals - removedDihedrals);
+        EXPECT_EQ(countInteractions(*mtop, 3, mlSet, 2), oniom ? boundaryAngles : 0);
+        EXPECT_EQ(countInteractions(*mtop, 4, mlSet, 3), oniom ? boundaryDihedrals : 0);
     }
 }
 

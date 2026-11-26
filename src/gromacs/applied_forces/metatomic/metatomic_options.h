@@ -112,6 +112,13 @@ struct MetatomicParameters
     //! (default whole System)
     std::string inputGroup = "System";
 
+    /*! \brief Use the ONIOM subtractive scheme, E_MM(full) + E_ML(embedded) - E_MM(embedded).
+     *
+     * The topology then keeps every classical term with an MM atom, and only the terms
+     * among the embedded atoms are removed.
+     */
+    bool oniom = false;
+
     std::vector<Index>            mtaIndices_;
     std::unique_ptr<LocalAtomSet> mtaAtoms_;
     t_atoms                       atoms_;

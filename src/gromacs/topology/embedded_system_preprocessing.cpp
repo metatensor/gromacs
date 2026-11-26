@@ -583,10 +583,11 @@ std::vector<LinkFrontierAtom> buildLinkFrontier(gmx_mtop_t*              mtop,
     return linkFrontier;
 }
 
-void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
-                                           const std::set<int>&     embeddedIndices,
-                                           const std::vector<bool>& isEmbeddedBlock,
-                                           const MDLogger&          logger)
+void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*                 mtop,
+                                           const std::set<int>&        embeddedIndices,
+                                           const std::vector<bool>&    isEmbeddedBlock,
+                                           const MDLogger&             logger,
+                                           const EmbeddedBoundaryTerms boundaryTerms)
 {
     // Loop over all blocks in topology
     // molBlockIndex - index of current block in mtop
@@ -637,8 +638,13 @@ void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
                         }
                     }
 
-                    // If at least 2 atoms are embedded then remove interaction
-                    if (numEmbedded >= 2)
+                    // Remove an angle with at least 2 embedded atoms, or with all embedded
+                    // when the boundary terms are kept; a SETTLE with at least 2
+                    const int minEmbedded = (boundaryTerms == EmbeddedBoundaryTerms::Keep
+                                             && ftype != InteractionFunction::SETTLE)
+                                                    ? NRAL(ftype)
+                                                    : 2;
+                    if (numEmbedded >= minEmbedded)
                     {
                         // If this is SETTLE then replace it with two InteractionFunction::ConnectBonds
                         if (ftype == InteractionFunction::SETTLE)
@@ -699,10 +705,11 @@ void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
 }
 
 
-void modifyEmbeddedFourCenterInteractions(gmx_mtop_t*              mtop,
-                                          const std::set<int>&     embeddedIndices,
-                                          const std::vector<bool>& isEmbeddedBlock,
-                                          const MDLogger&          logger)
+void modifyEmbeddedFourCenterInteractions(gmx_mtop_t*                 mtop,
+                                          const std::set<int>&        embeddedIndices,
+                                          const std::vector<bool>&    isEmbeddedBlock,
+                                          const MDLogger&             logger,
+                                          const EmbeddedBoundaryTerms boundaryTerms)
 {
     // Loop over all blocks in topology
     // molBlockIndex - index of current block in mtop
@@ -749,8 +756,9 @@ void modifyEmbeddedFourCenterInteractions(gmx_mtop_t*              mtop,
                         }
                     }
 
-                    // If at least 3 atoms are embedded then remove interaction
-                    if (numEmbedded >= 3)
+                    // Remove a dihedral with at least 3 embedded atoms, or with all
+                    // embedded when the boundary terms are kept
+                    if (numEmbedded >= (boundaryTerms == EmbeddedBoundaryTerms::Keep ? NRAL(ftype) : 3))
                     {
                         numDihedralsRemoved++;
                     }

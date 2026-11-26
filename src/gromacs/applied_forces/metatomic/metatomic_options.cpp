@@ -93,12 +93,17 @@ static const std::string VARIANT_ENERGY_UQ_TAG     = "variant-energy-uq";
 static const std::string NON_CONSERVATIVE_TAG      = "non-conservative";
 static const std::string VARIANT_NC_FORCES_TAG     = "variant-nc-forces";
 static const std::string VARIANT_NC_STRESS_TAG     = "variant-nc-stress";
+static const std::string ONIOM_TAG                 = "oniom";
 
 namespace
 {
 
 //! \brief Preprocess the topology for the atoms given to the model.
-void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, const MDLogger& logger, WarningHandler* wi)
+void preprocessTopology(gmx_mtop_t*           mtop,
+                        ArrayRef<const Index> mtaIndices,
+                        bool                  oniom,
+                        const MDLogger&       logger,
+                        WarningHandler*       wi)
 {
     // convert mtaIndices to set for faster lookup
     std::set<int> mtaIndicesSet(mtaIndices.begin(), mtaIndices.end());
@@ -125,11 +130,11 @@ void preprocessTopology(gmx_mtop_t* mtop, ArrayRef<const Index> mtaIndices, cons
     // 4) Make F_CONNBOND between atoms within QM region
     modifyEmbeddedTwoCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
 
-    // 5) Remove angles and settles containing 2 or more QM atoms
-    modifyEmbeddedThreeCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
-
-    // 6) Remove dihedrals containing 3 or more QM atoms
-    modifyEmbeddedFourCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger);
+    // 5) and 6) Remove angles and settles containing 2 or more QM atoms, and dihedrals
+    // containing 3 or more; with ONIOM, only the angles and dihedrals among QM atoms
+    const auto boundaryTerms = oniom ? EmbeddedBoundaryTerms::Keep : EmbeddedBoundaryTerms::Remove;
+    modifyEmbeddedThreeCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger, boundaryTerms);
+    modifyEmbeddedFourCenterInteractions(mtop, mtaIndicesSet, isMTABlock, logger, boundaryTerms);
 
     // 7) Check for constrained bonds in subsystem
     checkConstrainedBonds(mtop, mtaIndicesSet, isMTABlock, wi);
@@ -277,6 +282,7 @@ void MetatomicOptions::initMdpTransform(IKeyValueTreeTransformRules* rules)
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG);
     addMdpTransformFromString<std::string>(
             rules, stringIdentityTransform, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG);
+    addMdpTransformFromString<bool>(rules, &fromStdString<bool>, METATOMIC_MODULE_NAME, ONIOM_TAG);
 }
 
 void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
@@ -295,6 +301,7 @@ void MetatomicOptions::initMdpOptions(IOptionsContainerWithSections* options)
     section.addOption(BooleanOption(NON_CONSERVATIVE_TAG.c_str()).store(&params_.nonConservative));
     section.addOption(StringOption(VARIANT_NC_FORCES_TAG.c_str()).store(&params_.variantNcForces));
     section.addOption(StringOption(VARIANT_NC_STRESS_TAG.c_str()).store(&params_.variantNcStress));
+    section.addOption(BooleanOption(ONIOM_TAG.c_str()).store(&params_.oniom));
 }
 
 void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
@@ -330,6 +337,7 @@ void MetatomicOptions::buildMdpOutput(KeyValueTreeObjectBuilder* builder) const
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_FORCES_TAG, params_.variantNcForces);
         addMdpOutputValue<std::string>(
                 builder, METATOMIC_MODULE_NAME, VARIANT_NC_STRESS_TAG, params_.variantNcStress);
+        addMdpOutputValue<bool>(builder, METATOMIC_MODULE_NAME, ONIOM_TAG, params_.oniom);
     }
 }
 
@@ -366,7 +374,7 @@ void MetatomicOptions::modifyTopology(gmx_mtop_t* top)
     {
         return;
     }
-    preprocessTopology(top, params_.mtaIndices_, logger(), wi_);
+    preprocessTopology(top, params_.mtaIndices_, params_.oniom, logger(), wi_);
 }
 
 void MetatomicOptions::writeParamsToKvt(KeyValueTreeObjectBuilder treeBuilder)

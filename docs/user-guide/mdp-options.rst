@@ -3889,6 +3889,16 @@ decomposition, the model finds its pairs itself at every step. This needs a
    Variant of the ``non_conservative_stress`` output. Empty uses
    :mdp:`metatomic-variant`, ``off`` the output without variant.
 
+.. mdp:: metatomic-oniom
+
+   (false)
+   Use the ONIOM subtractive scheme, :math:`E_\mathrm{MM}(\mathrm{full}) +
+   E_\mathrm{ML}(\mathrm{embedded}) - E_\mathrm{MM}(\mathrm{embedded})`. The
+   topology then keeps every classical angle and dihedral with an atom outside
+   :mdp:`metatomic-input-group`, and removes only those among its atoms. With
+   false, angles with two or more of its atoms and dihedrals with three or
+   more are removed, as for :mdp:`nnpot-input-group`.
+
 
 .. _mdp-fmm:
 
