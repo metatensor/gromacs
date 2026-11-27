@@ -232,7 +232,8 @@ public:
             }
             catch (const std::exception& e)
             {
-                GMX_THROW(InternalError("Failed to read cutoff from model: " + std::string(e.what())));
+                GMX_THROW(InvalidInputError("Failed to read the cutoff from the metatomic model: "
+                                            + std::string(e.what())));
             }
 
             if (max_cutoff <= 0.0 || !std::isfinite(max_cutoff))
@@ -244,7 +245,10 @@ public:
                     GMX_THROW(InconsistentInputError("Metatomic model cutoff is 0.0 or invalid."));
                 }
             }
-            ranges->addRange(max_cutoff);
+            // Buffer for the lifetime of the pairlist, as the pairs are not
+            // searched again until the next neighbor search.
+            const real buffer = 2 * ranges->rmsdDistance().value_or(0.0);
+            ranges->addRange(max_cutoff + buffer);
         };
         // Register the callback
         notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);
