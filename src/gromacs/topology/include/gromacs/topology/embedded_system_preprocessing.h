@@ -44,6 +44,7 @@
 #define GMX_TOPOLOGY_EMBEDDED_SYSTEM_PREPROCESSING_H
 
 #include <set>
+#include <tuple>
 #include <vector>
 
 #include "gromacs/utility/basedefinitions.h"
@@ -123,6 +124,23 @@ private:
     int linkAtomNumber_ = 1;
 };
 
+/*! \brief Redistributes a force on a link atom to its adjacent embedded and MM atoms.
+ *
+ * The link atom is at \p linkDistance from the embedded atom, towards the MM atom.
+ *
+ * \param[in] forceOnLink       Force acting on the link atom.
+ * \param[in] embeddedPosition  Position of the embedded atom.
+ * \param[in] mmPosition        Position of the MM atom.
+ * \param[in] mmShift           Shift vector applied to the MM atom position.
+ * \param[in] linkDistance      Embedded atom to link atom distance.
+ * \returns Forces on the embedded and MM atoms.
+ */
+std::tuple<RVec, RVec> spreadLinkAtomForce(const RVec& forceOnLink,
+                                           const RVec& embeddedPosition,
+                                           const RVec& mmPosition,
+                                           const RVec& mmShift,
+                                           real        linkDistance);
+
 /*! \brief Splits embedded atom containing molecules out of MM blocks in topology
  *
  * Modifies molblocks in topology \p mtop
@@ -181,34 +199,54 @@ void modifyEmbeddedTwoCenterInteractions(gmx_mtop_t*              mtop,
                                          const std::vector<bool>& isEmbeddedBlock,
                                          const MDLogger&          logger);
 
+/*! \brief Which angles and dihedrals with both embedded and MM atoms are removed
+ *
+ * The embedded model replaces the classical interactions it describes.
+ */
+enum class EmbeddedBoundaryTerms : int
+{
+    /*! Remove angles with 2 or more embedded atoms and dihedrals with 3 or more: the model
+     * sees link atoms in place of the MM neighbours, and describes these terms itself */
+    Remove,
+    /*! Keep them, and remove only the angles and dihedrals whose atoms are all embedded,
+     * as in the ONIOM subtractive scheme E_MM(full) + E_ML(embedded) - E_MM(embedded) */
+    Keep
+};
+
 /*! \brief Modifies three-centers interactions (i.e. Angles, Settles)
  *
- * Removes any other three-centers bonded interactions including 2 or more embedded atoms
+ * Removes the three-centers bonded interactions with 2 or more embedded atoms, or with
+ * \p boundaryTerms = Keep those whose atoms are all embedded.
  * Any restraints and constraints will be kept
- * Any F_SETTLE containing embedded atoms will be converted to the pair of F_CONNBONDS
+ * Any F_SETTLE containing 2 or more embedded atoms will be converted to the pair of F_CONNBONDS
  * \param[in,out] mtop topology to be modified
  * \param[in] embeddedIndices set with global indices of embedded atoms
  * \param[in] isEmbeddedBlock vector with flags for embedded atom-containing blocks
  * \param[in] logger MDLogger for logging info about modifications
+ * \param[in] boundaryTerms whether angles with both embedded and MM atoms are removed
  */
 void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
                                            const std::set<int>&     embeddedIndices,
                                            const std::vector<bool>& isEmbeddedBlock,
-                                           const MDLogger&          logger);
+                                           const MDLogger&          logger,
+                                           EmbeddedBoundaryTerms boundaryTerms = EmbeddedBoundaryTerms::Remove);
 
 /*! \brief Modifies four-centers interactions
  *
- * Removes any other four-centers bonded interactions including 3 or more embedded atoms
+ * Removes the four-centers bonded interactions with 3 or more embedded atoms, or with
+ * \p boundaryTerms = Keep those whose atoms are all embedded.
  * Any restraints and constraints will be kept
  * \param[in,out] mtop topology to be modified
  * \param[in] embeddedIndices set with global indices of embedded atoms
  * \param[in] isEmbeddedBlock vector with flags for embedded atom-containing blocks
  * \param[in] logger MDLogger for logging info about modifications
+ * \param[in] boundaryTerms whether dihedrals with both embedded and MM atoms are removed
  */
 void modifyEmbeddedFourCenterInteractions(gmx_mtop_t*              mtop,
                                           const std::set<int>&     embeddedIndices,
                                           const std::vector<bool>& isEmbeddedBlock,
-                                          const MDLogger&          logger);
+                                          const MDLogger&          logger,
+                                          EmbeddedBoundaryTerms boundaryTerms = EmbeddedBoundaryTerms::Remove);
 
 /*! \brief Checks for constrained bonds within embedded subsystem
  *

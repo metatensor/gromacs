@@ -51,6 +51,7 @@
 
 #include "gromacs/mdtypes/imdpoptionprovider.h"
 #include "gromacs/topology/atoms.h"
+#include "gromacs/topology/embedded_system_preprocessing.h"
 
 // some forward declarations
 struct gmx_mtop_t;
@@ -112,6 +113,26 @@ struct MetatomicParameters
     //! (default whole System)
     std::string inputGroup = "System";
 
+    /*! \brief Use the ONIOM subtractive scheme, E_MM(full) + E_ML(embedded) - E_MM(embedded).
+     *
+     * The topology then keeps every classical term with an MM atom, and only the terms
+     * among the embedded atoms are removed.
+     */
+    bool oniom = false;
+    //! With ONIOM, cap the bonds cut between embedded and MM atoms with hydrogen link atoms
+    bool linkAtoms = false;
+    //! Index groups, one per site, each evaluated by the model as its own system
+    std::string siteGroups;
+    //! Total charge of each site, or one for all, for models that request it
+    std::string siteCharges;
+    //! Spin multiplicity of each site, or one for all, for models that request it
+    std::string siteSpinMultiplicities;
+
+    /*! \brief Global indices of the atoms the model sees.
+     *
+     * The atoms of metatomic-input-group come first. With link atoms, the MM atoms of the
+     * bonds they cap follow: the model sees a cap in place of each.
+     */
     std::vector<Index>            mtaIndices_;
     std::unique_ptr<LocalAtomSet> mtaAtoms_;
     t_atoms                       atoms_;
@@ -119,7 +140,29 @@ struct MetatomicParameters
     std::unique_ptr<PbcType>      pbcType_;
     //! Whether mdrun couples the pressure, which needs the virial of the model
     bool pressureCoupling = false;
+    //! Energy group of every atom, for the energy of the embedded Coulomb correction
+    std::vector<int> energyGroups_;
+    //! Number of energy groups
+    int numEnergyGroups_ = 1;
+    //! The bonds between embedded and MM atoms that link atoms cap, in global atom indices
+    std::vector<LinkFrontierAtom> linkFrontier_;
+    //! Site of each atom of mtaIndices_, empty for a single site; MM atoms of link atoms are in the site of their embedded atom
+    std::vector<int> mtaSites_;
+    //! Total charge of each site
+    std::vector<real> siteChargeValues_ = { 0 };
+    //! Spin multiplicity of each site
+    std::vector<int> siteSpinValues_ = { 1 };
+
+    //! Number of sites
+    int numSites() const { return static_cast<int>(siteChargeValues_.size()); }
+    //! Site of atom \p k of mtaIndices_
+    int siteOf(Index k) const { return mtaSites_.empty() ? 0 : mtaSites_[k]; }
+
+    //! Number of atoms of metatomic-input-group, the first of mtaIndices_
+    int numEmbeddedAtoms() const;
 };
+
+struct ExclusionDistanceExemptions;
 
 class MetatomicOptions final : public IMdpOptionProvider
 {
@@ -132,6 +175,8 @@ public:
     bool isActive() const;
     void setInputGroupIndices(const IndexGroupsAndNames&);
     void modifyTopology(gmx_mtop_t*);
+    //! With ONIOM, lists the embedded atoms of each site, whose exclusions the embedded Coulomb correction completes at any distance
+    void addExclusionDistanceExemptions(ExclusionDistanceExemptions* exemptions) const;
     void writeParamsToKvt(KeyValueTreeObjectBuilder);
     void readParamsFromKvt(const KeyValueTreeObject&);
     void setLogger(const MDLogger&);

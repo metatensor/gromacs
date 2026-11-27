@@ -3889,6 +3889,57 @@ decomposition, the model finds its pairs itself at every step. This needs a
    Variant of the ``non_conservative_stress`` output. Empty uses
    :mdp:`metatomic-variant`, ``off`` the output without variant.
 
+.. mdp:: metatomic-oniom
+
+   (false)
+   Use the ONIOM subtractive scheme, :math:`E_\mathrm{MM}(\mathrm{full}) +
+   E_\mathrm{ML}(\mathrm{embedded}) - E_\mathrm{MM}(\mathrm{embedded})`. The
+   topology then keeps every classical angle and dihedral with an atom outside
+   :mdp:`metatomic-input-group`, and removes only those among its atoms. With
+   false, angles with two or more of its atoms and dihedrals with three or
+   more are removed, as for :mdp:`nnpot-input-group`. With ONIOM, the classical
+   Coulomb interaction between these atoms is also removed at any distance:
+   with Ewald and PME, the reciprocal-space interaction of pairs beyond
+   :mdp:`rcoulomb`; with reaction-field and plain cut-off, the reaction-field
+   term of excluded pairs within :mdp:`rcoulomb`. It goes to the Coulomb (SR)
+   energy term. Every rank evaluates all pairs of these atoms, which suits
+   groups of up to a few thousand atoms. The scheme is described in
+   :ref:`metatomic`.
+
+.. mdp:: metatomic-link-atoms
+
+   (false)
+   With :mdp:`metatomic-oniom`, cap each bond between an atom of
+   :mdp:`metatomic-input-group` and an atom outside it with a hydrogen atom,
+   0.1 nm from the atom of the group along the bond, so that the model does not
+   see a dangling bond. The topology keeps the bond and the other classical
+   interactions of the outside atom. The force on a cap is spread onto the two
+   atoms of its bond. An outside atom bonded to several atoms of the group gets
+   one cap per bond. The model must be trained for hydrogen-capped fragments.
+   Capped bonds must be shorter than 0.3 nm.
+
+.. mdp:: metatomic-site-groups
+
+   Index groups that divide :mdp:`metatomic-input-group` into sites, for example
+   the four hemes of hemoglobin. The model evaluates each site as a system of
+   its own, with the pairs within it only, and only the classical interactions
+   within a site are removed; those between sites stay. Each site must lie
+   within one molecule, and atoms of two sites must not be bonded. With link
+   atoms, a cap belongs to the site of its atom in the input group. Empty, the
+   default, makes the input group one site.
+
+.. mdp:: metatomic-site-charges
+
+   (0) [e]
+   Total charge of each site, or one value for all, given to a model that
+   requests a per-system ``charge`` input.
+
+.. mdp:: metatomic-site-spin-multiplicities
+
+   (1)
+   Spin multiplicity of each site, or one value for all, given to a model that
+   requests a ``spin_multiplicity`` input.
+
 
 .. _mdp-fmm:
 

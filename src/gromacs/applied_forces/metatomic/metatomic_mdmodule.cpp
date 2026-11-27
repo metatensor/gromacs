@@ -54,8 +54,12 @@
 #include "gromacs/mdrunutility/plainpairlistranges.h"
 #include "gromacs/mdtypes/imdmodule.h"
 #include "gromacs/utility/basenetwork.h"
+#include "gromacs/utility/exceptions.h"
 #include "gromacs/utility/keyvaluetreebuilder.h"
+#include "gromacs/utility/logger.h"
+#include "gromacs/utility/stringutil.h"
 
+#include "embedded_coulomb_correction.h"
 #include "metatomic_forceprovider.h"
 #include "metatomic_options.h"
 
@@ -83,6 +87,8 @@ public:
      * after each notification the Metatomic module subscribes to:
      * - the index groups, to find the atoms of the model: const IndexGroupsAndNames&
      * - the topology, to remove the classical interactions among these atoms: gmx_mtop_t*
+     * - with ONIOM, the exclusions the embedded Coulomb correction completes at any distance,
+     *   which grompp does not check against the cut-off: ExclusionDistanceExemptions*
      * - writing the module parameters to the .tpr file: KeyValueTreeObjectBuilder
      * - the logger: const MDLogger&
      * - the grompp warning handler: WarningHandler*
@@ -100,6 +106,10 @@ public:
 
         const auto modifyTopologyFunction = [this](gmx_mtop_t* top) { options_.modifyTopology(top); };
         notifiers->preProcessingNotifier_.subscribe(modifyTopologyFunction);
+
+        const auto exemptExclusionsFunction = [this](ExclusionDistanceExemptions* exemptions)
+        { options_.addExclusionDistanceExemptions(exemptions); };
+        notifiers->preProcessingNotifier_.subscribe(exemptExclusionsFunction);
 
         const auto writeParamsToKvtFunction = [this](KeyValueTreeObjectBuilder kvt)
         { options_.writeParamsToKvt(kvt); };
@@ -142,8 +152,15 @@ public:
 
         const auto setLocalAtomSetFunction = [this](LocalAtomSetManager* localAtomSetManager)
         {
-            LocalAtomSet atomSet = localAtomSetManager->add(options_.parameters().mtaIndices_);
+            const auto&  params  = options_.parameters();
+            LocalAtomSet atomSet = localAtomSetManager->add(params.mtaIndices_);
             options_.setLocalInputAtomSet(atomSet);
+            if (params.oniom)
+            {
+                // the input group, without the MM atoms that carry link atoms
+                embeddedAtoms_ = std::make_unique<LocalAtomSet>(localAtomSetManager->add(
+                        makeConstArrayRef(params.mtaIndices_).subArray(0, params.numEmbeddedAtoms())));
+            }
         };
         notifiers->simulationSetupNotifier_.subscribe(setLocalAtomSetFunction);
 
@@ -224,6 +241,53 @@ public:
 
         createForceProvider();
         forceProviders->addForceProvider(force_provider_.get(), "Metatomic");
+
+        // With ONIOM, the embedded atoms are mutually excluded: remove the rest of their
+        // classical Coulomb interaction, which the kernels leave beyond (Ewald) or within
+        // (reaction-field) the cut-off.
+        const auto& params = options_.parameters();
+        if (params.oniom)
+        {
+            const auto embedded =
+                    makeConstArrayRef(params.mtaIndices_).subArray(0, params.numEmbeddedAtoms());
+            std::vector<real> charges;
+            std::vector<int>  groups;
+            for (const Index i : embedded)
+            {
+                const auto& atom = params.atoms_.atom[i];
+                if (atom.q != atom.qB)
+                {
+                    GMX_THROW(
+                            NotImplementedError("metatomic-oniom does not support perturbed "
+                                                "charges on embedded atoms."));
+                }
+                charges.push_back(atom.q);
+                groups.push_back(params.energyGroups_[i]);
+            }
+            // with several sites only pairs within a site are corrected, as only they are excluded
+            std::vector<int> sites;
+            if (params.numSites() > 1)
+            {
+                sites.assign(params.mtaSites_.begin(), params.mtaSites_.begin() + embedded.ssize());
+            }
+            embeddedCoulomb_ = std::make_unique<EmbeddedCoulombCorrectionProvider>(*embeddedAtoms_,
+                                                                                   charges,
+                                                                                   groups,
+                                                                                   params.numEnergyGroups_,
+                                                                                   *params.pbcType_,
+                                                                                   options_.mpiComm(),
+                                                                                   sites);
+            forceProviders->addForceProvider(embeddedCoulomb_.get(), "Metatomic embedded Coulomb");
+            GMX_LOG(options_.logger().info)
+                    .asParagraph()
+                    .appendTextFormatted(
+                            "Metatomic ONIOM: removing the classical Coulomb interaction between "
+                            "the %zu embedded atoms%s, including pairs beyond rcoulomb.",
+                            embedded.size(),
+                            params.numSites() > 1
+                                    ? formatString(" within each of %d sites", params.numSites()).c_str()
+                                    : "");
+        }
     }
 
     IMdpOptionProvider* mdpOptionProvider() override { return &options_; }
@@ -243,6 +307,10 @@ private:
     MetatomicOptions options_;
 
     std::unique_ptr<MetatomicForceProvider> force_provider_;
+    //! The atoms of the input group, with ONIOM
+    std::unique_ptr<LocalAtomSet> embeddedAtoms_;
+    //! Removes the classical Coulomb interaction between the embedded atoms, with ONIOM
+    std::unique_ptr<EmbeddedCoulombCorrectionProvider> embeddedCoulomb_;
     //! False for a model that reads no pairs
     bool needsPairlist_ = true;
 };

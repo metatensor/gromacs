@@ -34,6 +34,7 @@
 gmx_add_unit_test(TopologyTest topology-test
     CPP_SOURCE_FILES
         atoms.cpp
+        embedded_system_preprocessing.cpp
         exclusionblocks.cpp
         idef.cpp
         index.cpp

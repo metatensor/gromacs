@@ -65,6 +65,38 @@ static bool isEmbeddedAtom(Index globalAtomIndex, const std::set<int>& embeddedI
     return (embeddedIndices.find(globalAtomIndex) != embeddedIndices.end());
 }
 
+//! Spread \p forceOnLink over the atoms of the bond along \p direction, from the embedded atom
+static std::tuple<RVec, RVec> spreadLinkAtomForceAlongDirection(const RVec& forceOnLink,
+                                                                const RVec& direction,
+                                                                real        linkDistance)
+{
+    // adapted from vsite.cpp::spread_vsite2FD()
+    const real distance = norm(direction);
+    if (distance == 0.0_real)
+    {
+        GMX_THROW(InconsistentInputError(
+                "Link atom force redistribution found a zero-length boundary bond."));
+    }
+    const real invDist        = 1.0_real / distance;
+    const real b              = linkDistance * invDist;
+    const real projectedForce = dot(direction, forceOnLink) * invDist * invDist;
+
+    const RVec forceOnMM       = b * (forceOnLink - projectedForce * direction);
+    const RVec forceOnEmbedded = forceOnLink - forceOnMM;
+
+    return { forceOnEmbedded, forceOnMM };
+}
+
+std::tuple<RVec, RVec> spreadLinkAtomForce(const RVec& forceOnLink,
+                                           const RVec& embeddedPosition,
+                                           const RVec& mmPosition,
+                                           const RVec& mmShift,
+                                           real        linkDistance)
+{
+    return spreadLinkAtomForceAlongDirection(
+            forceOnLink, mmPosition + mmShift - embeddedPosition, linkDistance);
+}
+
 LinkFrontierAtom::LinkFrontierAtom(int embeddedIndex, int mmIndex) :
     embeddedIndex_(embeddedIndex), mmIndex_(mmIndex)
 {
@@ -132,18 +164,9 @@ void LinkFrontierAtom::setLinkAtomNumber(const int& linkAtomNumber)
 
 std::tuple<RVec, RVec> LinkFrontierAtom::spreadForce(const RVec& forceOnLink, const t_pbc& pbc) const
 {
-    // adapted from vsite.cpp::spread_vsite2FD()
-    RVec forceOnEmbedded, forceOnMM, distance;
-
+    RVec distance;
     pbc_dx_aiuc(&pbc, posMM_, posEmb_, distance);
-    const real invDist        = 1. / norm(distance);
-    const real b              = linkDistance_ * invDist;
-    const real projectedForce = dot(distance, forceOnLink) * invDist * invDist;
-
-    forceOnMM       = b * (forceOnLink - projectedForce * distance);
-    forceOnEmbedded = forceOnLink - forceOnMM;
-
-    return { forceOnEmbedded, forceOnMM };
+    return spreadLinkAtomForceAlongDirection(forceOnLink, distance, linkDistance_);
 }
 
 std::vector<bool> splitEmbeddedBlocks(gmx_mtop_t* mtop, const std::set<int>& embeddedIndices)
@@ -583,10 +606,11 @@ std::vector<LinkFrontierAtom> buildLinkFrontier(gmx_mtop_t*              mtop,
     return linkFrontier;
 }
 
-void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
-                                           const std::set<int>&     embeddedIndices,
-                                           const std::vector<bool>& isEmbeddedBlock,
-                                           const MDLogger&          logger)
+void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*                 mtop,
+                                           const std::set<int>&        embeddedIndices,
+                                           const std::vector<bool>&    isEmbeddedBlock,
+                                           const MDLogger&             logger,
+                                           const EmbeddedBoundaryTerms boundaryTerms)
 {
     // Loop over all blocks in topology
     // molBlockIndex - index of current block in mtop
@@ -637,8 +661,13 @@ void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
                         }
                     }
 
-                    // If at least 2 atoms are embedded then remove interaction
-                    if (numEmbedded >= 2)
+                    // Remove an angle with at least 2 embedded atoms, or with all embedded
+                    // when the boundary terms are kept; a SETTLE with at least 2
+                    const int minEmbedded = (boundaryTerms == EmbeddedBoundaryTerms::Keep
+                                             && ftype != InteractionFunction::SETTLE)
+                                                    ? NRAL(ftype)
+                                                    : 2;
+                    if (numEmbedded >= minEmbedded)
                     {
                         // If this is SETTLE then replace it with two InteractionFunction::ConnectBonds
                         if (ftype == InteractionFunction::SETTLE)
@@ -699,10 +728,11 @@ void modifyEmbeddedThreeCenterInteractions(gmx_mtop_t*              mtop,
 }
 
 
-void modifyEmbeddedFourCenterInteractions(gmx_mtop_t*              mtop,
-                                          const std::set<int>&     embeddedIndices,
-                                          const std::vector<bool>& isEmbeddedBlock,
-                                          const MDLogger&          logger)
+void modifyEmbeddedFourCenterInteractions(gmx_mtop_t*                 mtop,
+                                          const std::set<int>&        embeddedIndices,
+                                          const std::vector<bool>&    isEmbeddedBlock,
+                                          const MDLogger&             logger,
+                                          const EmbeddedBoundaryTerms boundaryTerms)
 {
     // Loop over all blocks in topology
     // molBlockIndex - index of current block in mtop
@@ -749,8 +779,9 @@ void modifyEmbeddedFourCenterInteractions(gmx_mtop_t*              mtop,
                         }
                     }
 
-                    // If at least 3 atoms are embedded then remove interaction
-                    if (numEmbedded >= 3)
+                    // Remove a dihedral with at least 3 embedded atoms, or with all
+                    // embedded when the boundary terms are kept
+                    if (numEmbedded >= (boundaryTerms == EmbeddedBoundaryTerms::Keep ? NRAL(ftype) : 3))
                     {
                         numDihedralsRemoved++;
                     }

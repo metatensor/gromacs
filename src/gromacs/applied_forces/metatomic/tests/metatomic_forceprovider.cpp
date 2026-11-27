@@ -87,6 +87,7 @@
 #include "testutils/testasserts.h"
 
 #if GMX_METATOMIC_ACTIVE
+#    include "linkcaps.h"
 #    include "testmodel.h"
 #endif
 
@@ -519,6 +520,59 @@ TEST_F(MetatomicForceProviderTest, RejectsScrewPeriodicity)
     EXPECT_THROW_GMX(MetatomicForceProvider provider(options_, logger_, mpiComm_), NotImplementedError);
 }
 
+TEST_F(MetatomicForceProviderTest, GivesEachSiteItsChargeAndSpinMultiplicity)
+{
+    options_.params_.modelOptions     = R"(site_inputs="")";
+    options_.params_.checkConsistency = true;
+    // one site
+    options_.params_.siteChargeValues_ = { -1 };
+    options_.params_.siteSpinValues_   = { 3 };
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    EXPECT_REAL_EQ(energy_, RecorderModel::siteEnergy(-1, 3, 2));
+    // atom 0 in site 1 and atom 1 in site 0, each a system of its own
+    options_.params_.mtaSites_         = { 1, 0 };
+    options_.params_.siteChargeValues_ = { -2, 1 };
+    options_.params_.siteSpinValues_   = { 5, 2 };
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    EXPECT_REAL_EQ(energy_, RecorderModel::siteEnergy(-2, 5, 1) + RecorderModel::siteEnergy(1, 2, 1));
+}
+
+TEST_F(MetatomicForceProviderTest, AppliesTheNonConservativeForcesOfEachSite)
+{
+    options_.params_.nonConservative   = true;
+    options_.params_.modelOptions      = R"(non_conservative="")";
+    options_.params_.checkConsistency  = true;
+    options_.params_.mtaSites_         = { 1, 0 };
+    options_.params_.siteChargeValues_ = { 0, 0 };
+    options_.params_.siteSpinValues_   = { 1, 1 };
+    const double forceFactor =
+            metatomic::unit_conversion_factor(RecorderModel::c_ncForceUnit, "kJ/mol/nm");
+    const double stressFactor =
+            metatomic::unit_conversion_factor(RecorderModel::c_ncStressUnit, "kJ/mol/nm^3");
+    evaluate(c_cubicBox, RVec(0.21, 0.24, 0.17), IVec(0, 0, 0));
+    // each atom is atom 0 of its system
+    for (size_t atom = 0; atom < 2; ++atom)
+    {
+        for (size_t d = 0; d < 3; ++d)
+        {
+            const double force = forceFactor * RecorderModel::ncForce(0, d);
+            EXPECT_NEAR(force, forces_[atom][d], c_tolerance * std::abs(force))
+                    << "atom " << atom << ", dimension " << d;
+        }
+    }
+    // the stresses of the two systems add up
+    for (size_t a = 0; a < 3; ++a)
+    {
+        for (size_t b = 0; b < 3; ++b)
+        {
+            const double virial =
+                    2 * 0.5 * det(c_cubicBox) * stressFactor * RecorderModel::ncStress(a, b);
+            EXPECT_NEAR(virial, virial_[a][b], c_tolerance * std::abs(virial))
+                    << "virial " << a << ", " << b;
+        }
+    }
+}
+
 TEST_F(MetatomicForceProviderTest, RejectsInputsGromacsCannotProvide)
 {
     options_.params_.modelOptions = R"(request_charges="")";
@@ -539,6 +593,163 @@ TEST_F(MetatomicForceProviderTest, RejectsAtomicNumbersTheModelDoesNotSupport)
                         "The metatomic model failed: invalid parameter: this model does not "
                         "support the following atomic types which are present in the input "
                         "systems: 8")));
+}
+
+/*! \brief Link caps on the atoms of linkcaps.h, with the Lennard-Jones model.
+ *
+ * The force provider gets the pairs of all atoms, as from the GROMACS pair list. The pairs of
+ * the MM atoms are not those of their caps, and only the caps count.
+ */
+TEST(MetatomicLinkCapTest, SpreadsTheForcesOnTheCapsAndAddsTheirVirial)
+{
+    const auto plugin = std::filesystem::path(GMX_METATOMIC_PLUGINS_DIR) / "metatomic-lj-plugin.so";
+    if (!std::filesystem::exists(plugin))
+    {
+        GTEST_SKIP() << plugin << " is not installed";
+    }
+    for (const auto& system : { LinkCapSystem(),
+                                LinkCapSystem::withANeighbourBeyondTheRangeOfTheMMAtom(),
+                                LinkCapSystem::inTwoSites() })
+    {
+        SCOPED_TRACE(formatString(
+                "%zu atoms in %zu sites", system.positions.size(), system.sites.empty() ? 1 : 2));
+        const int           numAtoms = static_cast<int>(system.positions.size());
+        MetatomicOptions    options;
+        LocalAtomSetManager atomSets;
+        init_t_atoms(&options.params_.atoms_, numAtoms, false);
+        for (int i = 0; i < numAtoms; ++i)
+        {
+            options.params_.atoms_.atom[i].atomnumber = 18;
+            options.params_.mtaIndices_.push_back(i);
+        }
+        options.params_.active       = true;
+        options.params_.modelPath_   = "metatomic-lj-model";
+        options.params_.modelOptions = system.modelOptions();
+        options.params_.numAtoms_    = numAtoms;
+        options.params_.mtaAtoms_    = std::make_unique<LocalAtomSet>(
+                atomSets.add(ArrayRef<const Index>(options.params_.mtaIndices_)));
+        options.params_.pbcType_      = std::make_unique<PbcType>(PbcType::Xyz);
+        options.params_.linkFrontier_ = system.linkFrontier();
+        if (!system.sites.empty())
+        {
+            options.params_.mtaSites_         = system.sites;
+            options.params_.siteChargeValues_ = { 0, 0 };
+            options.params_.siteSpinValues_   = { 1, 1 };
+        }
+        ASSERT_EQ(options.params_.numEmbeddedAtoms(), system.numEmbedded);
+
+        matrix            box;
+        std::vector<RVec> x;
+        for (int a = 0; a < DIM; ++a)
+        {
+            for (int b = 0; b < DIM; ++b)
+            {
+                box[a][b] = static_cast<real>(system.box[a][b]);
+            }
+        }
+        for (const auto& position : system.positions)
+        {
+            x.push_back(position.toRVec());
+        }
+
+        const MDLogger         logger;
+        const MpiComm          mpiComm(MpiComm::SingleRank{});
+        MetatomicForceProvider provider(options, logger, mpiComm);
+        provider.gatherAtomNumbersIndices(MDModulesAtomsRedistributedSignal(box, x, {}, {}, std::nullopt));
+        std::vector<MDModulesPairlistConstructedSignal::PairlistEntry> pairlist;
+        for (int i = 0; i < numAtoms; ++i)
+        {
+            for (int j = i + 1; j < numAtoms; ++j)
+            {
+                // GROMACS shifts the first atom of a pair, metatensor the second
+                const IVec n = minimumImageCellShift(box, { 1, 1, 1 }, x[j] - x[i]);
+                pairlist.push_back({ { i, j }, xyzToShiftIndex(-n[XX], -n[YY], -n[ZZ]) });
+            }
+        }
+        provider.setPairlist(MDModulesPairlistConstructedSignal(pairlist, {}, {}));
+
+        std::vector<RVec>   forces(numAtoms, RVec(0, 0, 0));
+        ForceWithVirial     forceWithVirial(forces, true);
+        gmx_enerdata_t      enerd(1, nullptr);
+        ForceProviderOutput output(&forceWithVirial, &enerd);
+        provider.calculateForces(
+                ForceProviderInput(x, numAtoms, {}, {}, 0.0, 0, box, mpiComm, nullptr), &output);
+
+        const double energy = system.energy();
+        EXPECT_NEAR(enerd.term[InteractionFunction::MetatomicPotentialEnergy],
+                    energy,
+                    c_tolerance * std::abs(energy));
+        const auto expectedForces = system.forces();
+        for (int i = 0; i < numAtoms; ++i)
+        {
+            for (int d = 0; d < DIM; ++d)
+            {
+                EXPECT_NEAR(forces[i][d], expectedForces[i][d], 1e-3 * (1 + std::abs(expectedForces[i][d])))
+                        << "atom " << i << ", dimension " << d;
+            }
+        }
+        const auto expectedVirial = system.virial();
+        for (int a = 0; a < DIM; ++a)
+        {
+            for (int b = 0; b < DIM; ++b)
+            {
+                EXPECT_NEAR(forceWithVirial.getVirial()[a][b],
+                            expectedVirial[a][b],
+                            1e-3 * (1 + std::abs(expectedVirial[a][b])))
+                        << "virial " << a << ", " << b;
+            }
+        }
+        done_atom(&options.params_.atoms_);
+    }
+}
+
+TEST(MetatomicLinkCapTest, RejectsCappedBondsLongerThanItSupports)
+{
+    auto system = LinkCapSystem::withANeighbourBeyondTheRangeOfTheMMAtom();
+    // the MM atom 0.35 nm from its embedded atom
+    system.positions[2][XX]      = 2.1;
+    const int           numAtoms = static_cast<int>(system.positions.size());
+    MetatomicOptions    options;
+    LocalAtomSetManager atomSets;
+    init_t_atoms(&options.params_.atoms_, numAtoms, false);
+    for (int i = 0; i < numAtoms; ++i)
+    {
+        options.params_.atoms_.atom[i].atomnumber = 18;
+        options.params_.mtaIndices_.push_back(i);
+    }
+    ASSERT_TRUE(registerRecorderPlugin());
+    options.params_.active     = true;
+    options.params_.modelPath_ = "gromacs-test-recorder-model";
+    options.params_.numAtoms_  = numAtoms;
+    options.params_.mtaAtoms_  = std::make_unique<LocalAtomSet>(
+            atomSets.add(ArrayRef<const Index>(options.params_.mtaIndices_)));
+    options.params_.pbcType_      = std::make_unique<PbcType>(PbcType::Xyz);
+    options.params_.linkFrontier_ = system.linkFrontier();
+    const matrix      box         = { { 4, 0, 0 }, { 0, 4, 0 }, { 0, 0, 4 } };
+    std::vector<RVec> x;
+    for (const auto& position : system.positions)
+    {
+        x.push_back(position.toRVec());
+    }
+
+    const MDLogger         logger;
+    const MpiComm          mpiComm(MpiComm::SingleRank{});
+    MetatomicForceProvider provider(options, logger, mpiComm);
+    provider.gatherAtomNumbersIndices(MDModulesAtomsRedistributedSignal(box, x, {}, {}, std::nullopt));
+    std::vector<RVec>   forces(numAtoms, RVec(0, 0, 0));
+    ForceWithVirial     forceWithVirial(forces, false);
+    gmx_enerdata_t      enerd(1, nullptr);
+    ForceProviderOutput output(&forceWithVirial, &enerd);
+    EXPECT_THAT(
+            [&]
+            {
+                provider.calculateForces(
+                        ForceProviderInput(x, numAtoms, {}, {}, 0.0, 0, box, mpiComm, nullptr), &output);
+            },
+            ThrowsMessage<InconsistentInputError>(
+                    HasSubstr("The bond between atoms 1 and 3, capped by a link atom, is 0.35 nm "
+                              "long, longer than 0.3 nm")));
+    done_atom(&options.params_.atoms_);
 }
 
 #endif // GMX_METATOMIC_ACTIVE

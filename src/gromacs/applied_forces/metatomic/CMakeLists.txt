@@ -32,6 +32,7 @@
 # the research papers on the package. Check out https://www.gromacs.org.
 
 gmx_add_libgromacs_sources(
+    embedded_coulomb_correction.cpp
     metatomic_options.cpp
     metatomic_mdmodule.cpp
 )

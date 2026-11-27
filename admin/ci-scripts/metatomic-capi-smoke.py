@@ -11,6 +11,10 @@ periodic box and an xy-periodic slab whose pair is farther apart in z than half
 the box height, which must not be shifted along z. Four-rank runs check boxes of
 64 and 1000 atoms, and domains of 0.7 nm, narrower than the 0.9 nm range of the
 model, so that atoms come from two domains away, and ranks without atoms.
+ONIOM runs check, on one and two ranks, that metatomic-oniom removes the PME
+Coulomb interaction of two embedded charges 1.2 nm apart at any distance: their
+Coulomb energy is the same with the pair beyond rcoulomb (0.9 nm) and within it
+(1.3 nm), and differs by about 29 kJ/mol without ONIOM.
 They use thread-MPI, or the launcher in GMX_MPIEXEC with a library-MPI build,
 e.g. GMX_MPIEXEC="mpirun -np".
 The classical Lennard-Jones parameters are zero, so only the plugin can produce
@@ -94,6 +98,84 @@ def lattice(counts, box):
             for i, j, k in itertools.product(*(range(n) for n in counts))]
 
 
+def mdrun_command(gmx, mdrun, dd, launcher, library):
+    """mdrun on the ranks of the domain decomposition grid dd"""
+    ranks = math.prod(dd)
+    if ranks > 1:
+        mdrun = [*mdrun, '-dd', *map(str, dd), '-npme', '0']
+    if launcher:
+        return [*launcher, str(ranks), gmx, *mdrun]
+    if library == 'thread_mpi':
+        return [gmx, *mdrun, '-ntmpi', str(ranks)]
+    return [gmx, *mdrun]
+
+
+ONIOM_TOPOLOGY = '''[ defaults ]
+1 2 no 1 1
+[ atomtypes ]
+Ar 18 39.948 0.0 A 0.0 0.0
+[ moleculetype ]
+PAIR 1
+[ atoms ]
+1 Ar 1 PAIR A1 1  0.5 39.948
+2 Ar 1 PAIR A2 1 -0.5 39.948
+[ system ]
+two embedded charges
+[ molecules ]
+PAIR 1
+'''
+
+
+def oniom_coulomb(gmx, plugin, root, launcher, library):
+    """PME Coulomb energy of two embedded charges 1.2 nm apart, with and without ONIOM"""
+    (root / 'oniom.top').write_text(ONIOM_TOPOLOGY)
+    atoms = ''.join(f'{1:5d}{"PAIR":<5s}{name:>5s}{i + 1:5d}{x:8.3f}{2:8.3f}{2:8.3f}\n'
+                    for i, (name, x) in enumerate([('A1', 1.4), ('A2', 2.6)]))
+    (root / 'oniom.gro').write_text(f'pair\n2\n{atoms}   4.00000   4.00000   4.00000\n')
+
+    def coulomb(oniom, cutoff, dd):
+        name = f'oniom-{oniom}-{cutoff}-{math.prod(dd)}'
+        (root / f'{name}.mdp').write_text(f'''integrator = md
+nsteps = 0
+cutoff-scheme = Verlet
+verlet-buffer-tolerance = -1
+rlist = {cutoff}
+coulombtype = PME
+rcoulomb = {cutoff}
+rvdw = {cutoff}
+comm-mode = none
+metatomic-active = true
+metatomic-input-group = System
+metatomic-model = metatomic-lj-model
+metatomic-plugin = {plugin}
+metatomic-model-options = sigma={SIGMA} epsilon={EPSILON} cutoff={CUTOFF} atomic_type=18 length_unit=nm energy_unit="kJ/mol"
+metatomic-oniom = {oniom}
+''')
+        run([gmx, 'grompp', '-f', f'{name}.mdp', '-c', 'oniom.gro', '-p', 'oniom.top',
+             '-o', f'{name}.tpr'], cwd=root)
+        run(mdrun_command(gmx, ['mdrun', '-s', f'{name}.tpr', '-deffnm', name, '-nb', 'cpu'],
+                          dd, launcher, library), cwd=root)
+        log = (root / f'{name}.log').read_text()
+        assert ('removing the classical Coulomb interaction' in log) == (oniom == 'yes'), name
+        if math.prod(dd) > 1:
+            assert 'Domain decomposition grid {} x {} x {}'.format(*dd) in log, f'{name}: no DD'
+        run([gmx, 'energy', '-f', f'{name}.edr', '-o', f'{name}-energy.xvg'], cwd=root,
+            input='Coulomb-(SR)\nCoul.-recip.\n0\n')
+        return sum(rows(root / f'{name}-energy.xvg')[0][1:])
+
+    for dd in [(1, 1, 1), (2, 1, 1)]:
+        ranks = math.prod(dd)
+        if ranks > 1 and not launcher and library != 'thread_mpi':
+            print(f'oniom ({ranks} ranks): SKIP (needs thread-MPI, or GMX_MPIEXEC with an MPI build)')
+            continue
+        beyond, within = coulomb('yes', 0.9, dd), coulomb('yes', 1.3, dd)
+        assert abs(beyond - within) < 0.1, ('oniom', ranks, beyond, within)
+        if ranks == 1:
+            # without ONIOM, the pair beyond rcoulomb keeps its reciprocal-space interaction
+            assert abs(coulomb('no', 0.9, dd) - within) > 10, 'the ONIOM check cannot fail'
+        print(f'oniom ({ranks} rank{"s" if ranks > 1 else ""}): Coulomb energy independent of rcoulomb PASS')
+
+
 def main():
     gmx, plugin = (str(Path(p).resolve(strict=True)) for p in sys.argv[1:])
     launcher = shlex.split(os.environ.get('GMX_MPIEXEC', ''))
@@ -158,16 +240,8 @@ metatomic-check-consistency = true
 ''' + (walls if pbc == 'xy' else ''))
             run([gmx, 'grompp', '-f', f'{name}.mdp', '-c', f'{name}.gro', '-p', f'{name}.top',
                  '-o', f'{name}.tpr'], cwd=root)
-            mdrun = ['mdrun', '-s', f'{name}.tpr', '-deffnm', name, '-nb', 'cpu']
-            if ranks > 1:
-                mdrun += ['-dd', *map(str, dd), '-npme', '0']
-            if launcher:
-                command = [*launcher, str(ranks), gmx, *mdrun]
-            elif library == 'thread_mpi':
-                command = [gmx, *mdrun, '-ntmpi', str(ranks)]
-            else:
-                command = [gmx, *mdrun]
-            run(command, cwd=root)
+            run(mdrun_command(gmx, ['mdrun', '-s', f'{name}.tpr', '-deffnm', name, '-nb', 'cpu'],
+                              dd, launcher, library), cwd=root)
             log = (root / f'{name}.log').read_text()
             assert 'Metatomic model: length unit' in log, 'the metatomic force provider was not initialized'
             if ranks > 1:
@@ -186,6 +260,7 @@ metatomic-check-consistency = true
             for actual, value in zip(forces, expected_forces):
                 assert math.isclose(actual, value, rel_tol=2e-4, abs_tol=1e-4), (name, forces, expected_forces)
             print(f'{name} ({ranks} rank{"s" if ranks > 1 else ""}): plugin, tpr options, energy and forces PASS')
+        oniom_coulomb(gmx, plugin, root, launcher, library)
 
 
 if __name__ == '__main__':

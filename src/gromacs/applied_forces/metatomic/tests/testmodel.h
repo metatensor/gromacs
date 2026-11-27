@@ -62,7 +62,8 @@ namespace gmx::test
  * out the strain gradient, and counts the evaluations that ask it for the strain gradient.
  * It can also declare the non-conservative force and stress, with the values of
  * ncForce() and ncStress(), and a per-atom energy uncertainty of (atom + 1) times a
- * given value.
+ * given value. With site inputs, it requests the total charge and spin multiplicity of each
+ * system, and its energy is siteEnergy() of them.
  */
 class RecorderModel final : public metatomic::BaseModel
 {
@@ -70,12 +71,20 @@ public:
     RecorderModel(bool                  requestCharges,
                   bool                  declaresStrain,
                   bool                  nonConservative = false,
-                  std::optional<double> uncertainty     = std::nullopt) :
+                  std::optional<double> uncertainty     = std::nullopt,
+                  bool                  siteInputs      = false) :
         requestCharges_(requestCharges),
         declaresStrain_(declaresStrain),
         nonConservative_(nonConservative),
-        uncertainty_(uncertainty)
+        uncertainty_(uncertainty),
+        siteInputs_(siteInputs)
     {
+    }
+
+    //! Energy of a system of \p numAtoms atoms with total charge \p charge and spin multiplicity \p spin, in kJ/mol
+    static double siteEnergy(double charge, double spin, size_t numAtoms)
+    {
+        return 1000 * charge + 100 * spin + numAtoms;
     }
 
     //! Non-conservative force on \p atom along \p d, in c_ncForceUnit.
@@ -125,15 +134,29 @@ public:
     std::vector<metatomic::Quantity>
     requested_inputs(const std::vector<metatomic::Quantity>& /*requestedOutputs*/) const override
     {
-        if (!requestCharges_)
+        std::vector<metatomic::Quantity> inputs;
+        if (requestCharges_)
         {
-            return {};
+            inputs.push_back(metatomic::Quantity::builder()
+                                     .name("charge")
+                                     .unit("e")
+                                     .sample_kind(metatomic::SampleKind::Atom)
+                                     .build());
         }
-        return { metatomic::Quantity::builder()
-                         .name("charge")
-                         .unit("e")
-                         .sample_kind(metatomic::SampleKind::Atom)
-                         .build() };
+        if (siteInputs_)
+        {
+            inputs.push_back(metatomic::Quantity::builder()
+                                     .name("charge")
+                                     .unit("e")
+                                     .sample_kind(metatomic::SampleKind::System)
+                                     .build());
+            inputs.push_back(metatomic::Quantity::builder()
+                                     .name("spin_multiplicity")
+                                     .unit("")
+                                     .sample_kind(metatomic::SampleKind::System)
+                                     .build());
+        }
+        return inputs;
     }
 
     std::vector<metatensor::TensorMap> execute_inner(const std::vector<metatomic::System>& systems,
@@ -146,19 +169,34 @@ public:
             const auto& name = output.name();
             if (name == "energy")
             {
-                outputs.push_back(energy(systems.at(0).size(), output.gradients()));
+                std::vector<double> energies;
+                for (const auto& system : systems)
+                {
+                    const auto value = [&system](const char* input)
+                    {
+                        auto       data   = system.custom_data(input);
+                        auto       block  = data.block_by_id(0);
+                        const auto values = block.values<double>();
+                        return values(0, 0);
+                    };
+                    energies.push_back(siteInputs_ ? siteEnergy(value("charge"),
+                                                                value("spin_multiplicity"),
+                                                                system.size())
+                                                   : 0.0);
+                }
+                outputs.push_back(energy(systems, energies, output.gradients()));
             }
             else if (name == "non_conservative_force")
             {
-                outputs.push_back(perAtom(systems.at(0).size(), name, 3, ncForce));
+                outputs.push_back(perAtom(systems, name, 3, ncForce));
             }
             else if (name == "non_conservative_stress")
             {
-                outputs.push_back(stress());
+                outputs.push_back(stress(systems.size()));
             }
             else if (name == "energy_uncertainty")
             {
-                outputs.push_back(perAtom(systems.at(0).size(),
+                outputs.push_back(perAtom(systems,
                                           "energy",
                                           1,
                                           [this](size_t atom, size_t /*d*/)
@@ -204,65 +242,86 @@ private:
         return outputs;
     }
 
-    //! A zero energy, with zero gradients for those in \p gradients.
-    static metatensor::TensorMap energy(size_t nAtoms, const std::vector<metatomic::Gradients>& gradients)
+    //! The \p energies of the systems, with zero gradients for those in \p gradients.
+    static metatensor::TensorMap energy(const std::vector<metatomic::System>&    systems,
+                                        std::vector<double>                      energies,
+                                        const std::vector<metatomic::Gradients>& gradients)
     {
         const auto has = [&gradients](metatomic::Gradients gradient)
         { return std::find(gradients.begin(), gradients.end(), gradient) != gradients.end(); };
-        auto block = metatensor::TensorBlock(
+        const size_t         nSystems = systems.size();
+        std::vector<int32_t> systemSamples;
+        std::vector<int32_t> atomSamples;
+        for (size_t s = 0; s < nSystems; ++s)
+        {
+            systemSamples.push_back(static_cast<int32_t>(s));
+            for (size_t atom = 0; atom < systems[s].size(); ++atom)
+            {
+                atomSamples.insert(
+                        atomSamples.end(),
+                        { static_cast<int32_t>(s), static_cast<int32_t>(s), static_cast<int32_t>(atom) });
+            }
+        }
+        const size_t nAtoms = atomSamples.size() / 3;
+        auto         block  = metatensor::TensorBlock(
                 std::make_unique<metatensor::SimpleDataArray<double>>(
-                        std::vector<uintptr_t>{ 1, 1 }, std::vector<double>{ 0.0 }),
-                metatensor::Labels({ "system" }, { { 0 } }),
+                        std::vector<uintptr_t>{ nSystems, 1 }, std::move(energies)),
+                metatensor::Labels({ "system" }, systemSamples.data(), nSystems),
                 {},
                 metatensor::Labels({ "energy" }, { { 0 } }));
 
         if (has(metatomic::Gradients::Positions))
         {
-            std::vector<int32_t> gradientSamples;
-            for (size_t atom = 0; atom < nAtoms; ++atom)
-            {
-                gradientSamples.insert(gradientSamples.end(), { 0, 0, static_cast<int32_t>(atom) });
-            }
             block.add_gradient(
                     "positions",
                     metatensor::TensorBlock(
                             std::make_unique<metatensor::SimpleDataArray<double>>(
                                     std::vector<uintptr_t>{ nAtoms, 3, 1 }, std::vector<double>(3 * nAtoms)),
-                            metatensor::Labels({ "sample", "system", "atom" }, gradientSamples.data(), nAtoms),
+                            metatensor::Labels({ "sample", "system", "atom" }, atomSamples.data(), nAtoms),
                             { metatensor::Labels({ "xyz" }, { { 0 }, { 1 }, { 2 } }) },
                             metatensor::Labels({ "energy" }, { { 0 } })));
         }
         if (has(metatomic::Gradients::Strain))
         {
             ++strainRequests;
-            block.add_gradient(
-                    "strain",
-                    metatensor::TensorBlock(
-                            std::make_unique<metatensor::SimpleDataArray<double>>(
-                                    std::vector<uintptr_t>{ 1, 3, 3, 1 }, std::vector<double>(9)),
-                            metatensor::Labels({ "sample" }, { { 0 } }),
-                            { metatensor::Labels({ "xyz_1" }, { { 0 }, { 1 }, { 2 } }),
-                              metatensor::Labels({ "xyz_2" }, { { 0 }, { 1 }, { 2 } }) },
-                            metatensor::Labels({ "energy" }, { { 0 } })));
+            block.add_gradient("strain",
+                               metatensor::TensorBlock(
+                                       std::make_unique<metatensor::SimpleDataArray<double>>(
+                                               std::vector<uintptr_t>{ nSystems, 3, 3, 1 },
+                                               std::vector<double>(9 * nSystems)),
+                                       metatensor::Labels({ "sample" }, systemSamples.data(), nSystems),
+                                       { metatensor::Labels({ "xyz_1" }, { { 0 }, { 1 }, { 2 } }),
+                                         metatensor::Labels({ "xyz_2" }, { { 0 }, { 1 }, { 2 } }) },
+                                       metatensor::Labels({ "energy" }, { { 0 } })));
         }
 
         return single(std::move(block));
     }
 
-    //! Per-atom values of \p f(atom, d), with \p nComponents xyz components if it is 3.
+    /*! \brief Per-atom values of \p f(atom, d), with \p nComponents xyz components if it is 3.
+     *
+     * The atom is the index of the atom in its system.
+     */
     template<typename F>
-    static metatensor::TensorMap perAtom(size_t nAtoms, const std::string& property, size_t nComponents, F f)
+    static metatensor::TensorMap perAtom(const std::vector<metatomic::System>& systems,
+                                         const std::string&                    property,
+                                         size_t                                nComponents,
+                                         F                                     f)
     {
         std::vector<int32_t> samples;
         std::vector<double>  values;
-        for (size_t atom = 0; atom < nAtoms; ++atom)
+        for (size_t s = 0; s < systems.size(); ++s)
         {
-            samples.insert(samples.end(), { 0, static_cast<int32_t>(atom) });
-            for (size_t d = 0; d < nComponents; ++d)
+            for (size_t atom = 0; atom < systems[s].size(); ++atom)
             {
-                values.push_back(f(atom, d));
+                samples.insert(samples.end(), { static_cast<int32_t>(s), static_cast<int32_t>(atom) });
+                for (size_t d = 0; d < nComponents; ++d)
+                {
+                    values.push_back(f(atom, d));
+                }
             }
         }
+        const size_t                    nAtoms = samples.size() / 2;
         std::vector<metatensor::Labels> components;
         std::vector<uintptr_t>          shape{ nAtoms, 1 };
         if (nComponents == 3)
@@ -277,20 +336,26 @@ private:
                 metatensor::Labels({ property }, { { 0 } })));
     }
 
-    static metatensor::TensorMap stress()
+    //! ncStress() for each of \p nSystems systems
+    static metatensor::TensorMap stress(size_t nSystems)
     {
-        std::vector<double> values;
-        for (size_t a = 0; a < 3; ++a)
+        std::vector<double>  values;
+        std::vector<int32_t> samples;
+        for (size_t s = 0; s < nSystems; ++s)
         {
-            for (size_t b = 0; b < 3; ++b)
+            samples.push_back(static_cast<int32_t>(s));
+            for (size_t a = 0; a < 3; ++a)
             {
-                values.push_back(ncStress(a, b));
+                for (size_t b = 0; b < 3; ++b)
+                {
+                    values.push_back(ncStress(a, b));
+                }
             }
         }
         return single(metatensor::TensorBlock(
                 std::make_unique<metatensor::SimpleDataArray<double>>(
-                        std::vector<uintptr_t>{ 1, 3, 3, 1 }, std::move(values)),
-                metatensor::Labels({ "system" }, { { 0 } }),
+                        std::vector<uintptr_t>{ nSystems, 3, 3, 1 }, std::move(values)),
+                metatensor::Labels({ "system" }, samples.data(), nSystems),
                 { metatensor::Labels({ "xyz_1" }, { { 0 }, { 1 }, { 2 } }),
                   metatensor::Labels({ "xyz_2" }, { { 0 }, { 1 }, { 2 } }) },
                 metatensor::Labels({ "non_conservative_stress" }, { { 0 } })));
@@ -307,14 +372,16 @@ private:
     bool                  declaresStrain_;
     bool                  nonConservative_;
     std::optional<double> uncertainty_;
+    bool                  siteInputs_;
 };
 
 /*! \brief Plugin callback creating a RecorderModel.
  *
  * It requests a charge input with the option `request_charges`, declares no strain
  * gradient with `without_strain`, declares the non-conservative force and stress with
- * `non_conservative`, and an energy uncertainty of (atom + 1) times x kJ/mol with
- * `uncertainty=x`.
+ * `non_conservative`, an energy uncertainty of (atom + 1) times x kJ/mol with
+ * `uncertainty=x`, and requests the charge and spin multiplicity of each system with
+ * `site_inputs`.
  */
 inline mta_status_t loadRecorderModel(const char* loadFrom, const char* optionsJson, mta_model_t* model)
 {
@@ -334,7 +401,8 @@ inline mta_status_t loadRecorderModel(const char* loadFrom, const char* optionsJ
                 std::make_unique<RecorderModel>(options.contains("request_charges"),
                                                 !options.contains("without_strain"),
                                                 options.contains("non_conservative"),
-                                                uncertainty));
+                                                uncertainty,
+                                                options.contains("site_inputs")));
         return MTA_SUCCESS;
     }
     catch (const std::exception& e)
