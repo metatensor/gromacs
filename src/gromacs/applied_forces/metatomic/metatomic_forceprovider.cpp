@@ -1061,6 +1061,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     torch::Tensor virialTensor;
     double        energy = 0.0;
 
+    // A rank without home atoms of the model has no energy to compute, and
+    // models are not required to accept an empty selection. It still takes
+    // part in the gathers above and in the force distribution below, which
+    // are collective.
+    if (!useNewtonNL || numHomeMta_ > 0)
     {
         MetatomicTimer modelTimer("model inference", mpiComm_);
 
@@ -1361,6 +1366,11 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
             toCPUTimer.stop();
         }
+    }
+    else
+    {
+        forceTensor  = torch::zeros({ numLocalMta_, 3 }, torch::kFloat64);
+        virialTensor = torch::zeros({ 3, 3 }, torch::kFloat64);
     }
 
     // Force distribution: home forces applied directly, non-home forces
