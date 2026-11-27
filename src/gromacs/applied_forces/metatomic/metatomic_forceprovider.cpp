@@ -35,11 +35,10 @@
  * \brief
  * Implements the Metatomic Force Provider class with per-rank model evaluation.
  *
- * In domain decomposition, each rank uses the GROMACS pairlist as the pair
- * source, then exchanges pair identities across ranks (backward pair exchange)
- * so every home atom has ALL its pairs. Sums home-atom energies only. Safe for
- * all model architectures (newton pair ON pattern, inspired by LAMMPS
- * pair_metatomic).
+ * In domain decomposition, each rank gathers the atoms and the pairlist
+ * pairs of all ranks and evaluates the model on the whole input group. It
+ * sums home-atom energies only. This holds for every model architecture,
+ * whatever its range.
  *
  * Common design points:
  *  - Forces: home forces applied directly; non-home forces exchanged via
@@ -160,8 +159,6 @@ struct MetatomicData
     torch::Tensor cachedTypes;
     torch::Tensor cachedPbc;
 
-    //! Sparse/dense force exchange threshold (atom count). Env: GMX_METATOMIC_SPARSE_THRESHOLD.
-    int32_t sparseThreshold = 1000;
 
     //! Energy output key, including the variant suffix (e.g. "energy/pbe0").
     std::string energy_key;
@@ -198,14 +195,6 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
         MetatomicTimer::enable(std::string(timerEnv) != "0");
     }
 
-    if (const char* env = std::getenv("GMX_METATOMIC_SPARSE_THRESHOLD"))
-    {
-        data_->sparseThreshold = std::stoi(env);
-        GMX_LOG(logger_.info)
-                .asParagraph()
-                .appendTextFormatted("Metatomic sparse force threshold: %d",
-                                     data_->sparseThreshold);
-    }
 
     try
     {
@@ -355,12 +344,15 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
     requested_output->set_sample_kind(model_output->sample_kind());
     if (!modelOutputIsAtomSample(model_output))
     {
-        GMX_LOG(logger_.warning)
-                .asParagraph()
-                .appendText(
-                        "Metatomic model does not support per-atom energy output "
-                        "(sample_kind != \"atom\"). Energy decomposition in domain "
-                        "decomposition may be less accurate.");
+        // Every rank evaluates the whole input group and keeps the energies
+        // of its home atoms. An energy of the whole system can not be split
+        // that way and would be counted once per rank.
+        if (mpiComm_.isParallel())
+        {
+            GMX_THROW(NotImplementedError(
+                    "The metatomic model has no per-atom energy output (sample_kind != \"atom\"). "
+                    "Such a model can only be run on a single rank."));
+        }
     }
     requested_output->explicit_gradients = {};
     requested_output->set_quantity("energy");
@@ -728,7 +720,7 @@ namespace
  * provide MPI_Allgatherv.
  */
 template<typename T>
-std::vector<T> gatherFromAllRanks(const MpiComm& mpiComm,
+std::vector<T> gatherFromAllRanks(const MpiComm&  mpiComm,
                                   std::vector<T>* send,
                                   MPI_Datatype    type,
                                   std::size_t*    ownOffset = nullptr)
@@ -850,15 +842,15 @@ void MetatomicForceProvider::gatherRemotePairs(const matrix box)
         // r_ij = x[j] + n * box - x[i], the convention of cellShiftsMta_
         sendVectors[3 * k] = positions_[aj][XX] - positions_[ai][XX] + n[XX] * box[XX][XX]
                              + n[YY] * box[YY][XX] + n[ZZ] * box[ZZ][XX];
-        sendVectors[3 * k + 1] = positions_[aj][YY] - positions_[ai][YY] + n[YY] * box[YY][YY]
-                                 + n[ZZ] * box[ZZ][YY];
+        sendVectors[3 * k + 1] =
+                positions_[aj][YY] - positions_[ai][YY] + n[YY] * box[YY][YY] + n[ZZ] * box[ZZ][YY];
         sendVectors[3 * k + 2] = positions_[aj][ZZ] - positions_[ai][ZZ] + n[ZZ] * box[ZZ][ZZ];
     }
 
-    std::size_t             ownOffset = 0;
-    const std::vector<int>  allPairs = gatherFromAllRanks(mpiComm_, &sendPairs, MPI_INT, &ownOffset);
+    std::size_t            ownOffset = 0;
+    const std::vector<int> allPairs = gatherFromAllRanks(mpiComm_, &sendPairs, MPI_INT, &ownOffset);
     const std::vector<real> allVectors = gatherFromAllRanks(mpiComm_, &sendVectors, GMX_MPI_REAL);
-    const std::size_t       ownFirst = ownOffset / 2;
+    const std::size_t       ownFirst   = ownOffset / 2;
 
     std::unordered_map<int32_t, int32_t> globalToLocal;
     globalToLocal.reserve(numLocalMta_);
@@ -910,84 +902,30 @@ void MetatomicForceProvider::gatherRemotePairs(const matrix box)
 }
 
 
-void MetatomicForceProvider::distributeNonHomeForces(const double*        forces,
-                                                     ForceProviderOutput* outputs)
+void MetatomicForceProvider::distributeNonHomeForces(const double* forces, ForceProviderOutput* outputs)
 {
     const int32_t numTotalMta = static_cast<int32_t>(options_.params_.mtaIndices_.size());
 
-    // For small systems, dense allreduce has lower latency than the
-    // sparse exchange (gather counts + allgatherv).
-    const int32_t sparseThreshold = data_->sparseThreshold;
-
-    if (numTotalMta < sparseThreshold)
+    // Every rank holds forces on all atoms of the input group, so one
+    // reduction over the group moves less data than a list of the forces a
+    // rank does not own.
+    std::vector<double> groupForces(3 * static_cast<std::size_t>(numTotalMta), 0.0);
+    for (int32_t i = 0; i < numLocalMta_; i++)
     {
-        // Dense fallback: allocate N_total buffer, scatter, allreduce, readback.
-        std::vector<double> denseForces(3 * numTotalMta, 0.0);
-        for (int32_t i = 0; i < numLocalMta_; i++)
-        {
-            int32_t g = mtaToGlobalMta_[i];
-            denseForces[3 * g]     = forces[3 * i];
-            denseForces[3 * g + 1] = forces[3 * i + 1];
-            denseForces[3 * g + 2] = forces[3 * i + 2];
-        }
-        mpiComm_.sumReduce(static_cast<std::size_t>(3 * numTotalMta), denseForces.data());
-
-        for (int32_t i = 0; i < numHomeMta_; i++)
-        {
-            int32_t gmxIdx = mtaToGmxLocal_[i];
-            int32_t g      = mtaToGlobalMta_[i];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(denseForces[3 * g]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(denseForces[3 * g + 1]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(denseForces[3 * g + 2]);
-        }
-        return;
+        const int32_t g        = mtaToGlobalMta_[i];
+        groupForces[3 * g]     = forces[3 * i];
+        groupForces[3 * g + 1] = forces[3 * i + 1];
+        groupForces[3 * g + 2] = forces[3 * i + 2];
     }
+    mpiComm_.sumReduce(groupForces.size(), groupForces.data());
 
-    // Sparse path: apply home forces directly, exchange only non-home forces.
-
-    // Step 1: Apply home atom forces directly (no communication needed).
     for (int32_t i = 0; i < numHomeMta_; i++)
     {
-        int32_t gmxIdx = mtaToGmxLocal_[i];
-        outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(forces[3 * i]);
-        outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(forces[3 * i + 1]);
-        outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(forces[3 * i + 2]);
-    }
-
-    // Step 2: Pack non-home forces as sparse tuples (globalMtaIdx, fx, fy, fz).
-    // Each tuple is 4 doubles: [globalMtaIdx_as_double, fx, fy, fz].
-    const int32_t numNonHome = numLocalMta_ - numHomeMta_;
-    std::vector<double> sendBuf(4 * numNonHome);
-    for (int32_t i = numHomeMta_; i < numLocalMta_; i++)
-    {
-        int32_t k = i - numHomeMta_;
-        sendBuf[4 * k]     = static_cast<double>(mtaToGlobalMta_[i]);
-        sendBuf[4 * k + 1] = forces[3 * i];
-        sendBuf[4 * k + 2] = forces[3 * i + 1];
-        sendBuf[4 * k + 3] = forces[3 * i + 2];
-    }
-
-    // Step 3: Gather the tuples of all ranks on every rank.
-#if GMX_MPI
-    const std::vector<double> recvBuf = gatherFromAllRanks(mpiComm_, &sendBuf, MPI_DOUBLE);
-#else
-    const std::vector<double> recvBuf = sendBuf;
-#endif
-    const int totalNonHome = static_cast<int>(recvBuf.size() / 4);
-
-    // Step 4: Scan received tuples for forces destined for our home atoms.
-    for (int t = 0; t < totalNonHome; t++)
-    {
-        int32_t globalMtaIdx = static_cast<int32_t>(recvBuf[4 * t]);
-        auto    it           = globalMtaToLocalHome_.find(globalMtaIdx);
-        if (it != globalMtaToLocalHome_.end())
-        {
-            int32_t localHomeIdx = it->second;
-            int32_t gmxIdx       = mtaToGmxLocal_[localHomeIdx];
-            outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(recvBuf[4 * t + 1]);
-            outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(recvBuf[4 * t + 2]);
-            outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(recvBuf[4 * t + 3]);
-        }
+        const int32_t gmxIdx = mtaToGmxLocal_[i];
+        const int32_t g      = mtaToGlobalMta_[i];
+        outputs->forceWithVirial_.force_[gmxIdx][0] += static_cast<real>(groupForces[3 * g]);
+        outputs->forceWithVirial_.force_[gmxIdx][1] += static_cast<real>(groupForces[3 * g + 1]);
+        outputs->forceWithVirial_.force_[gmxIdx][2] += static_cast<real>(groupForces[3 * g + 2]);
     }
 }
 
@@ -1021,12 +959,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
     if (useNewtonNL)
     {
-        // Largest cutoff over the requested neighbor lists
-        double maxCutoff = 0.0;
-        for (const auto& req : data_->nl_requests)
-        {
-            maxCutoff = std::max(maxCutoff, req->engine_cutoff("nm"));
-        }
 
         // Step 1: Add the atoms the other ranks own. Extends positions_,
         // atomNumbers_, mtaToGlobalMta_ and numLocalMta_.
@@ -1336,12 +1268,12 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                 // The stress is that of the whole input group and every rank
                 // gets the same tensor, while the virials of the ranks are
                 // summed. Each rank adds the share of its home atoms.
-                const double homeShare =
-                        static_cast<double>(numHomeMta_)
-                        / static_cast<double>(options_.params_.mtaIndices_.size());
+                const double homeShare = static_cast<double>(numHomeMta_)
+                                         / static_cast<double>(options_.params_.mtaIndices_.size());
 
                 // 1/2 for GROMACS' virial convention
-                virialTensor = (0.5 * homeShare * stress_tensor * volume).to(torch::kCPU).to(torch::kFloat64);
+                virialTensor =
+                        (0.5 * homeShare * stress_tensor * volume).to(torch::kCPU).to(torch::kFloat64);
             }
             else
             {
@@ -1376,7 +1308,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
     }
     else
     {
-        forceTensor  = torch::zeros({ numLocalMta_, 3 }, torch::kFloat64);
+        // Non-conservative forces are rows of home atoms only
+        forceTensor = torch::zeros({ data_->nonConservative ? 0 : numLocalMta_, 3 }, torch::kFloat64);
         virialTensor = torch::zeros({ 3, 3 }, torch::kFloat64);
     }
 
@@ -1435,9 +1368,8 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         cellShiftsMta_.resize(origShiftsSize);
     }
 
-    // Energy: each rank's energy is the sum of per-atom energies for all local
-    // atoms (home + halo) from the pairs assigned to this rank.  GROMACS
-    // global_stat sums across ranks to get the system total.
+    // Energy: the per-atom energies of the home atoms of this rank. GROMACS
+    // sums the term over ranks.
     outputs->enerd_.term[InteractionFunction::MetatomicPotentialEnergy] = static_cast<real>(energy);
 
     // Virial: same decomposition as energy — per-rank portion, summed by GROMACS.

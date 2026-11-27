@@ -190,7 +190,13 @@ public:
             double max_cutoff{ 0.0 };
             try
             {
-                auto model = metatomic_torch::load_atomistic_model(options_.parameters().modelPath_);
+                torch::optional<std::string> extensionsDirectory = torch::nullopt;
+                if (!options_.parameters().extensionsDirectory.empty())
+                {
+                    extensionsDirectory = options_.parameters().extensionsDirectory;
+                }
+                auto model = metatomic_torch::load_atomistic_model(options_.parameters().modelPath_,
+                                                                   extensionsDirectory);
 
                 // Check strict interaction range
                 auto capabilities =

@@ -75,8 +75,7 @@ class MpiComm;
  * **Forces**: the backward pass gives forces on all atoms of the group.
  * ForceWithVirial is not communicated by dd_move_f, so forces on home atoms
  * are applied directly and forces on the other atoms go to the ranks that
- * own them (distributeNonHomeForces()), as an indexed gather or, for small
- * systems (N_total_mta < 1000), a dense reduction.
+ * own them (distributeNonHomeForces()) through one reduction over the group.
  *
  * **Shift convention**: GROMACS shifts atom I (first):
  * d = x[I]+shift - x[J]. Metatensor convention: r_ij = x[J] + cell_shift*box
@@ -137,10 +136,7 @@ private:
      */
     void gatherRemotePairs(const matrix box);
 
-    //! Distribute non-home forces via sparse indexed exchange (allgatherv pattern).
-    //! Home forces are applied directly; only halo forces are communicated.
-    //! \param[in] forces   Flat force array [numLocalMta_ * 3], row-major (fx,fy,fz).
-    //! \param[out] outputs Force provider output to accumulate into.
+    //! Sums the forces of the input group over the ranks and applies those of the home atoms
     void distributeNonHomeForces(const double* forces, ForceProviderOutput* outputs);
 
     const MetatomicOptions& options_;
