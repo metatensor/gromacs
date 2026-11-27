@@ -722,12 +722,16 @@ namespace
 
 /*! \brief Returns, on every rank, the concatenation of one buffer per rank.
  *
- * The buffers are concatenated in rank order. This is MPI_Allgatherv, written
+ * The buffers are concatenated in rank order, and \p ownOffset, when given,
+ * receives the index at which the buffer of this rank starts. This is MPI_Allgatherv, written
  * as a gather to the main rank and a broadcast because thread-MPI does not
  * provide MPI_Allgatherv.
  */
 template<typename T>
-std::vector<T> gatherFromAllRanks(const MpiComm& mpiComm, std::vector<T>* send, MPI_Datatype type)
+std::vector<T> gatherFromAllRanks(const MpiComm& mpiComm,
+                                  std::vector<T>* send,
+                                  MPI_Datatype    type,
+                                  std::size_t*    ownOffset = nullptr)
 {
     const int numRanks = mpiComm.size();
     GMX_RELEASE_ASSERT(send->size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
@@ -745,6 +749,10 @@ std::vector<T> gatherFromAllRanks(const MpiComm& mpiComm, std::vector<T>* send, 
     }
     GMX_RELEASE_ASSERT(total <= std::numeric_limits<int>::max(),
                        "Gathered buffer too large for an MPI count");
+    if (ownOffset != nullptr)
+    {
+        *ownOffset = static_cast<std::size_t>(displacements[mpiComm.rank()]);
+    }
 
     std::vector<T> received(total);
     if (total == 0)
@@ -794,8 +802,8 @@ void MetatomicForceProvider::gatherRemoteAtoms()
     const std::vector<real> allPositions = gatherFromAllRanks(mpiComm_, &sendPositions, GMX_MPI_REAL);
 
     // Keep the image GROMACS gave for the atoms already here. The atoms added
-    // below can be in any periodic image: gatherRemotePairs() computes the
-    // shift of each of their pairs.
+    // below can be in any periodic image: gatherRemotePairs() finds the
+    // shift of each of their pairs from the pair vector the owner sends.
     std::unordered_set<int32_t> known(mtaToGlobalMta_.begin(), mtaToGlobalMta_.begin() + numLocalMta_);
     for (std::size_t k = 0; k < allGlobalMta.size(); k++)
     {
@@ -822,37 +830,40 @@ void MetatomicForceProvider::gatherRemotePairs(const matrix box)
         return;
     }
 
-    // The GROMACS pairlist holds each pair on exactly one rank, so the lists
-    // of all ranks together are the pairs of the whole system.
+    // The GROMACS pairlist holds each pair, with its periodic image, on
+    // exactly one rank, so the lists of all ranks together are the pairs of
+    // the whole system. A rank sends the two atoms and the pair vector it
+    // gets from its own positions and the shift of the pairlist. The receiver
+    // then finds the shift that gives the same vector between its copies of
+    // the two atoms, which can be other periodic images. Nothing is decided
+    // again by a minimum image search.
     const std::size_t numMyPairs = pairlistMta_.size() / 2;
     std::vector<int>  sendPairs(2 * numMyPairs);
-    for (std::size_t k = 0; k < 2 * numMyPairs; k++)
-    {
-        sendPairs[k] = mtaToGlobalMta_[pairlistMta_[k]];
-    }
-
-    struct PairHash
-    {
-        std::size_t operator()(const std::pair<int32_t, int32_t>& p) const
-        {
-            return std::hash<std::int64_t>()(static_cast<std::int64_t>(p.first) << 32
-                                             | static_cast<std::uint32_t>(p.second));
-        }
-    };
-    std::unordered_set<std::pair<int32_t, int32_t>, PairHash> known;
-    known.reserve(numMyPairs);
+    std::vector<real> sendVectors(3 * numMyPairs);
     for (std::size_t k = 0; k < numMyPairs; k++)
     {
-        known.insert(std::minmax(sendPairs[2 * k], sendPairs[2 * k + 1]));
+        const int32_t ai     = pairlistMta_[2 * k];
+        const int32_t aj     = pairlistMta_[2 * k + 1];
+        const IVec&   n      = cellShiftsMta_[k];
+        sendPairs[2 * k]     = mtaToGlobalMta_[ai];
+        sendPairs[2 * k + 1] = mtaToGlobalMta_[aj];
+        // r_ij = x[j] + n * box - x[i], the convention of cellShiftsMta_
+        sendVectors[3 * k] = positions_[aj][XX] - positions_[ai][XX] + n[XX] * box[XX][XX]
+                             + n[YY] * box[YY][XX] + n[ZZ] * box[ZZ][XX];
+        sendVectors[3 * k + 1] = positions_[aj][YY] - positions_[ai][YY] + n[YY] * box[YY][YY]
+                                 + n[ZZ] * box[ZZ][YY];
+        sendVectors[3 * k + 2] = positions_[aj][ZZ] - positions_[ai][ZZ] + n[ZZ] * box[ZZ][ZZ];
     }
 
-    const std::vector<int> allPairs = gatherFromAllRanks(mpiComm_, &sendPairs, MPI_INT);
+    std::size_t             ownOffset = 0;
+    const std::vector<int>  allPairs = gatherFromAllRanks(mpiComm_, &sendPairs, MPI_INT, &ownOffset);
+    const std::vector<real> allVectors = gatherFromAllRanks(mpiComm_, &sendVectors, GMX_MPI_REAL);
+    const std::size_t       ownFirst = ownOffset / 2;
 
     std::unordered_map<int32_t, int32_t> globalToLocal;
     globalToLocal.reserve(numLocalMta_);
     for (int32_t i = 0; i < numLocalMta_; i++)
     {
-        // The first entry wins, so a pair uses the image GROMACS placed.
         globalToLocal.emplace(mtaToGlobalMta_[i], i);
     }
 
@@ -861,30 +872,33 @@ void MetatomicForceProvider::gatherRemotePairs(const matrix box)
 
     for (std::size_t k = 0; k < allPairs.size() / 2; k++)
     {
-        const int32_t globalI = allPairs[2 * k];
-        const int32_t globalJ = allPairs[2 * k + 1];
-        if (!known.insert(std::minmax(globalI, globalJ)).second)
+        if (k >= ownFirst && k < ownFirst + numMyPairs)
         {
+            // The pairs of this rank are in pairlistMta_ already
             continue;
         }
-        const auto itI = globalToLocal.find(globalI);
-        const auto itJ = globalToLocal.find(globalJ);
+        const auto itI = globalToLocal.find(allPairs[2 * k]);
+        const auto itJ = globalToLocal.find(allPairs[2 * k + 1]);
         GMX_RELEASE_ASSERT(itI != globalToLocal.end() && itJ != globalToLocal.end(),
                            "gatherRemoteAtoms() must have added every atom of every pair");
         const int32_t localI = itI->second;
         const int32_t localJ = itJ->second;
 
-        // Minimum-image shift, in the convention of the pairs GROMACS built.
-        // invertBoxMatrix returns a lower-triangular inverse.
-        const double rawDx = static_cast<double>(positions_[localJ][XX] - positions_[localI][XX]);
-        const double rawDy = static_cast<double>(positions_[localJ][YY] - positions_[localI][YY]);
-        const double rawDz = static_cast<double>(positions_[localJ][ZZ] - positions_[localI][ZZ]);
+        // What is left of the pair vector after the vector between the local
+        // copies is a lattice vector. invertBoxMatrix returns a
+        // lower-triangular inverse.
+        const double dx = static_cast<double>(allVectors[3 * k])
+                          - static_cast<double>(positions_[localJ][XX] - positions_[localI][XX]);
+        const double dy = static_cast<double>(allVectors[3 * k + 1])
+                          - static_cast<double>(positions_[localJ][YY] - positions_[localI][YY]);
+        const double dz = static_cast<double>(allVectors[3 * k + 2])
+                          - static_cast<double>(positions_[localJ][ZZ] - positions_[localI][ZZ]);
 
         IVec shift;
-        shift[XX] = static_cast<int>(std::round(
-                -(boxInv[XX][XX] * rawDx + boxInv[YY][XX] * rawDy + boxInv[ZZ][XX] * rawDz)));
-        shift[YY] = static_cast<int>(std::round(-(boxInv[YY][YY] * rawDy + boxInv[ZZ][YY] * rawDz)));
-        shift[ZZ] = static_cast<int>(std::round(-(boxInv[ZZ][ZZ] * rawDz)));
+        shift[XX] = static_cast<int>(
+                std::round(boxInv[XX][XX] * dx + boxInv[YY][XX] * dy + boxInv[ZZ][XX] * dz));
+        shift[YY] = static_cast<int>(std::round(boxInv[YY][YY] * dy + boxInv[ZZ][YY] * dz));
+        shift[ZZ] = static_cast<int>(std::round(boxInv[ZZ][ZZ] * dz));
 
         backwardPairsMta_.push_back(localI);
         backwardPairsMta_.push_back(localJ);
@@ -1012,21 +1026,6 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
         for (const auto& req : data_->nl_requests)
         {
             maxCutoff = std::max(maxCutoff, req->engine_cutoff("nm"));
-        }
-
-        // The pairs of another rank get their periodic shift from the
-        // minimum image convention, which needs a box of at least two cutoffs.
-        for (int d = 0; d < 3; d++)
-        {
-            if (static_cast<double>(inputs.box_[d][d]) < 2.0 * maxCutoff)
-            {
-                GMX_THROW(InconsistentInputError(formatString(
-                        "The box is %g nm along dimension %d, less than twice the metatomic model "
-                        "cutoff of %g nm. Run on a single rank or use a larger box.",
-                        static_cast<double>(inputs.box_[d][d]),
-                        d,
-                        maxCutoff)));
-            }
         }
 
         // Step 1: Add the atoms the other ranks own. Extends positions_,
@@ -1223,7 +1222,9 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
 
         buildNLTimer.stop();
 
-        if (useNewtonNL)
+        // Without a selection a model may return its per-atom rows in any
+        // order, and the non-conservative forces are read by row.
+        if (useNewtonNL || data_->nonConservative)
         {
             // Restrict output to home atoms only [0, numHomeMta_).
             // Following the LAMMPS pair_metatomic pattern (selected_atoms = nlocal).
@@ -1332,9 +1333,15 @@ void MetatomicForceProvider::calculateForces(const ForceProviderInput& inputs, F
                                           * (inputs.box_[YY][XX] * inputs.box_[ZZ][YY]
                                              - inputs.box_[YY][YY] * inputs.box_[ZZ][XX]);
 
+                // The stress is that of the whole input group and every rank
+                // gets the same tensor, while the virials of the ranks are
+                // summed. Each rank adds the share of its home atoms.
+                const double homeShare =
+                        static_cast<double>(numHomeMta_)
+                        / static_cast<double>(options_.params_.mtaIndices_.size());
+
                 // 1/2 for GROMACS' virial convention
-                virialTensor = (0.5 * stress_tensor * volume)
-                                       .to(torch::kCPU).to(torch::kFloat64);
+                virialTensor = (0.5 * homeShare * stress_tensor * volume).to(torch::kCPU).to(torch::kFloat64);
             }
             else
             {

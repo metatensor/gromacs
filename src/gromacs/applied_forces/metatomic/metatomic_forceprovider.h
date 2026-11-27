@@ -63,35 +63,27 @@ class MpiComm;
  *
  * Implements the IForceProvider interface for the Metatomic force provider.
  *
- * ## Domain decomposition (DD) strategy
+ * ## Domain decomposition
  *
- * Each rank evaluates the model on its local (home + halo) MTA atoms.
- * The GROMACS excluded pairlist serves as the pair source; a backward ghost
- * atom exchange followed by a backward pair exchange ensures every home atom
- * has ALL its pairs (the "newton pair ON" pattern from LAMMPS pair_metatomic).
- * Distance vectors and shifts are recomputed from local positions.
- * The energy is summed over home atoms only (`selected_atoms = home_only`).
- * This approach is safe for all model architectures.
+ * With more than one rank every rank evaluates the model on all atoms of
+ * the input group, since a model can depend on atoms several cutoffs away.
+ * The ranks gather the atoms they own (gatherRemoteAtoms()) and the pairs of
+ * their GROMACS pairlists (gatherRemotePairs()), which hold each pair on
+ * exactly one rank. The energy is that of the home atoms only
+ * (`selected_atoms`), so the sum over ranks counts each atom once.
  *
- * **Atoms**: In DD, GROMACS partitions atoms into "home" atoms (owned by
- * this rank) and "halo" atoms (copies from neighboring ranks needed for
- * short-range interactions). The same global atom may appear as multiple
- * periodic ghost images in the halo. We deduplicate these so each atom has
- * one model index, but record ALL GROMACS local buffer indices in
- * gmxLocalToMtaIdx_ so that the pairlist (which may reference any image) can
- * be resolved.
- *
- * **Forces**: backward() produces forces on all local atoms (home + halo).
- * Since ForceWithVirial is not communicated by dd_move_f, home forces are
- * applied directly and non-home (halo) forces are exchanged via sparse
- * indexed communication (allgatherv pattern). Falls back to dense allreduce
- * for small systems (N_total_mta < 1000).
+ * **Forces**: the backward pass gives forces on all atoms of the group.
+ * ForceWithVirial is not communicated by dd_move_f, so forces on home atoms
+ * are applied directly and forces on the other atoms go to the ranks that
+ * own them (distributeNonHomeForces()), as an indexed gather or, for small
+ * systems (N_total_mta < 1000), a dense reduction.
  *
  * **Shift convention**: GROMACS shifts atom I (first):
  * d = x[I]+shift - x[J]. Metatensor convention: r_ij = x[J] + cell_shift*box
  * - x[I]. Therefore metatensor cell shifts = negated GROMACS cell shifts.
- * Backward pairs have shifts recomputed from local positions using the
- * minimum-image convention.
+ * A pair received from another rank comes with its pair vector, and its
+ * shift is the one that gives that vector between the local copies of the
+ * two atoms.
  */
 class MetatomicForceProvider final : public IForceProvider
 {
@@ -133,9 +125,10 @@ private:
     /*! \brief Adds the pairs that other ranks hold to the local pair list.
      *
      * With domain decomposition the GROMACS pairlist holds each pair on
-     * exactly one rank. Every rank sends its pairs as global atom indices and
-     * stores the ones it does not have in backwardPairsMta_, with the
-     * periodic shift from the minimum image convention.
+     * exactly one rank. Every rank sends its pairs as global atom indices
+     * with the pair vector, and stores the pairs of the other ranks in
+     * backwardPairsMta_ with the periodic shift that gives the same vector
+     * between its own copies of the two atoms.
      *
      * Called after gatherRemoteAtoms(), which makes every atom of every pair
      * local. Does nothing on a single rank.
