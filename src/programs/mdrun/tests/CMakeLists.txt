@@ -448,3 +448,32 @@ gmx_add_gtest_executable(${exename} MPI
         )
 target_link_libraries(${exename} PRIVATE mdrun_test_infrastructure)
 gmx_register_gtest_test(${testname} ${exename} MPI_RANKS 2 INTEGRATION_TEST IGNORE_LEAKS QUICK_GPU_TEST)
+
+# Runs the metatomic force provider on a small argon system. The executable
+# is added only when that provider is compiled in, so GMX_METATOMIC=OFF does
+# not register these tests.
+if (GMX_TORCH AND NOT GMX_METATOMIC STREQUAL "OFF")
+    set(testname "MdrunMetatomicTests")
+    set(exename "mdrun-metatomic-test")
+
+    gmx_add_gtest_executable(
+        ${exename} MPI
+        CPP_SOURCE_FILES
+        metatomic.cpp
+        # pseudo-library for code for mdrun
+        $<TARGET_OBJECTS:mdrun_objlib>
+    )
+    target_link_libraries(${exename} PRIVATE mdrun_test_infrastructure)
+    gmx_register_gtest_test(MdrunMetatomicOneRank ${exename} MPI_RANKS 1 INTEGRATION_TEST IGNORE_LEAKS)
+    gmx_register_gtest_test(MdrunMetatomicTwoRanks ${exename} MPI_RANKS 2 INTEGRATION_TEST IGNORE_LEAKS)
+    gmx_register_gtest_test(MdrunMetatomicFourRanks ${exename} MPI_RANKS 4 INTEGRATION_TEST IGNORE_LEAKS)
+    # The cases share no files, but torch startup is heavy and the ranks
+    # tests each launch their own one-rank reference. Keep them serial.
+    # See #4654.
+    if (TEST MdrunMetatomicOneRank AND TEST MdrunMetatomicTwoRanks)
+        set_tests_properties(MdrunMetatomicTwoRanks PROPERTIES DEPENDS MdrunMetatomicOneRank)
+    endif()
+    if (TEST MdrunMetatomicTwoRanks AND TEST MdrunMetatomicFourRanks)
+        set_tests_properties(MdrunMetatomicFourRanks PROPERTIES DEPENDS MdrunMetatomicTwoRanks)
+    endif()
+endif()

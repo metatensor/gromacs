@@ -1,0 +1,27 @@
+; Argon topology for the metatomic mdrun test.
+; Atomic number 18 selects the model species. Twelve one-atom molecules
+; make every pair intermolecular, so the embedded exclusions remove the
+; classical nonbonded interaction and the excluded pair list is the
+; neighbor list the model evaluates.
+
+[ defaults ]
+; nbfunc comb-rule gen-pairs fudgeLJ fudgeQQ
+  1      2         yes       1.0     1.0
+
+[ atomtypes ]
+; name  at.num  mass    charge  ptype  sigma   epsilon
+  AR      18    39.948  0.0     A      0.3401  0.978638
+
+[ moleculetype ]
+; name  nrexcl
+  Ar    1
+
+[ atoms ]
+; nr  type  resnr  residue  atom  cgnr  charge
+  1   AR    1      AR       AR    1     0.0
+
+[ system ]
+Argon
+
+[ molecules ]
+Ar  12
