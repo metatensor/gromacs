@@ -33,21 +33,60 @@
 
 gmx_add_libgromacs_sources(
     metatomic_options.cpp
-    metatomic_mdmodule.cpp
 )
 
+# The objects of the sources that include LibTorch reach libgromacs through
+# this interface target, see src/gromacs/CMakeLists.txt
+add_library(metatomic_torch_module INTERFACE)
+
 # GMX_METATOMIC is the user-facing AUTO/TORCH/OFF multichoice; it stays truthy
-# even when torch was not found in AUTO mode. GMX_TORCH is the variable
-# gmxManageMetatomic.cmake sets only when Torch was actually located, so it
-# is the right gate here. Without torch, link the stub force provider; the
-# IMDModule registration in metatomic_mdmodule.cpp uses #if GMX_TORCH
-# guards around any torch-touching code paths.
-if (GMX_TORCH)
-    gmx_add_libgromacs_sources(
-        metatomic_forceprovider.cpp
-    )
+# even when torch was not found in AUTO mode. GMX_TORCH is set only
+# when Torch was located. Without them, link
+# the stub force provider.
+if (GMX_TORCH AND NOT GMX_METATOMIC STREQUAL "OFF")
+    # These two files are the only ones that include the LibTorch, metatensor
+    # and metatomic headers. LibTorch can require a newer C++ standard than
+    # GROMACS uses (GMX_METATOMIC_CXX_STANDARD, see cmake/gmxManageMetatomic.cmake),
+    # so they are built in an object library of their own with that standard.
+    add_library(metatomic_torch_objects OBJECT
+                metatomic_forceprovider.cpp
+                metatomic_mdmodule.cpp)
+    if (BUILD_SHARED_LIBS)
+        set_target_properties(metatomic_torch_objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    endif()
+    set_target_properties(metatomic_torch_objects PROPERTIES
+                          CXX_STANDARD ${GMX_METATOMIC_CXX_STANDARD}
+                          CXX_SCAN_FOR_MODULES OFF)
+    gmx_target_compile_options(metatomic_torch_objects)
+    target_compile_definitions(metatomic_torch_objects PRIVATE HAVE_CONFIG_H)
+    target_link_libraries(metatomic_torch_objects PRIVATE
+                          common
+                          legacy_api
+                          legacy_modules
+                          domdec
+                          hardware
+                          math
+                          mdrunutility
+                          mdtypes
+                          pbcutil
+                          topology
+                          utility
+                          ${TORCH_LIBRARIES}
+                          metatensor_torch
+                          metatomic_torch)
+    if (GMX_GPU_CUDA)
+        target_link_libraries(metatomic_torch_objects PRIVATE CUDA::toolkit)
+    elseif (GMX_GPU_HIP)
+        target_link_libraries(metatomic_torch_objects PRIVATE hip::host)
+    elseif (GMX_GPU_SYCL)
+        add_sycl_to_target(TARGET metatomic_torch_objects)
+    endif()
+    target_link_libraries(metatomic_torch_module INTERFACE
+                          $<BUILD_INTERFACE:metatomic_torch_objects>
+                          $<TARGET_OBJECTS:metatomic_torch_objects>)
 else()
     gmx_add_libgromacs_sources(
+        metatomic_mdmodule.cpp
         metatomic_forceprovider_stub.cpp
     )
 endif()

@@ -399,6 +399,21 @@ target_link_libraries(libgromacs
                       PUBLIC
                       ${GMX_PUBLIC_LIBRARIES}
                       )
+# The metatomic module links LibTorch, metatensor and metatomic. Only
+# libgromacs needs to find them at runtime, so the search path and the linker
+# flag that keeps it an RPATH (which a library passes on to the libraries it
+# loads) are set here and not for every target.
+target_link_libraries(libgromacs PRIVATE $<BUILD_INTERFACE:metatomic_torch_module>)
+if (GMX_TORCH AND NOT GMX_METATOMIC STREQUAL "OFF" AND BUILD_SHARED_LIBS)
+    if (GMX_METATOMIC_RPATH)
+        set_property(TARGET libgromacs APPEND PROPERTY INSTALL_RPATH ${GMX_METATOMIC_RPATH})
+        set_property(TARGET libgromacs APPEND PROPERTY BUILD_RPATH ${GMX_METATOMIC_RPATH})
+    endif()
+    if (GMX_METATOMIC_DISABLE_NEW_DTAGS)
+        target_link_options(libgromacs PRIVATE "-Wl,--disable-new-dtags")
+    endif()
+endif()
+
 target_link_libraries(libgromacs PRIVATE legacy_api)
 # Dependencies from libgromacs to the modules are set up here, but
 # once the add_subdirectory() commands are re-ordered then
