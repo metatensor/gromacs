@@ -108,13 +108,25 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
 
         set(GMX_TORCH ON)
 
-        # Ensure the torch library directory is in RPATH so that libtorch.so,
-        # libc10.so, etc. can be found at runtime. CMAKE_INSTALL_RPATH_USE_LINK_PATH
-        # doesn't always extract paths from imported targets, so we add it explicitly.
-        # Guard prevents duplicate additions if gmxManageNNPot already added it.
-        if(TORCH_INSTALL_PREFIX AND NOT _torch_rpath_added)
-            list(APPEND CMAKE_INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib")
-            set(_torch_rpath_added TRUE)
+        # The headers of LibTorch 2.14 and later need C++20. Only the sources
+        # that include them are built with GMX_METATOMIC_CXX_STANDARD (see
+        # src/gromacs/applied_forces/metatomic/CMakeLists.txt), the rest of
+        # GROMACS keeps the configured standard.
+        set(GMX_METATOMIC_CXX_STANDARD ${CMAKE_CXX_STANDARD})
+        if(Torch_VERSION VERSION_GREATER_EQUAL 2.14 AND CMAKE_CXX_STANDARD LESS 20)
+            set(GMX_METATOMIC_CXX_STANDARD 20)
+        endif()
+
+        # The torch library directory has to be in the RPATH of libgromacs so
+        # that libtorch.so, libc10.so, etc. can be found at runtime.
+        # CMAKE_INSTALL_RPATH_USE_LINK_PATH does not always extract paths from
+        # imported targets. The directories are collected in GMX_METATOMIC_RPATH
+        # and set on libgromacs only (see src/gromacs/CMakeLists.txt), so that
+        # targets that do not link these libraries are left alone.
+        set(GMX_METATOMIC_RPATH "")
+        set(GMX_METATOMIC_DISABLE_NEW_DTAGS OFF)
+        if(TORCH_INSTALL_PREFIX)
+            list(APPEND GMX_METATOMIC_RPATH "${TORCH_INSTALL_PREFIX}/lib")
 
             # Use RPATH instead of RUNPATH. Modern linkers default to RUNPATH
             # (--enable-new-dtags), but RUNPATH doesn't propagate to transitive
@@ -122,7 +134,7 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
             include(CheckLinkerFlag)
             check_linker_flag(CXX "-Wl,--disable-new-dtags" _linker_supports_disable_new_dtags)
             if(_linker_supports_disable_new_dtags)
-                add_link_options("-Wl,--disable-new-dtags")
+                set(GMX_METATOMIC_DISABLE_NEW_DTAGS ON)
             endif()
         endif()
 
@@ -226,10 +238,10 @@ if(NOT GMX_METATOMIC STREQUAL "OFF")
             endforeach()
             if(_mta_location)
                 get_filename_component(_mta_libdir "${_mta_location}" DIRECTORY)
-                list(APPEND CMAKE_INSTALL_RPATH "${_mta_libdir}")
+                list(APPEND GMX_METATOMIC_RPATH "${_mta_libdir}")
             endif()
         endforeach()
-        list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
+        list(REMOVE_DUPLICATES GMX_METATOMIC_RPATH)
 
     elseif(GMX_METATOMIC STREQUAL "TORCH")
         message(FATAL_ERROR "Torch not found. Please install libtorch and add its installation prefix"

@@ -190,7 +190,13 @@ public:
             double max_cutoff{ 0.0 };
             try
             {
-                auto model = metatomic_torch::load_atomistic_model(options_.parameters().modelPath_);
+                torch::optional<std::string> extensionsDirectory = torch::nullopt;
+                if (!options_.parameters().extensionsDirectory.empty())
+                {
+                    extensionsDirectory = options_.parameters().extensionsDirectory;
+                }
+                auto model = metatomic_torch::load_atomistic_model(options_.parameters().modelPath_,
+                                                                   extensionsDirectory);
 
                 // Check strict interaction range
                 auto capabilities =
@@ -203,22 +209,11 @@ public:
                             "interaction_range is negative for this model."));
                 }
 
-                if (!std::isfinite(interaction_range))
-                {
-                    // Infinite range (global) is only supported on a single rank
-                    if (gmx_node_num() > 1)
-                    {
-                        GMX_THROW(NotImplementedError(
-                                "interaction_range is infinite for this model; "
-                                "using multiple MPI domains is not supported."));
-                    }
-                    // For infinite range, check if specific NLs were requested
-                    // effectively falling through to the loop below.
-                }
-                else
-                {
-                    max_cutoff = interaction_range;
-                }
+                // The interaction range does not enter the pairlist: with
+                // more than one rank every rank evaluates the model on the
+                // whole input group, so only the cutoffs of the neighbor
+                // lists the model asks for matter.
+                GMX_UNUSED_VALUE(interaction_range);
 
                 // Check requested neighbor lists
                 auto requested_nl = model.run_method("requested_neighbor_lists");
@@ -232,19 +227,24 @@ public:
             }
             catch (const std::exception& e)
             {
-                GMX_THROW(InternalError("Failed to read cutoff from model: " + std::string(e.what())));
+                GMX_THROW(InvalidInputError("Failed to read the cutoff from the metatomic model: "
+                                            + std::string(e.what())));
             }
 
-            if (max_cutoff <= 0.0 || !std::isfinite(max_cutoff))
+            if (!std::isfinite(max_cutoff))
             {
-                // If the model is purely global and requested no specific NL,
-                // there's no need for a pairlist, so max_cutoff remains 0.
-                if (max_cutoff == 0.0)
-                {
-                    GMX_THROW(InconsistentInputError("Metatomic model cutoff is 0.0 or invalid."));
-                }
+                GMX_THROW(InconsistentInputError(
+                        "A neighbor list requested by the metatomic model has no finite cutoff."));
             }
-            ranges->addRange(max_cutoff);
+            if (max_cutoff <= 0.0)
+            {
+                // The model requests no neighbor list, so it needs no pairlist
+                return;
+            }
+            // Buffer for the lifetime of the pairlist, as the pairs are not
+            // searched again until the next neighbor search.
+            const real buffer = 2 * ranges->rmsdDistance().value_or(0.0);
+            ranges->addRange(max_cutoff + buffer);
         };
         // Register the callback
         notifiers->simulationSetupNotifier_.subscribe(setPlainPairlistRangeFunction);

@@ -63,35 +63,26 @@ class MpiComm;
  *
  * Implements the IForceProvider interface for the Metatomic force provider.
  *
- * ## Domain decomposition (DD) strategy
+ * ## Domain decomposition
  *
- * Each rank evaluates the model on its local (home + halo) MTA atoms.
- * The GROMACS excluded pairlist serves as the pair source; a backward ghost
- * atom exchange followed by a backward pair exchange ensures every home atom
- * has ALL its pairs (the "newton pair ON" pattern from LAMMPS pair_metatomic).
- * Distance vectors and shifts are recomputed from local positions.
- * The energy is summed over home atoms only (`selected_atoms = home_only`).
- * This approach is safe for all model architectures.
+ * With more than one rank every rank evaluates the model on all atoms of
+ * the input group, since a model can depend on atoms several cutoffs away.
+ * The ranks gather the atoms they own (gatherRemoteAtoms()) and the pairs of
+ * their GROMACS pairlists (gatherRemotePairs()), which hold each pair on
+ * exactly one rank. The energy is that of the home atoms only
+ * (`selected_atoms`), so the sum over ranks counts each atom once.
  *
- * **Atoms**: In DD, GROMACS partitions atoms into "home" atoms (owned by
- * this rank) and "halo" atoms (copies from neighboring ranks needed for
- * short-range interactions). The same global atom may appear as multiple
- * periodic ghost images in the halo. We deduplicate these so each atom has
- * one model index, but record ALL GROMACS local buffer indices in
- * gmxLocalToMtaIdx_ so that the pairlist (which may reference any image) can
- * be resolved.
- *
- * **Forces**: backward() produces forces on all local atoms (home + halo).
- * Since ForceWithVirial is not communicated by dd_move_f, home forces are
- * applied directly and non-home (halo) forces are exchanged via sparse
- * indexed communication (allgatherv pattern). Falls back to dense allreduce
- * for small systems (N_total_mta < 1000).
+ * **Forces**: the backward pass gives forces on all atoms of the group.
+ * ForceWithVirial is not communicated by dd_move_f, so forces on home atoms
+ * are applied directly and forces on the other atoms go to the ranks that
+ * own them (distributeNonHomeForces()) through one reduction over the group.
  *
  * **Shift convention**: GROMACS shifts atom I (first):
  * d = x[I]+shift - x[J]. Metatensor convention: r_ij = x[J] + cell_shift*box
  * - x[I]. Therefore metatensor cell shifts = negated GROMACS cell shifts.
- * Backward pairs have shifts recomputed from local positions using the
- * minimum-image convention.
+ * A pair received from another rank comes with its pair vector, and its
+ * shift is the one that gives that vector between the local copies of the
+ * two atoms.
  */
 class MetatomicForceProvider final : public IForceProvider
 {
@@ -117,57 +108,35 @@ private:
     //! Gather atom positions for MTA input (local only, no MPI).
     void gatherAtomPositions(ArrayRef<const RVec> positions);
 
-    /*! \brief Exchange backward-direction pairs via ring-based MPI_Sendrecv.
+    /*! \brief Adds the model atoms that other ranks own to the local system.
      *
-     * In GROMACS DD, the excluded pairlist assigns each pair to exactly one
-     * rank (the rank whose home atom is the i-atom). For newton mode, each
-     * rank needs ALL pairs involving its home atoms, including those assigned
-     * to other ranks. This method discovers those missing pairs by
-     * circulating packed (globalI, globalJ) pair buffers in P-1 ring rounds,
-     * then adds them to backwardPairsMta_ with shifts recomputed from local
-     * positions. Complexity: O(total_pairs) communication, O(max_pairs/rank)
-     * memory — replaces the previous O(N²) pair table allreduce.
+     * A model can depend on atoms several cutoffs away, so in parallel each
+     * rank evaluates it on all atoms. Every rank sends its home atoms and
+     * appends the ones it does not have to positions_, atomNumbers_ and
+     * mtaToGlobalMta_, and increases numLocalMta_. The caller restores
+     * numLocalMta_ after the model evaluation.
      *
-     * Must be called after exchangeBackwardGhosts() (so all atom positions
-     * are available) and before the NL building loop.
-     *
-     * \param[in] box        Current simulation box.
-     * \param[in] maxRounds  Maximum number of ring exchange rounds (capped by
-     *                       ceil(cutoff/minCellSize) when DD info is available).
+     * Called once per step, after gatherAtomPositions() and before
+     * gatherRemotePairs(). Does nothing on a single rank.
      */
-    void exchangeBackwardPairs(const matrix box, int maxRounds);
+    void gatherRemoteAtoms();
 
-    /*! \brief Exchange backward ghost MTA atoms via DD to fill the backward gap.
+    /*! \brief Adds the pairs that other ranks hold to the local pair list.
      *
-     * In the standard GROMACS DD halo exchange, atoms are communicated
-     * via forward pulses only.  When the number of forward pulses does
-     * not cover all cells in a dimension (npulse < numCells - 1), atoms
-     * from the backward PBC neighbor are missing from the local halo.
-     * This method performs one additional forward exchange per DD dimension
-     * to fill this gap.
+     * With domain decomposition the GROMACS pairlist holds each pair on
+     * exactly one rank. Every rank sends its pairs as global atom indices
+     * with the pair vector, and stores the pairs of the other ranks in
+     * backwardPairsMta_ with the periodic shift that gives the same vector
+     * between its own copies of the two atoms.
      *
-     * Protocol: each rank identifies home MTA atoms within \p cutoff of its
-     * forward cell boundary, then calls \c ddSendrecv(dd, d, dddirForward).
-     * The receiving rank gets atoms from its backward neighbor.  Received
-     * positions are PBC-shifted when the backward neighbor wraps around.
+     * Called after gatherRemoteAtoms(), which makes every atom of every pair
+     * local. Does nothing on a single rank.
      *
-     * Called once per step from \c calculateForces(), after
-     * \c gatherAtomPositions() and before \c exchangeBackwardPairs().
-     * Extends positions_, atomNumbers_, mtaToGlobalMta_, and numLocalMta_
-     * with the backward ghost atoms.  The caller must save and restore the
-     * original numLocalMta_ after model evaluation.
-     *
-     * \param[in] dd      Domain decomposition structure.
-     * \param[in] box     Current simulation box.
-     * \param[in] cutoff  Maximum model cutoff (nm).
-     * \returns Number of backward ghost atoms added.
+     * \param[in] box  Current simulation box.
      */
-    int32_t exchangeBackwardGhosts(const gmx_domdec_t* dd, const matrix box, double cutoff);
+    void gatherRemotePairs(const matrix box);
 
-    //! Distribute non-home forces via sparse indexed exchange (allgatherv pattern).
-    //! Home forces are applied directly; only halo forces are communicated.
-    //! \param[in] forces   Flat force array [numLocalMta_ * 3], row-major (fx,fy,fz).
-    //! \param[out] outputs Force provider output to accumulate into.
+    //! Sums the forces of the input group over the ranks and applies those of the home atoms
     void distributeNonHomeForces(const double* forces, ForceProviderOutput* outputs);
 
     const MetatomicOptions& options_;
@@ -210,9 +179,8 @@ private:
     //! Cell shifts for each pair (metatensor convention: shift applied to second atom).
     std::vector<IVec> cellShiftsMta_;
 
-    //! Backward-direction pairs discovered by exchangeBackwardPairs().
-    //! These are pairs from other ranks' pairlists that involve this rank's
-    //! home atoms. Flat [i0,j0, i1,j1, ...] with MTA local indices.
+    //! Pairs from the pairlists of other ranks, found by gatherRemotePairs().
+    //! Flat [i0,j0, i1,j1, ...] with MTA local indices.
     std::vector<int32_t> backwardPairsMta_;
     //! Cell shifts for backward pairs (recomputed from local positions).
     std::vector<IVec> backwardShiftsMta_;
