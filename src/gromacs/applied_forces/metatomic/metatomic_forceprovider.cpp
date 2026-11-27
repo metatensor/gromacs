@@ -396,8 +396,17 @@ MetatomicForceProvider::MetatomicForceProvider(const MetatomicOptions& options,
                 }
                 else
                 {
-                    data_->uncertaintyThreshold =
-                            std::stod(options_.params_.uncertaintyThreshold);
+                    try
+                    {
+                        data_->uncertaintyThreshold = std::stod(options_.params_.uncertaintyThreshold);
+                    }
+                    catch (const std::exception&)
+                    {
+                        GMX_THROW(InvalidInputError(formatString(
+                                "metatomic-uncertainty-threshold is '%s'; it takes \"auto\", "
+                                "\"off\" or a number in kJ/mol per atom.",
+                                options_.params_.uncertaintyThreshold.c_str())));
+                    }
                 }
 
                 data_->evaluations_options->outputs.insert(
@@ -715,9 +724,9 @@ namespace
 /*! \brief Returns, on every rank, the concatenation of one buffer per rank.
  *
  * The buffers are concatenated in rank order, and \p ownOffset, when given,
- * receives the index at which the buffer of this rank starts. This is MPI_Allgatherv, written
- * as a gather to the main rank and a broadcast because thread-MPI does not
- * provide MPI_Allgatherv.
+ * receives the index at which the buffer of this rank starts. With thread-MPI,
+ * which does not provide MPI_Allgatherv, this is a gather to the main rank and
+ * a broadcast.
  */
 template<typename T>
 std::vector<T> gatherFromAllRanks(const MpiComm&  mpiComm,
@@ -752,6 +761,17 @@ std::vector<T> gatherFromAllRanks(const MpiComm&  mpiComm,
         // thread-MPI cannot gather a buffer of zero total extent
         return received;
     }
+#    if GMX_LIB_MPI
+    MPI_Allgatherv(send->data(),
+                   counts[mpiComm.rank()],
+                   type,
+                   received.data(),
+                   counts.data(),
+                   displacements.data(),
+                   type,
+                   mpiComm.comm());
+#    else
+    // thread-MPI does not provide MPI_Allgatherv
     MPI_Gatherv(send->data(),
                 counts[mpiComm.rank()],
                 type,
@@ -762,6 +782,7 @@ std::vector<T> gatherFromAllRanks(const MpiComm&  mpiComm,
                 mpiComm.mainRank(),
                 mpiComm.comm());
     MPI_Bcast(received.data(), static_cast<int>(total), type, mpiComm.mainRank(), mpiComm.comm());
+#    endif
     return received;
 }
 

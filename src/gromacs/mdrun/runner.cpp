@@ -1912,13 +1912,15 @@ int Mdrunner::mdrunner()
                                                        plainPairlistRanges.ranges().end());
             if (fr->plainPairlistRange.value() > inputrec->rlist)
             {
-                // This is not nice. We could consider increasing rlist instead.
+                // We could consider increasing rlist instead.
                 const std::string mesg = formatString(
-                        "MDModules request a plain pairlist with a range of %f nm, which is larger "
-                        "than the normal pairlist range of %f nm",
+                        "An MDModule needs a pairlist with a range of %g nm, which is larger "
+                        "than the pairlist range of %g nm that follows from the cut-offs in "
+                        "the mdp file. Increase the cut-offs, or rlist, to at least %g nm.",
                         fr->plainPairlistRange.value(),
-                        inputrec->rlist);
-                GMX_THROW(APIError(mesg));
+                        inputrec->rlist,
+                        fr->plainPairlistRange.value());
+                GMX_THROW(InconsistentInputError(mesg));
             }
         }
 
